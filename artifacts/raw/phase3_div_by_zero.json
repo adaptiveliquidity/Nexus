@@ -1,0 +1,55 @@
+{
+  "error_log": {
+    "description": "Integer division by zero",
+    "error_type": "TRAP_DIV_BY_ZERO",
+    "failure_mode": "TrapDivByZero",
+    "id": "90a155d2-bc33-4301-b1ef-a6456b858a87",
+    "operation": "div_by_zero",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Integer divide-by-zero — guard the divisor (`if denom == 0 { return … }`) or use checked-division at the call site.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8999999761581421,
+        "description": "Audit the input contract that allowed a zero divisor through; validation at the boundary is the right fix.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT auto-retry with identical inputs; this failure is deterministic.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178376078605652,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1880556,
+      "timestamp": "2026-06-07T21:52:10.943306228Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:10.945644185Z",
+    "trigger_status": "Trapped"
+  },
+  "scenario": "div_by_zero",
+  "tool_output": {
+    "error": "Integer division by zero",
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "rollback_performed": true,
+    "success": false
+  }
+}

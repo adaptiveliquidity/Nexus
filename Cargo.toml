@@ -57,14 +57,35 @@ clap = { version = "4.5", features = ["derive"] }
 # WAT parsing for demos
 wat = "1.0"
 
+# Daemon framing (length-prefixed JSON) and base64 for wasm bytes.
+base64 = "0.22"
+futures = "0.3"
+
+# Optional, only with `ai-recovery` feature.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tokio-util = { version = "0.7", optional = true }
+
 [features]
 default = []
 component-model = []
+# Optional LLM-backed recovery suggester (Phase B). Off by default so
+# `cargo build` does not pull in HTTP / TLS / token-secret handling for
+# users who only want the static + instinct policies.
+ai-recovery = ["dep:reqwest", "dep:tokio-util"]
 
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.14"
 proptest = "1.5"
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+[[bin]]
+name = "nexus-agentd"
+path = "src/bin/nexus_agentd.rs"
+required-features = []
 
 [[bench]]
 name = "nexus_validation"

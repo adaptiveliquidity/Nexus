@@ -1,42 +1,27 @@
-;; Test payload WASM module for benchmarking
-;; Computes fibonacci(30) - deterministic, fixed iterations
+;; Deterministic compute payload for cross-platform benchmarking.
+;; Computes fibonacci(30) ten times and discards the result.
+;; This produces enough CPU work (~1.6M recursive calls) that microsecond-
+;; level startup overhead does not dominate the wall-clock measurement,
+;; while still being short enough to run hundreds of times under Hyperfine.
 (module
-  (func $fibonacci (param $n i32) (result i32)
+  (func $fib (param $n i32) (result i32)
+    (local $a i32)
+    (local $b i32)
     (if (i32.lt_s (local.get $n) (i32.const 2))
-      (return (local.get $n))
+      (then (return (local.get $n)))
     )
-    (if (i32.eq (local.get $n) (i32.const 2))
-      (return (i32.const 1))
-    )
-    (if (i32.eq (local.get $n) (i32.const 3))
-      (return (i32.const 2))
-    )
-    (call $fibonacci (i32.sub (local.get $n) (i32.const 1)))
-    (call $fibonacci (i32.sub (local.get $n) (i32.const 2)))
-    (i32.add)
+    (local.set $a (call $fib (i32.sub (local.get $n) (i32.const 1))))
+    (local.set $b (call $fib (i32.sub (local.get $n) (i32.const 2))))
+    (i32.add (local.get $a) (local.get $b))
   )
-  
+
   (func (export "_start")
-    ;; Run fibonacci 10 times
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
-    (call $fibonacci (i32.const 30))
-    (drop)
+    (local $i i32)
+    (local.set $i (i32.const 0))
+    (loop $repeat
+      (drop (call $fib (i32.const 30)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $repeat (i32.lt_s (local.get $i) (i32.const 10)))
+    )
   )
 )

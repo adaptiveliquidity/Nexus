@@ -8,25 +8,43 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-/// Health status of an execution
+/// Health status of an execution.
+///
+/// Phase A introduced `Trapped` and `InvalidModule` so the same enum can
+/// classify guest-side WASM traps (deterministic, instance-recoverable) and
+/// load/linking failures (no execution occurred, no rollback needed)
+/// separately from genuine host-state `Corrupted` events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthStatus {
     Healthy,
+    /// Genuine host-state corruption. Reserve for cases the rollback path
+    /// is actually fixing real damage; not the default for guest traps.
     Corrupted,
+    /// Wall-clock timeout (currently the 500 ms thread-based watchdog).
     Timeout,
+    /// CPU/memory/stack budget exhausted (excluding fuel).
     ResourceExhausted,
+    /// Fuel budget consumed (only emitted when fuel metering is enabled).
     FuelExhausted,
+    /// Deterministic WASM trap (`unreachable`, divide-by-zero, etc.). The
+    /// sandbox guard fired correctly and isolation held.
+    Trapped,
+    /// Module failed to load or link (missing entrypoint, validation error).
+    /// No execution occurred, no state mutation could have happened.
+    InvalidModule,
 }
 
 impl HealthStatus {
     pub fn is_healthy(&self) -> bool {
         matches!(self, HealthStatus::Healthy)
     }
-    
+
+    /// Whether this status requires rolling back captured state.
+    /// `InvalidModule` returns false because nothing executed.
     pub fn requires_rollback(&self) -> bool {
-        !matches!(self, HealthStatus::Healthy)
+        !matches!(self, HealthStatus::Healthy | HealthStatus::InvalidModule)
     }
-    
+
     pub fn category(&self) -> &'static str {
         match self {
             HealthStatus::Healthy => "SUCCESS",
@@ -34,6 +52,8 @@ impl HealthStatus {
             HealthStatus::Timeout => "TIMEOUT",
             HealthStatus::ResourceExhausted => "RESOURCE_EXHAUSTED",
             HealthStatus::FuelExhausted => "INFINITE_LOOP_PREVENTED",
+            HealthStatus::Trapped => "WASM_TRAP",
+            HealthStatus::InvalidModule => "INVALID_MODULE",
         }
     }
 }

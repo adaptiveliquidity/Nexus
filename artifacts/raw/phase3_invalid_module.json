@@ -1,0 +1,50 @@
+{
+  "error_log": {
+    "description": "Invalid WASM module: failed to compile: wasm[0]::function[0]",
+    "error_type": "INVALID_MODULE",
+    "failure_mode": {
+      "InvalidModule": "failed to compile: wasm[0]::function[0]"
+    },
+    "id": "fa2987e4-1e2c-492d-8d49-1c6b26866543",
+    "operation": "invalid_module",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Module failed to load: failed to compile: wasm[0]::function[0]. Re-validate the WASM bytes and the toolchain output before retrying.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT roll back; no execution occurred and no state was mutated.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178602576255798,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1945548,
+      "timestamp": "2026-06-07T21:52:11.047166782Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:11.049390099Z",
+    "trigger_status": "InvalidModule"
+  },
+  "scenario": "invalid_module",
+  "tool_output": {
+    "error": "Invalid WASM module: failed to compile: wasm[0]::function[0]",
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "rollback_performed": false,
+    "success": false
+  }
+}

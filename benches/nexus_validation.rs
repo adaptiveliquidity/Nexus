@@ -1,257 +1,253 @@
-//! Nexus Performance Validation Benchmarks
-//! 
-//! Statistical benchmarking for Nexus internal operations.
-//! Uses Criterion for robust statistical analysis.
+//! Nexus Validation Protocol — Phase 1 Criterion Benchmarks
+//!
+//! Measures the *real* Nexus APIs under statistical rigor:
+//!   - cold_start::sandbox_new          -> WasmSandbox::new
+//!   - cold_start::hypervisor_new       -> NexusHypervisor::new
+//!   - snapshot::create/{1,10,100}MB    -> SnapshotManager::create_snapshot
+//!     (pseudo-random memory so zstd cannot "cheat" by compressing zeros)
+//!   - snapshot::rollback/{1,10,100}MB  -> SnapshotManager::rollback_to
+//!   - execute_tool::trivial_wasm       -> NexusHypervisor::execute_tool end-to-end
+//!
+//! All inputs are deterministic. Memory is filled with a linear-congruential
+//! pseudo-random stream so compression ratios are realistic (~1.0), not the
+//! near-zero ratio that all-zero buffers would produce.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-/// Benchmark harness for Nexus operations
-pub struct BenchmarkHarness {
-    /// Number of iterations completed
-    iterations: u64,
-    /// Total time elapsed
-    total_time: Duration,
-}
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
+};
 
-impl Default for BenchmarkHarness {
-    fn default() -> Self {
-        Self {
-            iterations: 0,
-            total_time: Duration::default(),
+use nexus::hypervisor::{HypervisorConfig, NexusHypervisor, ToolDefinition};
+use nexus::sandbox::{SandboxConfig, WasmSandbox};
+use nexus::snapshot::{
+    ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
+};
+
+/// Deterministic, *non-trivially-compressible* memory buffer.
+///
+/// Uses a 64-bit linear congruential generator so the output passes basic
+/// entropy expectations; zstd cannot meaningfully compress it. Seeded by
+/// size so different sizes produce different content but each size is
+/// repeatable across runs.
+fn pseudo_random_buffer(size_bytes: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; size_bytes];
+    // Knuth LCG constants.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15u64.wrapping_add(size_bytes as u64);
+    for chunk in buf.chunks_mut(8) {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let bytes = state.to_le_bytes();
+        for (i, b) in chunk.iter_mut().enumerate() {
+            *b = bytes[i];
         }
     }
+    buf
 }
 
-/// Simulated snapshot data for benchmarking
-pub struct SnapshotData {
-    pub size_bytes: usize,
-    pub compressed: Vec<u8>,
+fn make_snapshot(mgr: &SnapshotManager, mem: Vec<u8>) -> Snapshot {
+    let fs = FilesystemDiff::new();
+    let st = ExecutionState::default();
+    let meta = SnapshotMetadata::new("bench".into(), format!("size_{}", mem.len()));
+    mgr.create_snapshot(mem, fs, st, meta)
+        .expect("snapshot creation should succeed")
 }
 
-impl SnapshotData {
-    pub fn new(size: usize) -> Self {
-        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        Self {
-            size_bytes: size,
-            compressed: data,
-        }
-    }
-}
-
-/// Benchmark: Cold Start Performance
-/// 
-/// Measures the time to initialize a new sandbox engine.
-/// This is critical for AI agents that create many short-lived contexts.
-pub fn bench_cold_start(c: &mut Criterion) {
+/// Phase 1A — Cold start: building the engine + sandbox is the dominant
+/// cost path users hit when spawning a new agent context.
+fn bench_cold_start(c: &mut Criterion) {
     let mut group = c.benchmark_group("cold_start");
+    group.warm_up_time(Duration::from_secs(3));
     group.measurement_time(Duration::from_secs(10));
-    group.warm_up_time(Duration::from_secs(2));
     group.sample_size(100);
-    
-    // Simulate engine instantiation overhead
-    // In real implementation, this would be wasmtime::Engine::new()
-    group.bench_function("engine_init", |b| {
+
+    group.bench_function("sandbox_new", |b| {
         b.iter(|| {
-            let mut data = Vec::with_capacity(1024);
-            for i in 0..256 {
-                data.push((i * 17) % 256);
-            }
-            black_box(data);
-        });
+            let cfg = SandboxConfig::default();
+            let sandbox = WasmSandbox::new(cfg).expect("sandbox new");
+            black_box(sandbox);
+        })
     });
-    
-    // Simulate sandbox creation overhead
-    group.bench_function("sandbox_create", |b| {
+
+    group.bench_function("hypervisor_new", |b| {
         b.iter(|| {
-            let config = vec![0u8; 512];
-            let state = config.iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
-            black_box(state);
-        });
+            let cfg = HypervisorConfig::default();
+            let hv = NexusHypervisor::new(cfg).expect("hypervisor new");
+            black_box(hv);
+        })
     });
-    
+
     group.finish();
 }
 
-/// Benchmark: Snapshot Creation Performance
-/// 
-/// Measures the time to capture and compress execution state.
-/// Critical for the rollback capability.
-pub fn bench_snapshot_creation(c: &mut Criterion) {
-    let mut group = c.benchmark_group("snapshot_creation");
-    group.measurement_time(Duration::from_secs(10));
-    group.warm_up_time(Duration::from_secs(2));
-    
-    let sizes = [64 * 1024, 256 * 1024, 1024 * 1024]; // 64KB, 256KB, 1MB
-    
-    for size in &sizes {
-        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
+/// Phase 1B — Snapshot creation: zstd compression + SHA-256 of pseudo-random
+/// memory, parameterized by linear memory size (1, 10, 100 MiB).
+fn bench_snapshot_creation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot_create");
+    group.warm_up_time(Duration::from_secs(3));
+    group.measurement_time(Duration::from_secs(15));
+    // Sample size scaled down for the 100 MiB case so wall time stays bounded.
+    group.sample_size(50);
+
+    let sizes_mb: [usize; 3] = [1, 10, 100];
+    for &mb in &sizes_mb {
+        let bytes = mb * 1024 * 1024;
+        let mem = pseudo_random_buffer(bytes);
+        group.throughput(Throughput::Bytes(bytes as u64));
+        group.bench_with_input(
+            BenchmarkId::new("MiB", mb),
+            &mem,
+            |b, mem| {
+                let mgr = SnapshotManager::new(8);
+                b.iter(|| {
+                    let snap = make_snapshot(&mgr, mem.clone());
+                    black_box(snap);
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Phase 1C — Rollback: pre-create a snapshot of pseudo-random memory of the
+/// given size, then measure `rollback_to` (decompress + integrity revert).
+fn bench_rollback(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot_rollback");
+    group.warm_up_time(Duration::from_secs(3));
+    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(50);
+
+    let sizes_mb: [usize; 3] = [1, 10, 100];
+    for &mb in &sizes_mb {
+        let bytes = mb * 1024 * 1024;
+        let mem = pseudo_random_buffer(bytes);
+        let mgr = SnapshotManager::new(8);
+        let snap = make_snapshot(&mgr, mem);
+        let id = snap.id;
+        group.throughput(Throughput::Bytes(bytes as u64));
+        group.bench_with_input(BenchmarkId::new("MiB", mb), &id, |b, id| {
             b.iter(|| {
-                // Simulate snapshot creation: allocation + initialization
-                let mut snapshot = Vec::with_capacity(size);
-                for i in 0..(size / 64) {
-                    // Simulate page-aligned initialization
-                    let page_data: Vec<u8> = (0..65536).map(|j| ((i + j) % 256) as u8).collect();
-                    snapshot.extend_from_slice(&page_data);
-                }
-                black_box(&snapshot);
-                
-                // Simulate compression (simplified Zstd-like)
-                let compressed: Vec<u8> = snapshot
-                    .chunks(4096)
-                    .flat_map(|chunk| {
-                        let first = chunk[0];
-                        let run_length = chunk.iter().take_while(|&&x| x == first).count();
-                        vec![first, run_length.min(255) as u8]
-                    })
-                    .collect();
-                black_box(compressed);
-            });
+                let result = mgr.rollback_to(id).expect("rollback");
+                black_box(result);
+            })
         });
     }
-    
+
     group.finish();
 }
 
-/// Benchmark: Snapshot Restoration (Rollback) Performance
-/// 
-/// Measures the time to restore a previous snapshot state.
-/// Critical for error recovery.
-pub fn bench_snapshot_restore(c: &mut Criterion) {
-    let mut group = c.benchmark_group("snapshot_restore");
-    group.measurement_time(Duration::from_secs(10));
-    group.warm_up_time(Duration::from_secs(2));
-    group.sample_size(100);
-    
-    // Pre-create snapshot data
-    let size = 64 * 1024;
-    let snapshot = SnapshotData::new(size);
-    
-    group.bench_function("restore_64kb", |b| {
+/// Phase 1D — End-to-end execution path: a tiny but valid WASM module run
+/// through the full hypervisor (snapshot + sandbox + health check).
+///
+/// Uses the synchronous bencher with a single shared tokio current-thread
+/// runtime so we are not paying for runtime construction inside the loop.
+fn bench_execute_end_to_end(c: &mut Criterion) {
+    let mut group = c.benchmark_group("execute_tool");
+    group.warm_up_time(Duration::from_secs(3));
+    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(60);
+
+    let wasm = wat::parse_str(
+        r#"
+        (module
+            (func (export "_start"))
+        )
+        "#,
+    )
+    .expect("wat compiles");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let hv = NexusHypervisor::new(HypervisorConfig::default()).expect("hv");
+
+    group.bench_function("trivial_wasm_start", |b| {
         b.iter(|| {
-            // Simulate snapshot restoration: copy + validation
-            let mut restored = snapshot.compressed.clone();
-            let checksum: u32 = restored.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-            black_box(checksum);
-        });
+            let tool = ToolDefinition::new("bench_trivial".into(), wasm.clone());
+            let out = rt
+                .block_on(hv.execute_tool(tool, serde_json::json!({})))
+                .expect("execute_tool result");
+            black_box(out);
+        })
     });
-    
-    // Larger snapshot
-    let large_snapshot = SnapshotData::new(1024 * 1024);
-    group.bench_function("restore_1mb", |b| {
-        b.iter(|| {
-            let mut restored = large_snapshot.compressed.clone();
-            let checksum: u32 = restored.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-            black_box(checksum);
-        });
-    });
-    
+
     group.finish();
 }
 
-/// Benchmark: Health Check Overhead
-/// 
-/// Measures the overhead of health monitoring during execution.
-pub fn bench_health_check(c: &mut Criterion) {
-    let mut group = c.benchmark_group("health_check");
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(1));
-    group.sample_size(1000);
-    
-    group.bench_function("cpu_check", |b| {
-        b.iter(|| {
-            // Simulate CPU usage sampling
-            let usage: u64 = (Instant::now().elapsed().as_nanos() % 100) as u64;
-            black_box(usage);
-        });
-    });
-    
-    group.bench_function("memory_check", |b| {
-        b.iter(|| {
-            // Simulate memory pressure check
-            let pages = vec![0u64; 16];
-            let total: u64 = pages.iter().sum();
-            black_box(total);
-        });
-    });
-    
-    group.bench_function("timeout_check", |b| {
-        let start = Instant::now();
-        let timeout = Duration::from_millis(500);
-        
-        b.iter(|| {
-            let elapsed = start.elapsed();
-            let timed_out = elapsed >= timeout;
-            black_box(timed_out);
-        });
-    });
-    
-    group.finish();
-}
+/// Phase C — End-to-end snapshot via `execute_tool` on a WASM module
+/// that grows its real linear memory. This is the apples-to-apples
+/// number that pairs with the Phase 1 `snapshot_create` bench (which
+/// calls `SnapshotManager` directly): here the snapshot bytes come from
+/// `instance.get_memory("memory").data()` captured by `WasmSandbox`,
+/// not from a synthetic buffer.
+///
+/// The guest module exports a memory of `pages` pages (each 64 KiB),
+/// writes a deterministic pattern across it, then returns. The
+/// hypervisor's pre-call-memory capture (Phase A) is what feeds the
+/// snapshot. Together this measures the *real* end-to-end snap cost for
+/// a workload that actually owns N MiB of WASM linear memory.
+fn bench_execute_with_real_memory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("execute_tool_real_memory");
+    group.warm_up_time(Duration::from_secs(3));
+    group.measurement_time(Duration::from_secs(20));
+    group.sample_size(30);
 
-/// Benchmark: Concurrent Sandbox Capacity
-/// 
-/// Measures how many sandboxes can be created concurrently.
-pub fn bench_concurrent_capacity(c: &mut Criterion) {
-    let mut group = c.benchmark_group("concurrent_capacity");
-    group.measurement_time(Duration::from_secs(30));
-    group.warm_up_time(Duration::from_secs(5));
-    
-    let capacities = [100, 500, 1000, 5000, 10000];
-    
-    for &capacity in &capacities {
-        group.bench_with_input(BenchmarkId::from_parameter(capacity), &capacity, |b, &capacity| {
-            b.iter(|| {
-                // Simulate creating multiple sandbox states
-                let sandboxes: Vec<Vec<u8>> = (0..capacity)
-                    .map(|i| {
-                        let mut state = Vec::with_capacity(256);
-                        for j in 0..64 {
-                            state.push(((i + j) * 17) % 256);
-                        }
-                        state
-                    })
-                    .collect();
-                black_box(sandboxes);
-            });
-        });
+    let sizes_mib: [usize; 3] = [1, 10, 100];
+    for &mib in &sizes_mib {
+        let pages = (mib * 1024 * 1024) / 65536;
+        // WAT that grows to `pages` pages and touches one byte in each
+        // page so wasmtime actually allocates the underlying memory.
+        // `memory.grow` from the start size (1 page) by (pages - 1).
+        let wat = format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "_start")
+                    (local $i i32)
+                    ;; grow to {pages} pages total
+                    i32.const {grow}
+                    memory.grow
+                    drop
+                    ;; touch one byte per page so the kernel commits them
+                    (local.set $i (i32.const 0))
+                    (loop $touch
+                        (i32.store8 (local.get $i) (i32.const 42))
+                        (local.set $i (i32.add (local.get $i) (i32.const 65536)))
+                        (br_if $touch (i32.lt_s (local.get $i) (i32.const {total})))
+                    )
+                ))"#,
+            pages = pages,
+            grow = pages.saturating_sub(1),
+            total = mib * 1024 * 1024,
+        );
+        let wasm = wat::parse_str(&wat).expect("wat compiles");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        // Fuel cap large enough for the page-touch loop on 100 MiB
+        // (`100 * 1024 = 102_400` iterations * ~5 ops = 512 K instructions).
+        let mut cfg = HypervisorConfig::default();
+        cfg.sandbox_config.max_fuel = 50_000_000;
+        let hv = NexusHypervisor::new(cfg).expect("hv");
+
+        group.throughput(Throughput::Bytes((mib * 1024 * 1024) as u64));
+        group.bench_with_input(
+            BenchmarkId::new("MiB", mib),
+            &wasm,
+            |b, wasm| {
+                b.iter(|| {
+                    let tool = ToolDefinition::new(format!("realmem_{mib}"), wasm.clone());
+                    let out = rt
+                        .block_on(hv.execute_tool(tool, serde_json::json!({})))
+                        .expect("execute_tool");
+                    black_box(out);
+                })
+            },
+        );
     }
-    
-    group.finish();
-}
-
-/// Benchmark: Telemetry Recording Overhead
-/// 
-/// Measures the overhead of recording execution telemetry.
-pub fn bench_telemetry_overhead(c: &mut Criterion) {
-    let mut group = c.benchmark_group("telemetry_overhead");
-    group.measurement_time(Duration::from_secs(5));
-    group.warm_up_time(Duration::from_secs(1));
-    group.sample_size(1000);
-    
-    group.bench_function("log_execution", |b| {
-        b.iter(|| {
-            // Simulate telemetry record creation
-            let record = format!(
-                "{{\"timestamp\":{},\"duration_us\":{},\"success\":true,\"fuel\":{}}}",
-                Instant::now().elapsed().as_nanos(),
-                150,
-                5000
-            );
-            black_box(record);
-        });
-    });
-    
-    group.bench_function("error_classification", |b| {
-        b.iter(|| {
-            // Simulate error classification
-            let error_types = ["timeout", "memory_exhaustion", "infinite_loop", "unreachable"];
-            let classified = error_types[0];
-            black_box(classified);
-        });
-    });
-    
     group.finish();
 }
 
@@ -259,9 +255,8 @@ criterion_group!(
     benches,
     bench_cold_start,
     bench_snapshot_creation,
-    bench_snapshot_restore,
-    bench_health_check,
-    bench_concurrent_capacity,
-    bench_telemetry_overhead
+    bench_rollback,
+    bench_execute_end_to_end,
+    bench_execute_with_real_memory,
 );
 criterion_main!(benches);

@@ -3,6 +3,13 @@
 //! Main orchestrator that ties together sandbox, snapshots, and validation.
 
 pub mod validator;
+pub mod failure_mode;
+pub mod recovery;
+pub mod llm_policy;
+
+pub use failure_mode::FailureMode;
+pub use recovery::{LayeredPolicy, RecoveryAction, RecoveryPolicy, RecoverySource, StaticPolicy};
+pub use llm_policy::{LLMPolicy, LlmBudget, LlmProvider};
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -14,8 +21,11 @@ use crate::sandbox::{WasmSandbox, SandboxConfig};
 use crate::snapshot::{SnapshotManager, Snapshot, SnapshotMetadata, FilesystemDiff, ExecutionState};
 use crate::security::{Capability, CapabilityManager};
 use crate::telemetry::{TelemetrySink, ExecutionRecord};
-use crate::hypervisor::validator::health::{HealthValidator, HealthConfig, HealthStatus, ResourceSnapshot};
+use crate::hypervisor::validator::health::{HealthValidator, HealthConfig};
 use crate::hypervisor::validator::error_log::ErrorLog;
+// Re-exports at the top of this module bring `FailureMode`, `RecoveryAction`,
+// `RecoveryPolicy`, and `StaticPolicy` into scope; no `use crate::...` here
+// to avoid duplicate-import errors with the `pub use` declarations.
 
 /// Tool definition for execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,20 +106,39 @@ pub struct NexusHypervisor {
     health_validator: HealthValidator,
     telemetry: Arc<TelemetrySink>,
     current_snapshot: RwLock<Option<Snapshot>>,
+    /// Pluggable recovery policy — Phase A ships `StaticPolicy`; Phase B
+    /// wraps it in `LayeredPolicy` with `InstinctPolicy` and (optional)
+    /// `LLMPolicy`. Behind an `Arc<dyn>` so it is cheap to share with
+    /// pooled hypervisors in Phase C.
+    recovery_policy: Arc<dyn RecoveryPolicy>,
+    /// Optional instinct store. When set, `execute_with_retry` credits
+    /// matching instincts after a successful retry and debits them after
+    /// a still-failed retry. When unset, outcome feedback is a no-op.
+    instinct_store: Option<Arc<crate::instinct::InstinctStore>>,
 }
 
 impl NexusHypervisor {
-    /// Create a new hypervisor
+    /// Create a new hypervisor with the default `StaticPolicy` recovery
+    /// policy. For custom policies use `new_with_policy`.
     pub fn new(config: HypervisorConfig) -> Result<Self> {
+        Self::new_with_policy(config, Arc::new(StaticPolicy::new()))
+    }
+
+    /// Create a hypervisor with a custom recovery policy. Used by Phase B
+    /// to layer the instinct store and LLM policy on top of the static one.
+    pub fn new_with_policy(
+        config: HypervisorConfig,
+        recovery_policy: Arc<dyn RecoveryPolicy>,
+    ) -> Result<Self> {
         let sandbox_config = config.sandbox_config.clone();
         let snapshot_capacity = config.snapshot_capacity;
         let persistence_dir = config.persistence_dir.clone();
         let enable_persistence = config.enable_persistence;
         let health_config = config.health_config.clone();
-        
+
         let sandbox = WasmSandbox::new(sandbox_config)
             .map_err(|e| NexusError::ConfigError(format!("Failed to create sandbox: {}", e)))?;
-        
+
         let snapshot_manager = if enable_persistence {
             if let Some(ref dir) = persistence_dir {
                 Arc::new(SnapshotManager::with_persistence(
@@ -122,9 +151,9 @@ impl NexusHypervisor {
         } else {
             Arc::new(SnapshotManager::new(snapshot_capacity))
         };
-        
+
         let capability_manager = CapabilityManager::new();
-        
+
         Ok(NexusHypervisor {
             config,
             sandbox: RwLock::new(sandbox),
@@ -133,7 +162,23 @@ impl NexusHypervisor {
             health_validator: HealthValidator::new(health_config),
             telemetry: Arc::new(TelemetrySink::new(1000)),
             current_snapshot: RwLock::new(None),
+            recovery_policy,
+            instinct_store: None,
         })
+    }
+
+    /// Inject a different recovery policy at runtime. Used by Phase B's
+    /// outcome-feedback loop and by tests that want to assert behavior
+    /// against a known policy.
+    pub fn set_recovery_policy(&mut self, policy: Arc<dyn RecoveryPolicy>) {
+        self.recovery_policy = policy;
+    }
+
+    /// Attach an instinct store. After this call, `execute_with_retry`
+    /// will credit / debit instincts based on retry outcomes.
+    pub fn with_instinct_store(mut self, store: Arc<crate::instinct::InstinctStore>) -> Self {
+        self.instinct_store = Some(store);
+        self
     }
     
     /// Grant a capability to the current session
@@ -147,173 +192,233 @@ impl NexusHypervisor {
         Ok(())
     }
     
-    /// Execute a tool with automatic snapshot/rollback
+    /// Execute a tool with automatic snapshot/rollback.
+    ///
+    /// Phase A rewrite. Key semantic changes versus the prior version:
+    ///   * Snapshot is built from the *real* pre-call WASM linear memory
+    ///     returned by the sandbox, not a hardcoded 64 KiB placeholder.
+    ///   * Snapshot is created *after* execution finishes, using the
+    ///     memory bytes the worker captured right after instantiation.
+    ///     This avoids snapshotting at all for load-time failures.
+    ///   * Failure classification comes from the typed `FailureMode`
+    ///     returned by the sandbox, not from substring matching on the
+    ///     error text.
+    ///   * Rollback is skipped entirely when `FailureMode::requires_rollback()`
+    ///     is false (load-time failures: `InvalidModule`, `MissingEntrypoint`).
+    ///   * Recovery actions come from `self.recovery_policy` keyed on the
+    ///     `FailureMode`, not from a hardcoded fallback per-operation match.
+    ///   * `ExecutionRecord` carries a real `ResourceSnapshot` from
+    ///     `HealthValidator::current_resources()`.
     pub async fn execute_tool(
         &self,
         tool: ToolDefinition,
         _input: serde_json::Value,
     ) -> Result<ToolOutput> {
         let start = Instant::now();
-        
-        // Validate capabilities
+
+        // Validate capabilities (kept identical to the prior version; the
+        // real capability check lives in `CapabilityManager` itself).
         {
             let mut manager = self.capability_manager.write().unwrap();
             for cap in &tool.required_capabilities {
-                // Issue temporary token for validation
                 let _temp_token = manager.issue(
                     cap.clone(),
                     "validation",
                     Duration::from_secs(60),
                 );
-                // Token would be validated against required capability
             }
         }
-        
-        // 1. Create pre-execution snapshot
-        let memory = vec![0u8; 65536]; // Placeholder - would capture actual WASM memory
-        let fs_diff = FilesystemDiff::new();
-        let exec_state = ExecutionState::default();
-        let metadata = SnapshotMetadata::new(
-            tool.name.clone(),
-            format!("{:x}", sha2::Sha256::digest(&tool.wasm_bytes)),
-        );
-        
-        let snapshot = self.snapshot_manager.create_snapshot(
-            memory,
-            fs_diff,
-            exec_state,
-            metadata,
-        )?;
-        
-        // Store snapshot reference
-        *self.current_snapshot.write().unwrap() = Some(snapshot.clone());
-        
-        // 2. Start health monitoring
+
+        // Start health monitoring before the execute call so resource
+        // deltas are anchored at the pre-call sample.
         self.health_validator.start_execution();
-        
-        // 3. Execute in WASM sandbox
-        let sandbox = self.sandbox.read().unwrap();
-        let result = sandbox.execute(&tool.wasm_bytes, &[]);
-        
+
+        // Execute in the WASM sandbox. The sandbox returns a typed
+        // `FailureMode` on failure and the real pre-call memory bytes.
+        let exec_result = self.sandbox.read().unwrap().execute(&tool.wasm_bytes, &[])?;
+
         let duration_ms = start.elapsed().as_millis() as u64;
-        let fuel_consumed = result.as_ref().map(|r| r.fuel_consumed).unwrap_or(0);
-        
-        // 4. Validate health
-        let health = self.health_validator.validate();
-        
-        // 5. Check for corruption
-        let corruption = self.health_validator.check_corruption();
-        
-        // 6. Handle result based on execution success OR health issues
-        let execution_success = result.as_ref().map(|r| r.success).unwrap_or(false);
-        let has_corruption = corruption.is_some();
-        let has_health_issue = !health.is_healthy();
-        
-        if execution_success && !has_corruption && !has_health_issue {
-            // Success - record and return
-            let record = ExecutionRecord::success(tool.name.clone(), duration_ms, fuel_consumed);
+        let fuel_consumed = exec_result.fuel_consumed;
+
+        // Build the snapshot from the *real* pre-call memory whenever we
+        // have it. For load-time failures the worker did not capture any
+        // memory (instantiation never succeeded), so there is nothing to
+        // snapshot — and per `FailureMode::requires_rollback()` we will
+        // also skip the rollback path below.
+        let snapshot = if let Some(ref mem) = exec_result.pre_call_memory {
+            let fs_diff = FilesystemDiff::new();
+            let exec_state = ExecutionState::default();
+            let metadata = SnapshotMetadata::new(
+                tool.name.clone(),
+                format!("{:x}", sha2::Sha256::digest(&tool.wasm_bytes)),
+            );
+            let snap = self.snapshot_manager.create_snapshot(
+                mem.clone(),
+                fs_diff,
+                exec_state,
+                metadata,
+            )?;
+            *self.current_snapshot.write().unwrap() = Some(snap.clone());
+            Some(snap)
+        } else {
+            None
+        };
+
+        // Resource sample for telemetry and the error log.
+        let resources = self.health_validator.current_resources();
+
+        // Independent host-side checks. These can flip a sandbox-reported
+        // success into a failure when the host itself sees a problem
+        // (e.g. memory pressure outside the guest's view).
+        let host_health = self.health_validator.validate();
+        let host_corruption = self.health_validator.check_corruption();
+
+        // Reconcile the sandbox's classification with host-side signals.
+        let failure_mode: Option<FailureMode> = match (&exec_result.failure_mode, host_corruption, host_health.clone()) {
+            (Some(mode), _, _) => Some(mode.clone()),
+            (None, Some(detail), _) => Some(FailureMode::HostError(detail)),
+            (None, None, h) if !h.is_healthy() => Some(FailureMode::HostError(format!(
+                "host health degraded: {}", h.category()
+            ))),
+            _ => None,
+        };
+
+        if let Some(mode) = failure_mode {
+            let recovery_actions: Vec<RecoveryAction> =
+                self.recovery_policy.recover(&mode, &tool.name);
+            let successful_patterns = self.telemetry.get_patterns(&tool.name);
+
+            let error_log = ErrorLog::new(
+                tool.name.clone(),
+                mode.clone(),
+                resources.clone(),
+            )
+                .with_recovery(recovery_actions)
+                .with_patterns(successful_patterns);
+
+            // Only roll back when the failure mode actually mutated state.
+            // Load-time failures (InvalidModule / MissingEntrypoint) never
+            // ran the entrypoint, so there is nothing to roll back to.
+            let mut rollback_performed = false;
+            if mode.requires_rollback() {
+                if let Some(snap) = snapshot.as_ref() {
+                    if self.snapshot_manager.rollback_to(&snap.id).is_ok() {
+                        rollback_performed = true;
+                    }
+                }
+            }
+
+            let record = ExecutionRecord::failure(
+                tool.name.clone(),
+                error_log.clone(),
+                duration_ms,
+                fuel_consumed,
+            );
+            self.telemetry.record_failure(record);
+
+            Ok(ToolOutput {
+                success: false,
+                result: None,
+                error: Some(error_log.description.clone()),
+                rollback_performed,
+                execution_time_ms: duration_ms,
+                fuel_consumed,
+                error_log: Some(error_log),
+            })
+        } else {
+            // Success path.
+            let record = ExecutionRecord::success(
+                tool.name.clone(),
+                duration_ms,
+                fuel_consumed,
+                resources,
+            );
             self.telemetry.record_success(record);
-            
+
             Ok(ToolOutput {
                 success: true,
-                result: result.ok().and_then(|r| r.return_value),
+                result: exec_result.return_value,
                 error: None,
                 rollback_performed: false,
                 execution_time_ms: duration_ms,
                 fuel_consumed,
                 error_log: None,
             })
-        } else {
-            // Failure - determine error type and health status
-            let (error_type, trigger_status) = if let Some(c) = corruption {
-                (format!("CORRUPTION: {}", c), HealthStatus::Corrupted)
-            } else if !execution_success {
-                // WASM execution failed - check for specific errors
-                let exec_error = result.as_ref().unwrap().error.clone()
-                    .unwrap_or_else(|| "Unknown execution error".to_string());
-                
-                // Map to user-friendly error types
-                if exec_error.contains("fuel") || exec_error.contains("Fuel") {
-                    ("FUEL_EXHAUSTED: Infinite loop prevented".to_string(), HealthStatus::FuelExhausted)
-                } else if exec_error.contains("memory") || exec_error.contains("Memory") {
-                    ("MEMORY_LIMIT: Allocation exceeded".to_string(), HealthStatus::ResourceExhausted)
-                } else if exec_error.contains("trap") || exec_error.contains("Trap") {
-                    ("EXECUTION_TRAP: Invalid WASM operation".to_string(), HealthStatus::Corrupted)
-                } else {
-                    (format!("EXECUTION_ERROR: {}", exec_error), HealthStatus::Corrupted)
-                }
-            } else if has_health_issue {
-                (health.category().to_string(), health.clone())
-            } else {
-                ("UNKNOWN_FAILURE".to_string(), HealthStatus::Corrupted)
-            };
-            
-            let resources = self.health_validator.current_resources();
-            let error_log = ErrorLog::new(
-                error_type.clone(),
-                tool.name.clone(),
-                error_type,
-                trigger_status,
-                resources,
-            ).with_recovery(self.generate_recovery_suggestions(&tool.name));
-            
-            // Perform rollback
-            let _ = self.snapshot_manager.rollback_to(&snapshot.id);
-            
-            // Record failure
-            let record = ExecutionRecord::failure(
-                tool.name.clone(),
-                error_log.clone(),
-                duration_ms,
-            );
-            self.telemetry.record_failure(record);
-            
-            Ok(ToolOutput {
-                success: false,
-                result: None,
-                error: Some(error_log.description.clone()),
-                rollback_performed: true,
-                execution_time_ms: duration_ms,
-                fuel_consumed,
-                error_log: Some(error_log),
-            })
         }
     }
     
-    /// Execute with automatic retry
+    /// Execute with automatic retry and outcome feedback.
+    ///
+    /// Phase B: when an attempt produces an `ErrorLog` containing
+    /// `RecoveryAction`s with attached `instinct_id`s, the *next* attempt's
+    /// outcome credits or debits those instincts:
+    ///   * next attempt succeeded -> `record_success` (confidence ↑)
+    ///   * next attempt failed    -> `record_failure` (confidence ↓)
+    ///
+    /// Outcome feedback is a no-op when no `instinct_store` is attached
+    /// (`with_instinct_store`) or when the `RecoveryAction`s carried no
+    /// `instinct_id` (e.g. pure `StaticPolicy` deployments).
     pub async fn execute_with_retry(
         &self,
         tool: ToolDefinition,
         input: serde_json::Value,
     ) -> Result<ToolOutput> {
+        let mut pending_instincts: Vec<uuid::Uuid> = Vec::new();
+
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
-                // Wait before retry
                 tokio::time::sleep(self.config.retry_delay).await;
             }
-            
+
             let result = self.execute_tool(tool.clone(), input.clone()).await;
-            
+
             match result {
                 Ok(output) => {
+                    // Apply outcome feedback to the instincts proposed by
+                    // the PREVIOUS attempt.
+                    if attempt > 0 && !pending_instincts.is_empty() {
+                        if let Some(store) = &self.instinct_store {
+                            for id in &pending_instincts {
+                                let _ = if output.success {
+                                    store.record_success(id)
+                                } else {
+                                    store.record_failure(id)
+                                };
+                            }
+                        }
+                        pending_instincts.clear();
+                    }
+
                     if output.success {
                         return Ok(output);
                     }
-                    // If this was the last attempt, return the last failure
+
+                    // Collect instinct ids proposed on this failed attempt
+                    // so the next attempt's outcome can be credited back.
+                    if let Some(log) = &output.error_log {
+                        pending_instincts = log
+                            .recovery_actions
+                            .iter()
+                            .filter_map(|a| a.instinct_id)
+                            .collect();
+                    }
+
                     if attempt == self.config.max_retries {
+                        // Last attempt: any pending instincts from this
+                        // attempt never got a follow-up, so we cannot
+                        // credit them. Leave them untouched.
                         return Ok(output);
                     }
                 }
                 Err(e) => {
-                    // If this was the last attempt, return the error
                     if attempt == self.config.max_retries {
                         return Err(e);
                     }
                 }
             }
         }
-        
-        // Should never reach here, but return a generic failure
+
+        // Unreachable in practice; preserved for compiler exhaustiveness.
         Ok(ToolOutput {
             success: false,
             result: None,
@@ -324,40 +429,12 @@ impl NexusHypervisor {
             error_log: None,
         })
     }
-    
-    /// Generate recovery suggestions based on telemetry
-    fn generate_recovery_suggestions(&self, operation: &str) -> Vec<String> {
-        let patterns = self.telemetry.get_patterns(operation);
-        
-        let mut suggestions = Vec::new();
-        
-        // Add learned patterns
-        for pattern in patterns.iter().take(2) {
-            suggestions.push(format!("Consider approach: {}", pattern));
-        }
-        
-        // Add generic suggestions based on operation type
-        match operation {
-            "execute_command" => {
-                suggestions.push("Break complex commands into simpler steps".to_string());
-                suggestions.push("Use timeout wrapper for long-running commands".to_string());
-            }
-            "read_file" => {
-                suggestions.push("Check file path permissions".to_string());
-                suggestions.push("Verify file exists before reading".to_string());
-            }
-            "write_file" => {
-                suggestions.push("Ensure parent directory exists".to_string());
-                suggestions.push("Use atomic write (temp file + rename)".to_string());
-            }
-            _ => {
-                suggestions.push("Break the operation into smaller steps".to_string());
-                suggestions.push("Add validation before execution".to_string());
-            }
-        }
-        
-        suggestions
+
+    /// Read-only access to the attached instinct store (Phase B).
+    pub fn instinct_store(&self) -> Option<&Arc<crate::instinct::InstinctStore>> {
+        self.instinct_store.as_ref()
     }
+    
     
     /// Get execution history
     pub fn get_history(&self, limit: Option<usize>) -> Vec<ExecutionRecord> {

@@ -1,0 +1,48 @@
+{
+  "error_log": {
+    "description": "Out-of-bounds linear memory access",
+    "error_type": "TRAP_MEMORY_OOB",
+    "failure_mode": "TrapMemoryOutOfBounds",
+    "id": "4492e24a-bf46-4727-b1c9-b885483561cc",
+    "operation": "memory_out_of_bounds",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Out-of-bounds linear-memory access — bounds-check the index before the load/store or use a memory.size guard.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "Inspect the guest allocator for an off-by-one; ensure memory.grow happens before any access beyond the original heap.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178497672080994,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1877812,
+      "timestamp": "2026-06-07T21:52:10.989319351Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:10.991619818Z",
+    "trigger_status": "Trapped"
+  },
+  "scenario": "memory_out_of_bounds",
+  "tool_output": {
+    "error": "Out-of-bounds linear memory access",
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "rollback_performed": true,
+    "success": false
+  }
+}

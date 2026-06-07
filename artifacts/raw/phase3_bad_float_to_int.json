@@ -1,0 +1,48 @@
+{
+  "error_log": {
+    "description": "Invalid float-to-integer conversion",
+    "error_type": "TRAP_BAD_FLOAT_TO_INT",
+    "failure_mode": "TrapBadConversionToInteger",
+    "id": "385ed25a-dde2-4acd-adf7-8de8564b9693",
+    "operation": "bad_float_to_int",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Float-to-int conversion produced an out-of-range or NaN value; use a saturating-conversion variant or clamp the input.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "If the source float is NaN, treat that case explicitly instead of converting.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178584694862366,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1883176,
+      "timestamp": "2026-06-07T21:52:11.033635646Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:11.035525499Z",
+    "trigger_status": "Trapped"
+  },
+  "scenario": "bad_float_to_int",
+  "tool_output": {
+    "error": "Invalid float-to-integer conversion",
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "rollback_performed": true,
+    "success": false
+  }
+}

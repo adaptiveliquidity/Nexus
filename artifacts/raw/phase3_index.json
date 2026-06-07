@@ -1,0 +1,316 @@
+[
+  {
+    "scenario": "bad_float_to_int",
+    "path": "artifacts/raw/phase3_bad_float_to_int.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "failure_mode": "TrapBadConversionToInteger",
+    "error_type": "TRAP_BAD_FLOAT_TO_INT",
+    "description": "Invalid float-to-integer conversion",
+    "trigger_status": "Trapped",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Float-to-int conversion produced an out-of-range or NaN value; use a saturating-conversion variant or clamp the input.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "If the source float is NaN, treat that case explicitly instead of converting.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Invalid float-to-integer conversion"
+  },
+  {
+    "scenario": "div_by_zero",
+    "path": "artifacts/raw/phase3_div_by_zero.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "failure_mode": "TrapDivByZero",
+    "error_type": "TRAP_DIV_BY_ZERO",
+    "description": "Integer division by zero",
+    "trigger_status": "Trapped",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Integer divide-by-zero \u2014 guard the divisor (`if denom == 0 { return \u2026 }`) or use checked-division at the call site.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8999999761581421,
+        "description": "Audit the input contract that allowed a zero divisor through; validation at the boundary is the right fix.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT auto-retry with identical inputs; this failure is deterministic.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Integer division by zero"
+  },
+  {
+    "scenario": "indirect_call_null",
+    "path": "artifacts/raw/phase3_indirect_call_null.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 2,
+    "fuel_consumed": 3,
+    "failure_mode": "TrapIndirectCallToNull",
+    "error_type": "TRAP_INDIRECT_NULL",
+    "description": "Indirect call to a null table entry",
+    "trigger_status": "Trapped",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Indirect call to a null table slot \u2014 populate the table entry with `table.set` before the call, or guard the slot at the call site.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Indirect call to a null table entry"
+  },
+  {
+    "scenario": "infinite_loop",
+    "path": "artifacts/raw/phase3_infinite_loop.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 5,
+    "fuel_consumed": 10000000,
+    "failure_mode": {
+      "FuelExhausted": {
+        "limit": 10000000
+      }
+    },
+    "error_type": "FUEL_EXHAUSTED",
+    "description": "Fuel budget of 10000000 instructions exhausted",
+    "trigger_status": "FuelExhausted",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Fuel budget of 10000000 instructions was consumed; the guard worked as designed.",
+        "instinct_id": null,
+        "non_retryable": false,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8999999761581421,
+        "description": "Profile the WASM to find the hot loop, then either reduce its iteration count or raise the per-tool fuel cap with an explicit business rationale.",
+        "instinct_id": null,
+        "non_retryable": false,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.699999988079071,
+        "description": "Consider iterative or memoized algorithms instead of naive recursion/iteration over large inputs.",
+        "instinct_id": null,
+        "non_retryable": false,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Fuel budget of 10000000 instructions exhausted"
+  },
+  {
+    "scenario": "integer_overflow",
+    "path": "artifacts/raw/phase3_integer_overflow.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "failure_mode": "TrapIntegerOverflow",
+    "error_type": "TRAP_INTEGER_OVERFLOW",
+    "description": "Integer overflow",
+    "trigger_status": "Trapped",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Integer overflow trap \u2014 switch to wrapping/saturating arithmetic at the offending op, or widen the type.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "Add a range check at the input boundary so out-of-range values are rejected before they reach the arithmetic.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Integer overflow"
+  },
+  {
+    "scenario": "invalid_module",
+    "path": "artifacts/raw/phase3_invalid_module.json",
+    "success": false,
+    "rollback_performed": false,
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "failure_mode": {
+      "InvalidModule": "failed to compile: wasm[0]::function[0]"
+    },
+    "error_type": "INVALID_MODULE",
+    "description": "Invalid WASM module: failed to compile: wasm[0]::function[0]",
+    "trigger_status": "InvalidModule",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Module failed to load: failed to compile: wasm[0]::function[0]. Re-validate the WASM bytes and the toolchain output before retrying.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT roll back; no execution occurred and no state was mutated.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Invalid WASM module: failed to compile: wasm[0]::function[0]"
+  },
+  {
+    "scenario": "memory_out_of_bounds",
+    "path": "artifacts/raw/phase3_memory_out_of_bounds.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "failure_mode": "TrapMemoryOutOfBounds",
+    "error_type": "TRAP_MEMORY_OOB",
+    "description": "Out-of-bounds linear memory access",
+    "trigger_status": "Trapped",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Out-of-bounds linear-memory access \u2014 bounds-check the index before the load/store or use a memory.size guard.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "Inspect the guest allocator for an off-by-one; ensure memory.grow happens before any access beyond the original heap.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Out-of-bounds linear memory access"
+  },
+  {
+    "scenario": "missing_start",
+    "path": "artifacts/raw/phase3_missing_start.json",
+    "success": false,
+    "rollback_performed": false,
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "failure_mode": {
+      "MissingEntrypoint": {
+        "expected": "_start"
+      }
+    },
+    "error_type": "MISSING_ENTRYPOINT",
+    "description": "Module has no exported `_start` function",
+    "trigger_status": "InvalidModule",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Module exports no `_start` (or fallback `main`) function. Verify entrypoint at build time, or configure the executor to call the correct export explicitly.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT roll back; nothing executed.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Module has no exported `_start` function"
+  },
+  {
+    "scenario": "stack_overflow",
+    "path": "artifacts/raw/phase3_stack_overflow.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 3,
+    "fuel_consumed": 32758,
+    "failure_mode": "TrapStackOverflow",
+    "error_type": "TRAP_STACK_OVERFLOW",
+    "description": "Call stack exhausted (recursion / stack budget)",
+    "trigger_status": "ResourceExhausted",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Call stack exhausted \u2014 convert the recursive function to iteration, add an explicit depth bound, or restructure into trampolines.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "Reject modules with unbounded recursion at validation; only legitimately deep, bounded workloads should raise the stack limit.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "Call stack exhausted (recursion / stack budget)"
+  },
+  {
+    "scenario": "trap_unreachable",
+    "path": "artifacts/raw/phase3_trap_unreachable.json",
+    "success": false,
+    "rollback_performed": true,
+    "execution_time_ms": 1,
+    "fuel_consumed": 1,
+    "failure_mode": "TrapUnreachable",
+    "error_type": "TRAP_UNREACHABLE",
+    "description": "WASM `unreachable` instruction reached",
+    "trigger_status": "Trapped",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Deterministic `unreachable` instruction reached \u2014 likely an assertion failure or unhandled enum arm in the guest module.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8999999761581421,
+        "description": "Locate the failing instruction via the wasm backtrace (function index + offset). Fix the guest code or the invariant it expected.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT auto-retry with identical inputs; this failure is deterministic.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "tool_output_error": "WASM `unreachable` instruction reached"
+  }
+]

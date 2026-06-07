@@ -1,0 +1,69 @@
+# AI rescore — runs only on PRs that touch the recovery path or the
+# Phase 3 capture scenarios. Captures the post-PR ErrorLogs and asks an
+# external LLM to score them against the rubric defined in the Phase A
+# revalidation. The result is uploaded as a job artifact and (optionally)
+# posted as a PR comment.
+#
+# The actual scoring is done via a small Python helper so the workflow
+# can run in any CI environment that has $OPENAI_API_KEY or
+# $ANTHROPIC_API_KEY in its secrets store.
+
+name: AI rescore
+
+on:
+  pull_request:
+    paths:
+      - "src/hypervisor/**"
+      - "src/instinct/**"
+      - "examples/capture_error.rs"
+      - "scripts/run_phase3_capture.sh"
+
+jobs:
+  rescore:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.OPENAI_API_KEY != '' || secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Capture Phase 3 ErrorLogs
+        env:
+          CARGO_TARGET_DIR: ./target
+        run: |
+          mkdir -p artifacts/raw
+          bash scripts/setup_benchmark_env.sh
+          bash scripts/run_phase3_capture.sh
+
+      - name: Score via external LLM
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet openai anthropic
+          .venv/bin/python scripts/ai_rescore.py \
+            --index artifacts/raw/phase3_index.json \
+            --out artifacts/raw/phase3_ai_rescore_ci.md
+
+      - name: Fail the job if accuracy regressed
+        run: |
+          # Parse the headline accuracy out of the rescore file; require >= 70%.
+          acc=$(grep -oE "Aggregate accuracy rate: [0-9]+" \
+              artifacts/raw/phase3_ai_rescore_ci.md | head -1 | awk '{print $NF}')
+          if [ -z "$acc" ]; then
+              echo "could not parse accuracy"
+              exit 1
+          fi
+          if [ "$acc" -lt 70 ]; then
+              echo "AI accuracy regressed to ${acc}% (threshold 70%)"
+              exit 1
+          fi
+          echo "AI accuracy ${acc}% OK"
+
+      - name: Upload rescore
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase3-ai-rescore
+          path: artifacts/raw/phase3_ai_rescore_ci.md

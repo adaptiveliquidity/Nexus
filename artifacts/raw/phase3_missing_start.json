@@ -1,0 +1,52 @@
+{
+  "error_log": {
+    "description": "Module has no exported `_start` function",
+    "error_type": "MISSING_ENTRYPOINT",
+    "failure_mode": {
+      "MissingEntrypoint": {
+        "expected": "_start"
+      }
+    },
+    "id": "af92d41c-eff5-4d43-a76e-7b65dc669bf0",
+    "operation": "missing_start",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Module exports no `_start` (or fallback `main`) function. Verify entrypoint at build time, or configure the executor to call the correct export explicitly.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT roll back; nothing executed.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178463101387024,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1876900,
+      "timestamp": "2026-06-07T21:52:10.974769964Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:10.977149226Z",
+    "trigger_status": "InvalidModule"
+  },
+  "scenario": "missing_start",
+  "tool_output": {
+    "error": "Module has no exported `_start` function",
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "rollback_performed": false,
+    "success": false
+  }
+}

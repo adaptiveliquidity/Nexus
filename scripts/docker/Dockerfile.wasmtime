@@ -1,0 +1,19 @@
+# Minimal image that runs the same wasmtime binary as the host baseline.
+# Used as the Docker baseline in Phase 2; we measure end-to-end
+# `docker run` overhead on top of identical wasmtime execution.
+FROM debian:bookworm-slim
+
+ARG WASMTIME_VERSION=v45.0.1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates xz-utils \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" \
+      | tar -xJ -C /tmp \
+ && install -m 0755 "/tmp/wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" /usr/local/bin/wasmtime \
+ && rm -rf /tmp/wasmtime-${WASMTIME_VERSION}-x86_64-linux \
+ && apt-get purge -y curl xz-utils \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENTRYPOINT ["wasmtime"]
