@@ -65,3 +65,7 @@ component-model = []
 criterion = "0.5"
 tempfile = "3.14"
 proptest = "1.5"
+
+[[bench]]
+name = "nexus_validation"
+harness = false

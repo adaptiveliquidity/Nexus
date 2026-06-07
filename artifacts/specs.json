@@ -1,0 +1,19 @@
+{
+  "capture_timestamp": "2026-06-07T14:00:00Z",
+  "uname": "$(uname -a)",
+  "lscpu": "$(lscpu)",
+  "free": "$(free -h)",
+  "disk": "$(lsblk -d -o NAME,SIZE,TYPE | head -5)",
+  "toolchain": {
+    "rust": "$(rustc --version 2>/dev/null || echo 'not installed')",
+    "cargo": "$(cargo --version 2>/dev/null || echo 'not installed')",
+    "hyperfine": "$(hyperfine --version 2>/dev/null || echo 'not installed')",
+    "perf": "$(perf --version 2>/dev/null || echo 'not installed')",
+    "docker": "$(docker --version 2>/dev/null || echo 'not installed')",
+    "wasmtime": "$(wasmtime --version 2>/dev/null || echo 'not installed')"
+  },
+  "git": {
+    "commit": "$(git -C /workspace/project rev-parse HEAD 2>/dev/null || echo 'N/A')",
+    "dirty": "$(git -C /workspace/project status --porcelain 2>/dev/null | wc -l)"
+  }
+}
