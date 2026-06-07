@@ -1,0 +1,33 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.old
+
+# Cargo lock (keep for reproducible builds)
+# Cargo.lock
+
+# Environment files
+.env
+.env.local
+
+# Debug files
+*.pdb
+*.dSYM/
