@@ -25,7 +25,17 @@ pub struct ExecutionRecord {
 }
 
 impl ExecutionRecord {
-    pub fn success(operation: String, duration_ms: u64, fuel_consumed: u64) -> Self {
+    /// Build a success record. The caller is expected to pass a real
+    /// `ResourceSnapshot` from `HealthValidator::current_resources()`;
+    /// passing a zero-filled placeholder is what Phase A explicitly
+    /// removed, since it made the report's per-execution resource numbers
+    /// useless.
+    pub fn success(
+        operation: String,
+        duration_ms: u64,
+        fuel_consumed: u64,
+        resources: ResourceSnapshot,
+    ) -> Self {
         ExecutionRecord {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
@@ -35,31 +45,29 @@ impl ExecutionRecord {
             fuel_consumed,
             health_status: HealthStatus::Healthy,
             error: None,
-            resources: ResourceSnapshot {
-                cpu_usage: 0.0,
-                memory_used_mb: 0,
-                memory_limit_mb: 0,
-                timestamp: Utc::now(),
-            },
+            resources,
         }
     }
-    
-    pub fn failure(operation: String, error: ErrorLog, duration_ms: u64) -> Self {
+
+    /// Build a failure record. The `ResourceSnapshot` on the embedded
+    /// `ErrorLog` is reused so the record and the error log agree.
+    pub fn failure(
+        operation: String,
+        error: ErrorLog,
+        duration_ms: u64,
+        fuel_consumed: u64,
+    ) -> Self {
+        let resources = error.resources.clone();
         ExecutionRecord {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             operation,
             success: false,
             duration_ms,
-            fuel_consumed: 0,
+            fuel_consumed,
             health_status: error.trigger_status.clone(),
             error: Some(error),
-            resources: ResourceSnapshot {
-                cpu_usage: 0.0,
-                memory_used_mb: 0,
-                memory_limit_mb: 0,
-                timestamp: Utc::now(),
-            },
+            resources,
         }
     }
 }
@@ -146,13 +154,15 @@ impl TelemetrySink {
     
     fn update_pattern(&self, operation: &str, success: bool) {
         let mut patterns = self.patterns.write().unwrap();
-        
+
         if let Some(existing) = patterns.iter_mut().find(|p| p.operation == operation) {
             if success {
-                existing.success_count += 1;
+                existing.success_count = existing.success_count.saturating_add(1);
             } else {
-                // Reset count on failure
-                existing.success_count = 0;
+                // Phase A: erode instinct on failure instead of resetting to
+                // zero. A single bad run shouldn't wipe out the entire
+                // learned history of an operation.
+                existing.success_count = existing.success_count.saturating_sub(1);
             }
             existing.last_used = Utc::now();
         } else if success {
@@ -238,42 +248,75 @@ impl TelemetrySink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    fn fake_resources() -> ResourceSnapshot {
+        ResourceSnapshot {
+            cpu_usage: 1.0,
+            memory_used_mb: 10,
+            memory_limit_mb: 1024,
+            timestamp: Utc::now(),
+        }
+    }
+
     #[test]
     fn test_telemetry_recording() {
         let sink = TelemetrySink::new(10);
-        
-        let success = ExecutionRecord::success("read_file".to_string(), 50, 1000);
+
+        let success = ExecutionRecord::success("read_file".into(), 50, 1000, fake_resources());
         sink.record_success(success);
-        
+
         let stats = sink.stats();
         assert_eq!(stats.total_executions, 1);
         assert_eq!(stats.successful_executions, 1);
         assert_eq!(stats.success_rate, 1.0);
     }
-    
+
     #[test]
     fn test_pattern_learning() {
         let sink = TelemetrySink::new(10);
-        
-        // Record successful operations
         for _ in 0..3 {
-            let record = ExecutionRecord::success("execute_command".to_string(), 100, 5000);
+            let record =
+                ExecutionRecord::success("execute_command".into(), 100, 5000, fake_resources());
             sink.record_success(record);
         }
-        
         let patterns = sink.get_patterns("execute_command");
         assert!(!patterns.is_empty());
     }
-    
+
     #[test]
     fn test_feedback_generation() {
         let sink = TelemetrySink::new(10);
-        
-        let record = ExecutionRecord::success("test_op".to_string(), 100, 1000);
+        let record = ExecutionRecord::success("test_op".into(), 100, 1000, fake_resources());
         sink.record_success(record);
-        
         let feedback = sink.generate_feedback("test_op");
-        assert!(feedback.contains("Recently Successful Approaches") || feedback.contains("Recent Executions"));
+        assert!(
+            feedback.contains("Previously Successful Approaches")
+                || feedback.contains("Recent Executions"),
+            "got: {feedback}"
+        );
+    }
+
+    #[test]
+    fn pattern_decrement_does_not_wipe_history() {
+        // Phase A: failure should erode, not erase, the learned count.
+        let sink = TelemetrySink::new(10);
+        for _ in 0..5 {
+            sink.record_success(ExecutionRecord::success(
+                "op".into(),
+                10,
+                100,
+                fake_resources(),
+            ));
+        }
+        // Build a failure record so we can call record_failure with the new
+        // 4-arg signature. We only care about the side effect on patterns.
+        let mode = crate::hypervisor::FailureMode::TrapDivByZero;
+        let err = ErrorLog::new("op".into(), mode, fake_resources());
+        sink.record_failure(ExecutionRecord::failure("op".into(), err, 10, 0));
+
+        let stored = sink.all_patterns();
+        let op = stored.iter().find(|p| p.operation == "op").unwrap();
+        // Was 5, one failure decrements by 1 -> 4 (not 0 as before).
+        assert_eq!(op.success_count, 4);
     }
 }

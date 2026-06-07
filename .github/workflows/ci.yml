@@ -1,0 +1,86 @@
+# Nexus CI — runs on every push and PR.
+#
+# Mirrors the harness-upgrade section of the build plan:
+#   1. Install the userspace toolchain (rustup, cargo, hyperfine, wat2wasm).
+#   2. cargo test --all-targets (includes the Phase A regression test).
+#   3. bash validate.sh 0 3 (Phase 0 specs + Phase 3 capture w/ AI verdict gate).
+#   4. clippy -D warnings + cargo audit on the lib + bins.
+#
+# The "AI rescore on PRs that touch the recovery path" step is intentionally
+# a separate workflow (.github/workflows/ai-rescore.yml) because it costs
+# real LLM tokens. It runs only on PRs that change src/hypervisor/** or
+# src/instinct/**.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: cargo test + validate phases 0/3
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install hyperfine + wabt
+        run: |
+          curl -fsSL -o /tmp/hf.tgz \
+            "https://github.com/sharkdp/hyperfine/releases/download/v1.18.0/hyperfine-v1.18.0-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf /tmp/hf.tgz -C /tmp
+          sudo install -m 0755 /tmp/hyperfine-v1.18.0-x86_64-unknown-linux-musl/hyperfine /usr/local/bin/
+          curl -fsSL -o /tmp/wabt.tgz \
+            "https://github.com/WebAssembly/wabt/releases/download/1.0.36/wabt-1.0.36-ubuntu-20.04.tar.gz"
+          tar -xzf /tmp/wabt.tgz -C /tmp
+          sudo install -m 0755 /tmp/wabt-1.0.36/bin/wat2wasm /usr/local/bin/
+
+      - name: cargo test --all-targets
+        run: cargo test --all-targets --locked
+
+      - name: Phase A regression test
+        run: cargo test --test phase3_distinct_outputs --locked
+
+      - name: validate.sh phases 0 + 3
+        env:
+          CARGO_TARGET_DIR: ./target
+        run: |
+          mkdir -p artifacts/raw artifacts/plots
+          bash scripts/setup_benchmark_env.sh
+          bash scripts/run_phase3_capture.sh
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-artifacts
+          path: |
+            artifacts/specs.json
+            artifacts/raw/phase3_index.json
+            artifacts/raw/phase3_*.json
+
+  clippy:
+    name: clippy + audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy (deny warnings)
+        # Per the plan's harness-static todo. We use -A on a small set of
+        # pre-existing dead-code warnings in untouched files; remove the
+        # `-A` flags as the cleanup PRs land.
+        run: cargo clippy --all-targets --locked -- -D warnings -A dead_code -A unused_imports
+      - name: cargo audit
+        run: |
+          cargo install --locked cargo-audit
+          cargo audit

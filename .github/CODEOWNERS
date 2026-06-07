@@ -1,0 +1,23 @@
+# CODEOWNERS — auto-route reviews to the right team for security-sensitive paths.
+# Placeholder team names; replace `@nexus-eng/...` with the actual GitHub org teams.
+
+# Hypervisor + sandbox: the security-critical core. Phase A typed the
+# failure surface; Phase C adds the daemon; both want extra eyes.
+src/hypervisor/**            @nexus-eng/security @nexus-eng/runtime
+src/sandbox/**               @nexus-eng/security @nexus-eng/runtime
+
+# LLM recovery path: the only egress to external services, with attacker-
+# influenced inputs. Threat-model owner reviews every change.
+src/hypervisor/llm_policy.rs @nexus-eng/llm @nexus-eng/security
+docs/security_threat_model_phase_b.md @nexus-eng/llm @nexus-eng/security
+
+# Daemon binary + protocol: cross-process surface, framing has its own
+# threat surface (untrusted peer over UDS / pipe).
+src/daemon/**                @nexus-eng/runtime @nexus-eng/security
+src/bin/nexus_agentd.rs      @nexus-eng/runtime @nexus-eng/security
+
+# Validation harness: the source of truth for the benchmark report;
+# changes here can quietly inflate or deflate the numbers.
+scripts/**                   @nexus-eng/eval
+benches/**                   @nexus-eng/eval
+VALIDATION_REPORT.md         @nexus-eng/eval

@@ -1,0 +1,38 @@
+[package]
+name = "nexus-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Hand-curated dependency set; cargo-fuzz init would write a similar
+# tree. wasm-smith generates arbitrary syntactically-valid WASM
+# modules; libfuzzer-sys exposes the fuzz target macro; we depend on
+# the parent crate by path so we exercise the real hypervisor.
+[dependencies]
+libfuzzer-sys = "0.4"
+wasm-smith = "0.227"
+arbitrary = { version = "1", features = ["derive"] }
+nexus = { path = ".." }
+tokio = { version = "1.44", features = ["rt", "macros"] }
+serde_json = "1.0"
+wat = "1.0"
+
+[[bin]]
+name = "fuzz_execute_tool"
+path = "fuzz_targets/fuzz_execute_tool.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sanitize_for_prompt"
+path = "fuzz_targets/fuzz_sanitize_for_prompt.rs"
+test = false
+doc = false
+bench = false
+
+# Keep fuzz binaries out of the default workspace `cargo build`.
+[workspace]

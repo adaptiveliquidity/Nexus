@@ -19,19 +19,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Execute a WASM module with sandbox protection
+    /// Execute a WASM module with sandbox protection (cold path: builds
+    /// a fresh hypervisor every invocation).
     Execute {
         /// Path to WASM file
         #[arg(short, long)]
         wasm: PathBuf,
-        
+
         /// Entry point function
         #[arg(short, long, default_value = "_start")]
         entry: String,
-        
+
         /// Enable snapshot/rollback
         #[arg(short, long, default_value_t = true)]
         snapshot: bool,
+    },
+
+    /// Phase C hot path: send the WASM to a long-lived `nexus-agentd`.
+    /// Spawns the daemon on first use if it is not already running.
+    Run {
+        /// Path to WASM file
+        #[arg(short, long)]
+        wasm: PathBuf,
+
+        /// Entry point function
+        #[arg(short, long, default_value = "_start")]
+        entry: String,
+
+        /// Custom daemon socket (defaults to NEXUS_AGENTD_SOCKET or the
+        /// platform default).
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     
     /// Run a demo showing snap-rollback in action
@@ -61,6 +79,25 @@ enum Commands {
         #[arg(short, long, default_value_t = 100)]
         iterations: u32,
     },
+
+    /// Manage the instinct store (Phase B continuous-learning).
+    #[command(subcommand)]
+    Instinct(InstinctCmd),
+}
+
+#[derive(Subcommand)]
+enum InstinctCmd {
+    /// Print summary stats about the instinct store.
+    Status,
+    /// Export every instinct as a single JSON array to stdout.
+    Export,
+    /// Import a JSON array of instincts from a file (use "-" for stdin).
+    Import {
+        /// Path to a JSON file produced by `nexus instinct export`,
+        /// or "-" to read from stdin.
+        #[arg(short, long)]
+        file: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,6 +114,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Execute { wasm, entry, snapshot } => {
             execute_wasm(wasm, entry, snapshot)?;
         }
+        Commands::Run { wasm, entry, socket } => {
+            run_via_daemon(wasm, entry, socket)?;
+        }
         Commands::Demo { demo } => {
             run_demo(&demo)?;
         }
@@ -89,9 +129,158 @@ fn main() -> anyhow::Result<()> {
         Commands::Benchmark { iterations } => {
             run_benchmark(iterations)?;
         }
+        Commands::Instinct(cmd) => {
+            run_instinct(cmd)?;
+        }
     }
-    
+
     Ok(())
+}
+
+fn run_instinct(cmd: InstinctCmd) -> anyhow::Result<()> {
+    use nexus::InstinctStore;
+    use std::io::Read;
+
+    let store = InstinctStore::open_default()?;
+    match cmd {
+        InstinctCmd::Status => {
+            let stats = store.stats();
+            println!("Nexus instinct store ({})", InstinctStore::default_dir().display());
+            println!("====================");
+            println!("Total instincts:   {}", stats.total_instincts);
+            println!("Total support:     {}", stats.total_support);
+            println!("Total failures:    {}", stats.total_failures);
+            println!("Average confidence: {:.3}", stats.avg_confidence);
+            if !stats.categories.is_empty() {
+                println!("\nBy failure category:");
+                let mut rows: Vec<_> = stats.categories.iter().collect();
+                rows.sort_by(|a, b| b.1.cmp(a.1));
+                for (k, v) in rows {
+                    println!("  {:<28} {:>4}", k, v);
+                }
+            }
+            if let Some((desc, conf)) = stats.highest_confidence {
+                println!("\nTop recommendation (conf={:.3}):", conf);
+                println!("  {}", desc);
+            }
+        }
+        InstinctCmd::Export => {
+            let json = store.export_all()?;
+            println!("{json}");
+        }
+        InstinctCmd::Import { file } => {
+            let json = if file == "-" {
+                let mut s = String::new();
+                std::io::stdin().read_to_string(&mut s)?;
+                s
+            } else {
+                std::fs::read_to_string(&file)?
+            };
+            let (added, merged) = store.import_all(&json)?;
+            println!("imported: {added} new, {merged} merged");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_via_daemon(wasm_path: PathBuf, entry: String, socket: Option<PathBuf>) -> anyhow::Result<()> {
+    use nexus::daemon::protocol::{read_frame, write_frame};
+    use nexus::daemon::{default_socket_path, DaemonRequest, DaemonResponse};
+    use std::time::Duration;
+    use tokio::io::{BufReader, BufWriter};
+    use tokio::net::UnixStream;
+
+    let socket = socket.unwrap_or_else(default_socket_path);
+    let bytes = std::fs::read(&wasm_path)?;
+    let name = wasm_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tool".into());
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        // First-connect retry: if the daemon was not yet up, give the
+        // spawned process a beat to bind the socket.
+        let mut stream: Option<UnixStream> = None;
+        let mut spawned = false;
+        for attempt in 0..20 {
+            match UnixStream::connect(&socket).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) if !spawned => {
+                    spawn_daemon_in_background(&socket)?;
+                    spawned = true;
+                    tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
+                }
+            }
+        }
+        let stream = stream
+            .ok_or_else(|| anyhow::anyhow!("could not connect to {}", socket.display()))?;
+        let (rd, wr) = stream.into_split();
+        let mut rd = BufReader::new(rd);
+        let mut wr = BufWriter::new(wr);
+
+        let req = DaemonRequest::Execute {
+            name,
+            wasm_bytes: Some(bytes),
+            wasm_path: None,
+            entry,
+            input: serde_json::json!({}),
+        };
+        write_frame(&mut wr, &req).await?;
+        let resp: DaemonResponse = read_frame(&mut rd).await?;
+        match resp {
+            DaemonResponse::Executed { output } => {
+                if output.success {
+                    println!("[nexus run] OK ({}ms, fuel={})", output.execution_time_ms, output.fuel_consumed);
+                } else {
+                    println!("[nexus run] FAIL ({}ms): {}",
+                        output.execution_time_ms,
+                        output.error.as_deref().unwrap_or("<no message>")
+                    );
+                    if output.rollback_performed {
+                        println!("           rollback_performed=true");
+                    }
+                }
+                Ok(())
+            }
+            DaemonResponse::Error { message } => Err(anyhow::anyhow!("daemon error: {message}")),
+            DaemonResponse::Pong { .. } => {
+                Err(anyhow::anyhow!("unexpected Pong reply to Execute"))
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn spawn_daemon_in_background(socket: &std::path::Path) -> anyhow::Result<()> {
+    // Resolve the agentd binary: prefer one next to `nexus`, fall back to PATH.
+    let me = std::env::current_exe()?;
+    let agentd = me
+        .parent()
+        .map(|p| p.join("nexus-agentd"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("nexus-agentd"));
+
+    use std::process::{Command, Stdio};
+    let _ = Command::new(agentd)
+        .arg("--socket")
+        .arg(socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn run_via_daemon(_wasm: PathBuf, _entry: String, _socket: Option<PathBuf>) -> anyhow::Result<()> {
+    anyhow::bail!("`nexus run` requires a Unix-socket daemon; run on Linux or WSL2")
 }
 
 fn execute_wasm(wasm_path: PathBuf, entry: String, _snapshot: bool) -> anyhow::Result<()> {

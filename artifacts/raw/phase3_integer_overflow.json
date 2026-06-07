@@ -1,0 +1,48 @@
+{
+  "error_log": {
+    "description": "Integer overflow",
+    "error_type": "TRAP_INTEGER_OVERFLOW",
+    "failure_mode": "TrapIntegerOverflow",
+    "id": "2708b55b-9da2-4334-8b0d-25a6b95477ce",
+    "operation": "integer_overflow",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Integer overflow trap — switch to wrapping/saturating arithmetic at the offending op, or widen the type.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "Add a range check at the input boundary so out-of-range values are rejected before they reach the arithmetic.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178579926490784,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1880304,
+      "timestamp": "2026-06-07T21:52:11.018799052Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:11.021170233Z",
+    "trigger_status": "Trapped"
+  },
+  "scenario": "integer_overflow",
+  "tool_output": {
+    "error": "Integer overflow",
+    "execution_time_ms": 1,
+    "fuel_consumed": 0,
+    "rollback_performed": true,
+    "success": false
+  }
+}

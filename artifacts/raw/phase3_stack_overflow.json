@@ -1,0 +1,48 @@
+{
+  "error_log": {
+    "description": "Call stack exhausted (recursion / stack budget)",
+    "error_type": "TRAP_STACK_OVERFLOW",
+    "failure_mode": "TrapStackOverflow",
+    "id": "2cb5c922-e2c8-441b-84f5-18053988bbdc",
+    "operation": "stack_overflow",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Call stack exhausted — convert the recursive function to iteration, add an explicit depth bound, or restructure into trampolines.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8500000238418579,
+        "description": "Reject modules with unbounded recursion at validation; only legitimately deep, bounded workloads should raise the stack limit.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178386807441711,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1880956,
+      "timestamp": "2026-06-07T21:52:10.959910497Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:10.962139895Z",
+    "trigger_status": "ResourceExhausted"
+  },
+  "scenario": "stack_overflow",
+  "tool_output": {
+    "error": "Call stack exhausted (recursion / stack budget)",
+    "execution_time_ms": 3,
+    "fuel_consumed": 32758,
+    "rollback_performed": true,
+    "success": false
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "error_log": {
+    "description": "Indirect call to a null table entry",
+    "error_type": "TRAP_INDIRECT_NULL",
+    "failure_mode": "TrapIndirectCallToNull",
+    "id": "cbd70796-cb35-4ef6-a4fd-f4d6d34cd63b",
+    "operation": "indirect_call_null",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Indirect call to a null table slot — populate the table entry with `table.set` before the call, or guard the slot at the call site.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178503632545471,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1881100,
+      "timestamp": "2026-06-07T21:52:11.004217112Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:11.006225530Z",
+    "trigger_status": "Trapped"
+  },
+  "scenario": "indirect_call_null",
+  "tool_output": {
+    "error": "Indirect call to a null table entry",
+    "execution_time_ms": 2,
+    "fuel_consumed": 3,
+    "rollback_performed": true,
+    "success": false
+  }
+}

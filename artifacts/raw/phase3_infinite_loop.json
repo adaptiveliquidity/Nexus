@@ -1,0 +1,59 @@
+{
+  "error_log": {
+    "description": "Fuel budget of 10000000 instructions exhausted",
+    "error_type": "FUEL_EXHAUSTED",
+    "failure_mode": {
+      "FuelExhausted": {
+        "limit": 10000000
+      }
+    },
+    "id": "ae4beda3-7af0-460e-8f82-38700d3b7289",
+    "operation": "infinite_loop",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Fuel budget of 10000000 instructions was consumed; the guard worked as designed.",
+        "instinct_id": null,
+        "non_retryable": false,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8999999761581421,
+        "description": "Profile the WASM to find the hot loop, then either reduce its iteration count or raise the per-tool fuel cap with an explicit business rationale.",
+        "instinct_id": null,
+        "non_retryable": false,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.699999988079071,
+        "description": "Consider iterative or memoized algorithms instead of naive recursion/iteration over large inputs.",
+        "instinct_id": null,
+        "non_retryable": false,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178324818611145,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1875896,
+      "timestamp": "2026-06-07T21:52:10.913338700Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:10.915083504Z",
+    "trigger_status": "FuelExhausted"
+  },
+  "scenario": "infinite_loop",
+  "tool_output": {
+    "error": "Fuel budget of 10000000 instructions exhausted",
+    "execution_time_ms": 5,
+    "fuel_consumed": 10000000,
+    "rollback_performed": true,
+    "success": false
+  }
+}

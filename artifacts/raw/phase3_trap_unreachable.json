@@ -1,0 +1,55 @@
+{
+  "error_log": {
+    "description": "WASM `unreachable` instruction reached",
+    "error_type": "TRAP_UNREACHABLE",
+    "failure_mode": "TrapUnreachable",
+    "id": "54a58dba-43c1-4603-bbfe-88379e374c06",
+    "operation": "trap_unreachable",
+    "recovery_actions": [
+      {
+        "confidence": 1.0,
+        "description": "Deterministic `unreachable` instruction reached — likely an assertion failure or unhandled enum arm in the guest module.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 0.8999999761581421,
+        "description": "Locate the failing instruction via the wasm backtrace (function index + offset). Fix the guest code or the invariant it expected.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      },
+      {
+        "confidence": 1.0,
+        "description": "Do NOT auto-retry with identical inputs; this failure is deterministic.",
+        "instinct_id": null,
+        "non_retryable": true,
+        "source": "Static"
+      }
+    ],
+    "resources": {
+      "cpu_usage": 0.6178358793258667,
+      "memory_limit_mb": 16173388,
+      "memory_used_mb": 1879332,
+      "timestamp": "2026-06-07T21:52:10.928777019Z"
+    },
+    "successful_patterns": [],
+    "system_state": {
+      "execution_time_ms": 0,
+      "files_affected": [],
+      "reverted": false,
+      "snapshot_id": null
+    },
+    "timestamp": "2026-06-07T21:52:10.930950076Z",
+    "trigger_status": "Trapped"
+  },
+  "scenario": "trap_unreachable",
+  "tool_output": {
+    "error": "WASM `unreachable` instruction reached",
+    "execution_time_ms": 1,
+    "fuel_consumed": 1,
+    "rollback_performed": true,
+    "success": false
+  }
+}

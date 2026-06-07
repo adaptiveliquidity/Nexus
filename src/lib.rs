@@ -9,6 +9,8 @@ pub mod sandbox;
 pub mod snapshot;
 pub mod telemetry;
 pub mod hypervisor;
+pub mod instinct;
+pub mod daemon;
 
 // Re-export commonly used types
 pub use error::{NexusError, Result};
@@ -16,7 +18,8 @@ pub use security::{Capability, CapabilityManager, CapabilityToken};
 pub use sandbox::{SandboxConfig, ExecutionResult, WasmSandbox, FuelMeter, FuelStats, WasmMemoryState, WasmExecutionSnapshot, MemoryStats};
 pub use snapshot::{Snapshot, SnapshotManager, SnapshotStats, FilesystemDiff, ExecutionState, SnapshotMetadata};
 pub use telemetry::{TelemetrySink, ExecutionRecord, TelemetryStats, LearnedPattern};
-pub use hypervisor::{NexusHypervisor, HypervisorConfig, ToolDefinition, ToolOutput};
+pub use hypervisor::{NexusHypervisor, HypervisorConfig, ToolDefinition, ToolOutput, FailureMode};
+pub use instinct::{Instinct, InstinctPolicy, InstinctStats, InstinctStore};
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

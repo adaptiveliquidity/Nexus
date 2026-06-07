@@ -1,19 +1,39 @@
 {
-  "capture_timestamp": "2026-06-07T14:00:00Z",
-  "uname": "$(uname -a)",
-  "lscpu": "$(lscpu)",
-  "free": "$(free -h)",
-  "disk": "$(lsblk -d -o NAME,SIZE,TYPE | head -5)",
-  "toolchain": {
-    "rust": "$(rustc --version 2>/dev/null || echo 'not installed')",
-    "cargo": "$(cargo --version 2>/dev/null || echo 'not installed')",
-    "hyperfine": "$(hyperfine --version 2>/dev/null || echo 'not installed')",
-    "perf": "$(perf --version 2>/dev/null || echo 'not installed')",
-    "docker": "$(docker --version 2>/dev/null || echo 'not installed')",
-    "wasmtime": "$(wasmtime --version 2>/dev/null || echo 'not installed')"
+  "timestamp_utc": "2026-06-07T21:36:53Z",
+  "host": {
+    "is_wsl2": true,
+    "uname": "Linux System42 5.15.167.4-microsoft-standard-WSL2 #1 SMP Tue Nov 5 00:21:55 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux",
+    "kernel": "5.15.167.4-microsoft-standard-WSL2",
+    "cpu_model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "cpu_cores": 16,
+    "cpu_max_mhz": "unknown",
+    "cpu_governor": "unavailable",
+    "ram_gb": 15.4,
+    "disk_write_dd": "1073741824 bytes (1.1 GB, 1.0 GiB) copied, 1.07607 s, 998 MB/s",
+    "kvm_dev": "present"
   },
-  "git": {
-    "commit": "$(git -C /workspace/project rev-parse HEAD 2>/dev/null || echo 'N/A')",
-    "dirty": "$(git -C /workspace/project status --porcelain 2>/dev/null | wc -l)"
-  }
+  "toolchain": {
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)",
+    "hyperfine": "hyperfine 1.18.0",
+    "wasmtime": "wasmtime 45.0.1 (83166ba31 2026-06-05)",
+    "docker_client": "Docker version 29.5.2, build 79eb04c",
+    "docker_server": "29.5.2",
+    "wat2wasm": "1.0.36",
+    "jq": "jq-1.7.1",
+    "python3": "Python 3.12.3",
+    "perf": "not installed",
+    "valgrind": "not installed",
+    "cpupower": "not installed"
+  },
+  "repo": {
+    "git_commit": "7e70cab21911b84ff6073978b0b0a195fb438b3b",
+    "git_dirty": true
+  },
+  "deviations": [
+    "WSL2: cpufreq sysfs typically unavailable; CPU governor cannot be locked to performance mode.",
+    "WSL2: perf often unavailable or limited; perf-counters phase skipped if missing.",
+    "WSL2: Firecracker not measured (no bare-metal KVM ownership in WSL2 environment).",
+    "Cloudflare Workers not measured (requires hosted environment; out of scope)."
+  ]
 }
