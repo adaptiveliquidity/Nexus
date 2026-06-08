@@ -75,6 +75,7 @@ ai-recovery = ["dep:reqwest", "dep:tokio-util"]
 
 [dev-dependencies]
 criterion = "0.5"
+codspeed-criterion-compat = "2.7"
 tempfile = "3.14"
 proptest = "1.5"
 
@@ -90,3 +91,17 @@ required-features = []
 [[bench]]
 name = "nexus_validation"
 harness = false
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = false
+debug = 1

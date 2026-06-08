@@ -1,0 +1,119 @@
+name: Benchmarks (Nexus vs. competitors)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  bencher:
+    name: "Criterion → Bencher.dev"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-${{ runner.os }}
+      - uses: bencherdev/bencher@main
+
+      - name: Record runner provenance
+        run: |
+          mkdir -p benchmark_evidence
+          {
+            echo "## Runner Provenance"
+            echo "- Date (UTC): $(date -u --iso-8601=seconds)"
+            echo "- Commit: ${{ github.sha }}"
+            echo "- Runner: ubuntu-24.04 (GitHub-hosted)"
+            echo "- CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+            echo "- Cores: $(nproc)"
+            echo "- Memory: $(free -h | awk '/^Mem:/ {print $2}')"
+            echo "- Kernel: $(uname -r)"
+            echo "- rustc: $(rustc --version)"
+          } > benchmark_evidence/runner.md
+
+      - name: Run Criterion
+        run: |
+          cargo bench --bench nexus_validation -- --output-format bencher \
+            | tee benchmark_evidence/criterion_raw.log
+
+      - name: Upload to Bencher.dev
+        run: |
+          bencher run \
+            --project "${{ vars.BENCHER_PROJECT }}" \
+            --token "${{ secrets.BENCHER_API_TOKEN }}" \
+            --branch "${{ github.ref_name }}" \
+            --testbed "ubuntu-24.04-github" \
+            --adapter rust_criterion \
+            --err \
+            --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+            --file benchmark_evidence/criterion_raw.log
+
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign artifacts with Sigstore
+        run: |
+          tar czf benchmark_evidence/criterion_artifacts.tar.gz \
+            target/criterion benchmark_evidence/runner.md \
+            benchmark_evidence/criterion_raw.log
+          cosign sign-blob --yes \
+            --bundle benchmark_evidence/criterion_artifacts.sigstore \
+            benchmark_evidence/criterion_artifacts.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: criterion-evidence-${{ github.sha }}
+          path: benchmark_evidence/
+          retention-days: 90
+
+  codspeed:
+    name: "Criterion → Codspeed.io (deterministic)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codspeed-${{ runner.os }}
+      - uses: CodSpeedHQ/action@v3
+        with:
+          run: cargo codspeed bench --bench nexus_validation
+          token: ${{ secrets.CODSPEED_TOKEN }}
+
+  publish-dashboard:
+    name: Publish public dashboard
+    needs: [bencher, codspeed]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build dashboard
+        run: |
+          cd dashboard
+          npm ci
+          npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/out
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

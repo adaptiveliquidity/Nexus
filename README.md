@@ -2,7 +2,9 @@
 
 **Game save-states for AI agents.**
 
-Nexus provides sub-microsecond cold starts, native snapshot/rollback capabilities, and built-in AI telemetry for self-correcting agents. The only sandboxing solution with these features combined.
+Nexus provides microsecond-class cold starts, native snapshot/rollback capabilities, and built-in AI telemetry for self-correcting agents. The only sandboxing solution with these features combined.
+
+[![Benchmarks](https://img.shields.io/badge/benchmarks-live-brightgreen)](https://adaptive-liquidity.github.io/Nexus/)
 
 [![Crates.io](https://img.shields.io/crates/v/nexus-ai)](https://crates.io/crates/nexus-ai)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -10,13 +12,29 @@ Nexus provides sub-microsecond cold starts, native snapshot/rollback capabilitie
 
 ## Key Performance Metrics
 
-| Metric | Nexus | Best Competitor | Improvement |
-|--------|-------|-----------------|--------------|
-| Cold Start | 23 microseconds | 5 milliseconds (CF Workers) | 217x faster |
-| Snapshot Creation | 56 microseconds | N/A (no competitors) | First to market |
-| Rollback Time | <1 millisecond | 500 milliseconds (Firecracker) | 500x faster |
-| Concurrent Sandboxes | 10,000+ | ~1,000 (E2B) | 10x higher |
-| AI Telemetry | Native | None | Only solution |
+> **Live benchmarks:** [adaptive-liquidity.github.io/Nexus](https://adaptive-liquidity.github.io/Nexus/)
+> All numbers below are measured on GitHub-hosted runners (ubuntu-24.04) and published to [Bencher.dev](https://bencher.dev/perf/nexus-ai) + [CodSpeed.io](https://codspeed.io/Adaptive-Liquidity/Nexus). Artifacts are signed with Sigstore.
+
+| Metric | Nexus (measured) | Notes |
+|--------|-----------------|-------|
+| Cold Start (sandbox init) | ~23 µs | `WasmSandbox::new` only; end-to-end first-call latency is higher |
+| Snapshot Creation (1 MiB) | ~2.92 ms | Pseudo-random (incompressible) memory; empty memory is ~56 µs |
+| Snapshot Creation (100 MiB) | ~290 ms | Scales with memory size and compressibility |
+| Rollback (1 MiB) | <1 ms | Decompress + integrity restore |
+| Rollback (10 MiB) | ~1.62 ms | |
+| Rollback (100 MiB) | ~53.6 ms | |
+| AI Telemetry | Native | Only solution with built-in error learning |
+
+<details>
+<summary>Retired claims (click to expand)</summary>
+
+The following claims appeared in earlier versions of this README and have been corrected:
+
+1. **"217x faster than CF Workers"** — compared sandbox struct init (23 µs) to full request latency (5 ms). Apples-to-oranges.
+2. **"56 µs snapshot creation"** — true only for empty/zero memory. Realistic workloads with 1 MiB incompressible memory measure ~2.92 ms.
+3. **"<1 ms rollback"** — true at 1 MiB, but 1.62 ms at 10 MiB and 53.6 ms at 100 MiB.
+4. **"10,000+ concurrent sandboxes"** — never measured by the shipped benchmark harness. Density benchmarking is planned as a separate effort.
+</details>
 
 ## What Problem Does Nexus Solve?
 
@@ -26,11 +44,11 @@ AI agents that write and execute code face critical failure modes:
 2. **State Corruption** - Memory corruption creates unrecoverable errors requiring full restarts
 3. **Context Loss** - Every failure costs the agent weeks of accumulated context and learning
 
-Traditional solutions (Docker, Firecracker, gVisor) cannot solve these problems:
+Traditional solutions (Docker, Firecracker, gVisor) were not designed for these problems:
 
-- Docker: 30-second cold start, no snapshot support, no AI telemetry
-- Firecracker: 150ms cold start, 500ms rollback, no AI telemetry
-- E2B: 790ms cold start, no snapshots, no AI telemetry
+- Docker: ~15 s cold start (image-dependent), no native snapshot/rollback, no AI telemetry
+- Firecracker: ~125 ms raw boot, ~1.5 s snapshot create, ~4 ms rollback ([source](https://github.com/firecracker-microvm/firecracker/blob/main/SPECIFICATION.md))
+- E2B: ~150 ms cold start ([source](https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026)), no native snapshots, no AI telemetry
 
 Nexus is purpose-built for AI agent execution with native support for the failure modes that matter.
 
@@ -58,7 +76,7 @@ Nexus is built on three foundational principles:
      v                  v                  v
 +------------------+------------------+------------------+
 |  WasmSandbox     |  Snapshot Engine |  CapabilityMgr  |
-|  (wasmtime 37)    |  (<1ms rollback) |  (Token-based)  |
+|  (wasmtime 37)    |  (sub-ms @ 1MiB) |  (Token-based)  |
 +------------------+------------------+------------------+
 ```
 
@@ -122,28 +140,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Benchmark Results
 
-### Cold Start Comparison
-
-```
-Nexus              ████████████████████████████████████████  23 microseconds
-Cloudflare Workers ████████████████                        5 milliseconds
-E2B                ████████████████████████████████        790 milliseconds
-Docker             ██████████████████████████████████████████████████████████████  30 seconds
-```
+> See the [live dashboard](https://adaptive-liquidity.github.io/Nexus/) for the latest numbers and head-to-head competitor comparison with cited sources.
 
 ### Competitor Feature Matrix
 
-| Feature | Nexus | Docker | CF Workers | E2B | Firecracker |
-|---------|-------|--------|------------|-----|-------------|
-| Cold Start < 1ms | Yes | No | No | No | No |
-| Native Snapshots | Yes | No | No | No | No |
-| Instant Rollback | Yes | No | No | No | No |
-| AI Telemetry | Yes | No | No | No | No |
-| Self-Correction | Yes | No | No | No | No |
+| Feature | Nexus | Docker | E2B | Firecracker |
+|---------|-------|--------|-----|-------------|
+| Cold Start < 1ms | Yes (sandbox init) | No | No | No |
+| Native Snapshots | Yes | No | No | External tooling |
+| Sub-ms Rollback (small state) | Yes | No | No | ~4 ms |
+| AI Telemetry | Yes | No | No | No |
+| Self-Correction | Yes | No | No | No |
 
 ### Detailed Benchmark Data
 
-See [BENCHMARKS.md](BENCHMARKS.md) for comprehensive performance analysis, methodology documentation, and competitor comparison tables.
+See [BENCHMARKS.md](BENCHMARKS.md) for methodology and the [live dashboard](https://adaptive-liquidity.github.io/Nexus/) for current numbers.
 
 ## Technical Design
 
@@ -159,7 +170,7 @@ Nexus implements a microsecond snapshot and rollback system:
 ```rust
 // Simplified rollback flow
 async fn execute_with_safety(&self, tool: ToolDefinition) -> ToolOutput {
-    // 1. Capture snapshot (56 microseconds)
+    // 1. Capture snapshot (~2.92 ms @ 1 MiB)
     let snapshot = self.snapshot_manager.capture().await;
     
     // 2. Execute with health monitoring
@@ -167,7 +178,7 @@ async fn execute_with_safety(&self, tool: ToolDefinition) -> ToolOutput {
     
     // 3. Check for failure
     if !result.success {
-        // 4. Rollback (<1 millisecond)
+        // 4. Rollback (<1 ms @ 1 MiB)
         self.snapshot_manager.restore(&snapshot).await;
         
         // 5. Generate AI feedback
@@ -219,18 +230,18 @@ sandbox.grant_capability(capability)?;
 
 For a typical AI agent tool execution:
 
-| Phase | Time | Percentage |
-|-------|------|-----------|
-| Snapshot Creation | 56 microseconds | 0.06% |
-| WASM Execution | Variable | ~99% |
-| Rollback (on error) | <1 millisecond | ~1% |
-| Telemetry Recording | <100 microseconds | 0.1% |
+| Phase | Time (1 MiB state) | Notes |
+|-------|-------------------|-------|
+| Snapshot Creation | ~2.92 ms | Scales with memory size |
+| WASM Execution | Variable | Dominates total latency |
+| Rollback (on error) | <1 ms | At 1 MiB; ~53.6 ms at 100 MiB |
+| Telemetry Recording | <100 µs | |
 
 ### Scalability
 
 Nexus is designed for high-density agent deployments:
 
-- **Concurrent Sandboxes**: 10,000+ on a single node
+- **Concurrent Sandboxes**: Not yet benchmarked (density testing planned)
 - **Memory per Sandbox**: <1MB overhead
 - **Snapshot Storage**: Zstd compressed (typically 60-80% reduction)
 

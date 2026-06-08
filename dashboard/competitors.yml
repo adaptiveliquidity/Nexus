@@ -1,0 +1,40 @@
+competitors:
+  - name: Wasmtime (baseline)
+    cold_start_ms: 5.6
+    source: "arXiv:2509.09400 (2025) — no-op fn, JIT compile"
+    source_url: "https://arxiv.org/abs/2509.09400"
+  - name: Blaxel
+    cold_start_ms: 25
+    source: "Blaxel vendor docs (2026); Superagent benchmark (Jan 2026)"
+    source_url: "https://www.superagent.sh/blog/ai-code-sandbox-benchmark-2026"
+  - name: Daytona
+    cold_start_ms: 27
+    source: "Daytona vendor docs (2026)"
+    source_url: "https://www.softwareseni.com/e2b-daytona-modal-and-sprites-dev-choosing-the-right-ai-agent-sandbox-platform/"
+  - name: E2B
+    cold_start_ms: 150
+    source: "E2B vendor docs (2026); StartupHub.ai 2026 comparison"
+    source_url: "https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026"
+  - name: Firecracker (raw boot)
+    cold_start_ms: 125
+    snapshot_create_ms: 1500
+    rollback_ms: 4
+    source: "firecracker-microvm/firecracker SPECIFICATION.md; Agache et al. arXiv:2102.12892"
+    source_url: "https://github.com/firecracker-microvm/firecracker/blob/main/SPECIFICATION.md"
+  - name: Vercel Sandbox
+    cold_start_ms: 150
+    source: "Vercel docs (2026)"
+    source_url: "https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026"
+  - name: Modal
+    cold_start_ms: 3500
+    source: "Modal docs; SkyPilot benchmark (2025)"
+    source_url: "https://blog.skypilot.co/skypilot-llm-sandbox/"
+  - name: Docker
+    cold_start_ms: 15000
+    source: "Industry standard; image-dependent"
+    source_url: ""
+
+nexus_data_source:
+  bencher_project: "nexus-ai"
+  bencher_api: "https://api.bencher.dev/v0/projects/nexus-ai/perf"
+  codspeed_project_url: "https://codspeed.io/Adaptive-Liquidity/Nexus"

@@ -1,19 +1,10 @@
 [build]
-# Enable parallel compilation for faster builds
 jobs = 4
 
-[target.'cfg(not(target_os = "windows"))'.build]
+[target.'cfg(not(target_os = "windows"))']
 rustflags = ["-C", "link-arg=-Wl,-S"]
 
-[profile.release]
-# Optimize for binary size
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = true
-
 [alias]
-# Quick commands
-bench = "build --release --benches"
+build-benches = "build --release --benches"
 test-all = "test --all-features"
 lint = "clippy -- -D warnings"

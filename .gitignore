@@ -28,6 +28,9 @@ Thumbs.db
 .env
 .env.local
 
+# MCP server config (contains token references)
+.mcp.json
+
 # Debug files
 *.pdb
 *.dSYM/
