@@ -11,6 +11,19 @@
 //! All inputs are deterministic. Memory is filled with a linear-congruential
 //! pseudo-random stream so compression ratios are realistic (~1.0), not the
 //! near-zero ratio that all-zero buffers would produce.
+//!
+//! ## Bench surface modes
+//!
+//! Wall-clock mode (default `cargo bench`) runs the full {1, 10, 100} MiB
+//! surface — these absolute numbers go to Bencher.dev for regression tracking.
+//!
+//! CodSpeed mode (`cargo codspeed run`) runs each bench under Valgrind/
+//! cachegrind for deterministic instruction counts. Cachegrind adds 20-100x
+//! wall-clock overhead, and instruction count *per algorithm* is identical
+//! across memory sizes — running 1 MiB tells you the same thing as 100 MiB
+//! but in 1% of the time. We therefore restrict the parameter sweep to the
+//! smallest size under codspeed so the job stays under timeout. Absolute
+//! throughput is still measured at full surface by the wall-clock Bencher job.
 
 use std::time::Duration;
 
@@ -28,6 +41,24 @@ use nexus::sandbox::{SandboxConfig, WasmSandbox};
 use nexus::snapshot::{
     ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
 };
+
+/// Memory sizes (MiB) used in parameterised snapshot benches.
+///
+/// CodSpeed mode runs only the smallest size — cachegrind makes the larger
+/// variants prohibitively slow without adding signal (instruction count per
+/// algorithm is size-invariant). Wall-clock mode runs the full sweep for
+/// Bencher's throughput tracking.
+#[cfg(codspeed)]
+const SNAPSHOT_SIZES_MIB: &[usize] = &[1];
+#[cfg(not(codspeed))]
+const SNAPSHOT_SIZES_MIB: &[usize] = &[1, 10, 100];
+
+/// Memory sizes (MiB) used in the end-to-end execute_tool real-memory bench.
+/// Same rationale as SNAPSHOT_SIZES_MIB.
+#[cfg(codspeed)]
+const EXECUTE_REAL_MEM_SIZES_MIB: &[usize] = &[1];
+#[cfg(not(codspeed))]
+const EXECUTE_REAL_MEM_SIZES_MIB: &[usize] = &[1, 10, 100];
 
 /// Deterministic, *non-trivially-compressible* memory buffer.
 ///
@@ -87,7 +118,8 @@ fn bench_cold_start(c: &mut Criterion) {
 }
 
 /// Phase 1B — Snapshot creation: zstd compression + SHA-256 of pseudo-random
-/// memory, parameterized by linear memory size (1, 10, 100 MiB).
+/// memory, parameterized by linear memory size (1, 10, 100 MiB in wall-clock
+/// mode; 1 MiB only in codspeed mode — see SNAPSHOT_SIZES_MIB).
 fn bench_snapshot_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot_create");
     group.warm_up_time(Duration::from_secs(3));
@@ -95,8 +127,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
     // Sample size scaled down for the 100 MiB case so wall time stays bounded.
     group.sample_size(50);
 
-    let sizes_mb: [usize; 3] = [1, 10, 100];
-    for &mb in &sizes_mb {
+    for &mb in SNAPSHOT_SIZES_MIB {
         let bytes = mb * 1024 * 1024;
         let mem = pseudo_random_buffer(bytes);
         group.throughput(Throughput::Bytes(bytes as u64));
@@ -124,8 +155,7 @@ fn bench_rollback(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(15));
     group.sample_size(50);
 
-    let sizes_mb: [usize; 3] = [1, 10, 100];
-    for &mb in &sizes_mb {
+    for &mb in SNAPSHOT_SIZES_MIB {
         let bytes = mb * 1024 * 1024;
         let mem = pseudo_random_buffer(bytes);
         let mgr = SnapshotManager::new(8);
@@ -200,8 +230,7 @@ fn bench_execute_with_real_memory(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(20));
     group.sample_size(30);
 
-    let sizes_mib: [usize; 3] = [1, 10, 100];
-    for &mib in &sizes_mib {
+    for &mib in EXECUTE_REAL_MEM_SIZES_MIB {
         let pages = (mib * 1024 * 1024) / 65536;
         // WAT that grows to `pages` pages and touches one byte in each
         // page so wasmtime actually allocates the underlying memory.

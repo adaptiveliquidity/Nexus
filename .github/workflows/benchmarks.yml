@@ -107,10 +107,12 @@ jobs:
   codspeed:
     name: "Criterion → Codspeed.io (deterministic)"
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    # Skip the whole codspeed job if the token isn't set. Useful for fork PRs
-    # (which can't see secrets) and for the period before Cael completes
-    # SETUP.md. The bencher job still runs and produces wall-clock data.
+    # Bumped from 30 → 60. Empirical: cargo-codspeed build of wasmtime+cranelift
+    # (Nexus's deps) plus cachegrind-instrumented run of all bench scenarios
+    # routinely lands in the 25-50 min range. The previous 30 min timeout was
+    # cutting it off mid-run. We're not paying for runner time during a cancel,
+    # so a higher ceiling is essentially free insurance.
+    timeout-minutes: 60
     if: ${{ vars.CODSPEED_ENABLED != 'false' }}
     steps:
       - uses: actions/checkout@v4
@@ -130,9 +132,16 @@ jobs:
         if: steps.cs_config.outputs.configured == 'true'
         with:
           shared-key: codspeed-${{ runner.os }}
-      - name: Install cargo-codspeed
+      # Use taiki-e/install-action to grab a prebuilt cargo-codspeed binary in
+      # ~5 seconds, instead of `cargo install cargo-codspeed --locked` which
+      # compiles from source and costs 3-5 minutes per run. Combined with the
+      # Swatinem rust-cache above, this brings the total install overhead to
+      # ~10 s on a warm cache vs the previous ~5 min cold compile.
+      - name: Install cargo-codspeed (prebuilt)
         if: steps.cs_config.outputs.configured == 'true'
-        run: cargo install cargo-codspeed --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
       # cargo-codspeed has exactly two subcommands: `build` and `run`. There is
       # no `bench` subcommand — `cargo codspeed bench` fails with
       # "unrecognized subcommand". You must build first, then run; `run` on its
