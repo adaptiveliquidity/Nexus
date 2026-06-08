@@ -90,9 +90,16 @@ jobs:
           shared-key: codspeed-${{ runner.os }}
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --locked
+      # cargo-codspeed has exactly two subcommands: `build` and `run`. There is
+      # no `bench` subcommand — `cargo codspeed bench` fails with
+      # "unrecognized subcommand". You must build first, then run; `run` on its
+      # own only executes previously-built benchmarks and will find nothing on
+      # a fresh checkout.
       - uses: CodSpeedHQ/action@v3
         with:
-          run: cargo codspeed bench --bench nexus_validation
+          run: |
+            cargo codspeed build --bench nexus_validation
+            cargo codspeed run --bench nexus_validation
           token: ${{ secrets.CODSPEED_TOKEN }}
 
   publish-dashboard:
