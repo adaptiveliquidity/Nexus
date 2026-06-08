@@ -42,9 +42,12 @@ jobs:
             echo "- rustc: $(rustc --version)"
           } > benchmark_evidence/runner.md
 
+      # Native Criterion output — Bencher's rust_criterion adapter parses this directly.
+      # Do NOT pass --output-format bencher; that produces libtest-style output meant
+      # for the rust_bench adapter, and would cause Bencher to fail parsing.
       - name: Run Criterion
         run: |
-          cargo bench --bench nexus_validation -- --output-format bencher \
+          cargo bench --bench nexus_validation \
             | tee benchmark_evidence/criterion_raw.log
 
       - name: Upload to Bencher.dev
@@ -85,6 +88,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: codspeed-${{ runner.os }}
+      - name: Install cargo-codspeed
+        run: cargo install cargo-codspeed --locked
       - uses: CodSpeedHQ/action@v3
         with:
           run: cargo codspeed bench --bench nexus_validation
@@ -106,6 +111,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
       - name: Build dashboard
         run: |
           cd dashboard
