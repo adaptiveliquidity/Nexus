@@ -21,13 +21,29 @@ on:
 jobs:
   rescore:
     runs-on: ubuntu-latest
-    if: ${{ secrets.OPENAI_API_KEY != '' || secrets.ANTHROPIC_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check LLM API key presence
+        id: llm_config
+        run: |
+          if [ -n "$OPENAI_KEY" ] || [ -n "$ANTHROPIC_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "⚠ Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY secret is set — skipping rescore."
+          fi
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.llm_config.outputs.configured == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.llm_config.outputs.configured == 'true'
 
       - name: Capture Phase 3 ErrorLogs
+        if: steps.llm_config.outputs.configured == 'true'
         env:
           CARGO_TARGET_DIR: ./target
         run: |
@@ -36,6 +52,7 @@ jobs:
           bash scripts/run_phase3_capture.sh
 
       - name: Score via external LLM
+        if: steps.llm_config.outputs.configured == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
