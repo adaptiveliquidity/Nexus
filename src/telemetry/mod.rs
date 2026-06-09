@@ -2,7 +2,7 @@
 //! 
 //! Execution tracking and AI feedback for self-correction.
 
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

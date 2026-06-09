@@ -2,7 +2,7 @@
 //! 
 //! Validates execution health and detects issues.
 
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

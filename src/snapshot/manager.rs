@@ -2,9 +2,9 @@
 //! 
 //! Provides microsecond snapshots and instant rollback for WASM state.
 
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

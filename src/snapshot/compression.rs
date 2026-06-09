@@ -2,7 +2,6 @@
 //!
 //! High-performance compression for WASM memory snapshots.
 
-use std::io::{Read, Write};
 
 /// Compression algorithm selection
 #[derive(Debug, Clone, Copy, Default)]

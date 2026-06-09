@@ -470,7 +470,6 @@ fn run_benchmark(iterations: u32) -> anyhow::Result<()> {
     
     use std::time::Instant;
     use std::thread;
-    use std::sync::atomic::{AtomicBool, Ordering};
     
     // =================================================================
     // BENCHMARK 1: Cold Start Time

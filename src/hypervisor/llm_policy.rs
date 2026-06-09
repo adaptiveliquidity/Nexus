@@ -21,14 +21,14 @@
 //! gate the layered policy assembly.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::failure_mode::FailureMode;
-use super::recovery::{RecoveryAction, RecoveryPolicy, RecoverySource};
+use super::recovery::{RecoveryAction, RecoveryPolicy};
+#[cfg(feature = "ai-recovery")]
+use super::recovery::RecoverySource;
 
 /// What model family to call. The HTTP client is built once per `LLMPolicy`
 /// and shared across requests.
@@ -168,10 +168,10 @@ impl RecoveryPolicy for LLMPolicy {
 
         #[cfg(feature = "ai-recovery")]
         {
-            let start = Instant::now();
+            let start = std::time::Instant::now();
             let result = futures_lite_blocking_call(self, &sanitized, mode, operation);
             let elapsed_ms = start.elapsed().as_millis();
-            debug!(
+            tracing::debug!(
                 target: "nexus.llm",
                 operation = operation,
                 failure_category = mode.category(),

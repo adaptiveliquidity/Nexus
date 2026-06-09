@@ -143,8 +143,6 @@ impl FuelMeter {
 
 /// Predefined fuel configurations for common scenarios
 pub mod presets {
-    use super::*;
-
     /// Quick execution (file read, simple calc)
     pub fn quick() -> u64 {
         100_000 // 100k instructions
