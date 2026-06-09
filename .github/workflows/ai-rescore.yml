@@ -64,6 +64,7 @@ jobs:
             --out artifacts/raw/phase3_ai_rescore_ci.md
 
       - name: Fail the job if accuracy regressed
+        if: steps.llm_config.outputs.configured == 'true'
         run: |
           # Parse the headline accuracy out of the rescore file; require >= 70%.
           acc=$(grep -oE "Aggregate accuracy rate: [0-9]+" \
@@ -79,7 +80,7 @@ jobs:
           echo "AI accuracy ${acc}% OK"
 
       - name: Upload rescore
-        if: always()
+        if: always() && steps.llm_config.outputs.configured == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: phase3-ai-rescore
