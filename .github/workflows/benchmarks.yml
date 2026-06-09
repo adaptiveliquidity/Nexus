@@ -105,13 +105,19 @@ jobs:
           retention-days: 90
 
   codspeed:
-    name: "Criterion → Codspeed.io (deterministic)"
+    name: "Criterion → Codspeed.io (${{ matrix.feature }})"
     runs-on: ubuntu-24.04
-    # Bumped from 30 → 60. Empirical: cargo-codspeed build of wasmtime+cranelift
-    # (Nexus's deps) plus cachegrind-instrumented run of all bench scenarios
-    # routinely lands in the 25-50 min range. The previous 30 min timeout was
-    # cutting it off mid-run. We're not paying for runner time during a cancel,
-    # so a higher ceiling is essentially free insurance.
+    strategy:
+      fail-fast: false
+      matrix:
+        feature:
+          - bench-cold-start
+          - bench-snapshot-create
+          - bench-snapshot-rollback
+          - bench-execute-tool
+          - bench-execute-real-memory
+    # CodSpeed runs under cachegrind, so each matrix leg enables exactly one
+    # benchmark feature shard. Native Criterion/Bencher remains unsharded.
     timeout-minutes: 60
     if: ${{ vars.CODSPEED_ENABLED != 'false' }}
     steps:
@@ -131,7 +137,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.cs_config.outputs.configured == 'true'
         with:
-          shared-key: codspeed-${{ runner.os }}
+          shared-key: codspeed-${{ runner.os }}-${{ matrix.feature }}
       # Use taiki-e/install-action to grab a prebuilt cargo-codspeed binary in
       # ~5 seconds, instead of `cargo install cargo-codspeed --locked` which
       # compiles from source and costs 3-5 minutes per run. Combined with the
@@ -151,7 +157,7 @@ jobs:
         if: steps.cs_config.outputs.configured == 'true'
         with:
           run: |
-            cargo codspeed build --bench nexus_validation
+            cargo codspeed build --bench nexus_validation --features ${{ matrix.feature }}
             cargo codspeed run --bench nexus_validation
           token: ${{ secrets.CODSPEED_TOKEN }}
 

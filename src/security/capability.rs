@@ -169,6 +169,12 @@ pub struct CapabilityManager {
     revoked_tokens: HashMap<Uuid, DateTime<Utc>>,
 }
 
+impl Default for CapabilityManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CapabilityManager {
     /// Create a new capability manager with fresh keys
     pub fn new() -> Self {

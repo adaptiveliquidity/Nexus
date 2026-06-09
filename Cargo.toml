@@ -9,8 +9,8 @@ repository = "https://github.com/nexus-ai/nexus"
 
 [dependencies]
 # WebAssembly runtime
-wasmtime = { version = "37.0", features = ["cranelift", "async"] }
-wasmtime-wasi = { version = "37.0" }
+wasmtime = { version = "45.0", features = ["cranelift", "async"] }
+wasmtime-wasi = { version = "45.0" }
 
 # Async runtime
 tokio = { version = "1.44", features = ["full"] }
@@ -49,7 +49,7 @@ sysinfo = "0.32"
 sha2 = "0.10"
 
 # Optional: metrics
-prometheus = { version = "0.13", optional = true }
+prometheus = { version = "0.14", optional = true }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -68,6 +68,13 @@ tokio-util = { version = "0.7", optional = true }
 [features]
 default = []
 component-model = []
+# Benchmark shards used by the CodSpeed workflow. Native Criterion/Bencher
+# runs do not enable these features and still execute the complete bench suite.
+bench-cold-start = []
+bench-snapshot-create = []
+bench-snapshot-rollback = []
+bench-execute-tool = []
+bench-execute-real-memory = []
 # Optional LLM-backed recovery suggester (Phase B). Off by default so
 # `cargo build` does not pull in HTTP / TLS / token-secret handling for
 # users who only want the static + instinct policies.
@@ -91,6 +98,9 @@ required-features = []
 [[bench]]
 name = "nexus_validation"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codspeed)'] }
 
 [profile.release]
 opt-level = "z"

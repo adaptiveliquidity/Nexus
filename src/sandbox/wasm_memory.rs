@@ -28,7 +28,7 @@ impl WasmMemoryState {
     
     /// Create from raw memory bytes
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let page_count = ((bytes.len() + 65535) / 65536) as u32;
+        let page_count = bytes.len().div_ceil(65536) as u32;
         let size_bytes = bytes.len();
         
         // Split into pages
