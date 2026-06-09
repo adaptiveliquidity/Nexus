@@ -41,23 +41,38 @@ use nexus::snapshot::{
     ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
 };
 
-/// Memory sizes (MiB) used in parameterised snapshot benches.
+/// Snapshot buffer sizes as `(bytes, label)`.
 ///
-/// CodSpeed mode runs only the smallest size — cachegrind makes the larger
-/// variants prohibitively slow without adding signal (instruction count per
-/// algorithm is size-invariant). Wall-clock mode runs the full sweep for
-/// Bencher's throughput tracking.
+/// CodSpeed mode uses 64 KiB — `codspeed-criterion-compat` replaces the
+/// Criterion measurement backend entirely (ignoring `sample_size`,
+/// `warm_up_time`, `measurement_time`), so the *only* lever we have is
+/// data size.  1 MiB of pseudo-random data through zstd + SHA-256 under
+/// cachegrind generates billions of tracked instructions and blows past
+/// the 60-min GitHub Actions timeout.  64 KiB is large enough for the
+/// algorithm's instruction profile to be representative while keeping
+/// each shard well under 30 min.
+///
+/// Wall-clock mode runs the full {1, 10, 100} MiB sweep for Bencher's
+/// absolute throughput tracking.
 #[cfg(codspeed)]
-const SNAPSHOT_SIZES_MIB: &[usize] = &[1];
+const SNAPSHOT_SIZES: &[(usize, &str)] = &[(65_536, "64KiB")];
 #[cfg(not(codspeed))]
-const SNAPSHOT_SIZES_MIB: &[usize] = &[1, 10, 100];
+const SNAPSHOT_SIZES: &[(usize, &str)] = &[
+    (1_048_576, "1MiB"),
+    (10_485_760, "10MiB"),
+    (104_857_600, "100MiB"),
+];
 
-/// Memory sizes (MiB) used in the end-to-end execute_tool real-memory bench.
-/// Same rationale as SNAPSHOT_SIZES_MIB.
+/// End-to-end execute_tool real-memory sizes as `(bytes, label)`.
+/// Same rationale as `SNAPSHOT_SIZES`.
 #[cfg(codspeed)]
-const EXECUTE_REAL_MEM_SIZES_MIB: &[usize] = &[1];
+const EXECUTE_REAL_MEM_SIZES: &[(usize, &str)] = &[(65_536, "64KiB")];
 #[cfg(not(codspeed))]
-const EXECUTE_REAL_MEM_SIZES_MIB: &[usize] = &[1, 10, 100];
+const EXECUTE_REAL_MEM_SIZES: &[(usize, &str)] = &[
+    (1_048_576, "1MiB"),
+    (10_485_760, "10MiB"),
+    (104_857_600, "100MiB"),
+];
 
 /// Deterministic, *non-trivially-compressible* memory buffer.
 ///
@@ -145,11 +160,10 @@ fn bench_snapshot_creation(c: &mut Criterion) {
         group.sample_size(10);
     }
 
-    for &mb in SNAPSHOT_SIZES_MIB {
-        let bytes = mb * 1024 * 1024;
+    for &(bytes, label) in SNAPSHOT_SIZES {
         let mem = pseudo_random_buffer(bytes);
         group.throughput(Throughput::Bytes(bytes as u64));
-        group.bench_with_input(BenchmarkId::new("MiB", mb), &mem, |b, mem| {
+        group.bench_with_input(BenchmarkId::new("size", label), &mem, |b, mem| {
             let mgr = SnapshotManager::new(8);
             b.iter(|| {
                 let snap = make_snapshot(&mgr, mem.clone());
@@ -179,14 +193,13 @@ fn bench_rollback(c: &mut Criterion) {
         group.sample_size(10);
     }
 
-    for &mb in SNAPSHOT_SIZES_MIB {
-        let bytes = mb * 1024 * 1024;
+    for &(bytes, label) in SNAPSHOT_SIZES {
         let mem = pseudo_random_buffer(bytes);
         let mgr = SnapshotManager::new(8);
         let snap = make_snapshot(&mgr, mem);
         let id = snap.id;
         group.throughput(Throughput::Bytes(bytes as u64));
-        group.bench_with_input(BenchmarkId::new("MiB", mb), &id, |b, id| {
+        group.bench_with_input(BenchmarkId::new("size", label), &id, |b, id| {
             b.iter(|| {
                 let result = mgr.rollback_to(id).expect("rollback");
                 black_box(result);
@@ -274,21 +287,16 @@ fn bench_execute_with_real_memory(c: &mut Criterion) {
         group.sample_size(10);
     }
 
-    for &mib in EXECUTE_REAL_MEM_SIZES_MIB {
-        let pages = (mib * 1024 * 1024) / 65536;
-        // WAT that grows to `pages` pages and touches one byte in each
-        // page so wasmtime actually allocates the underlying memory.
-        // `memory.grow` from the start size (1 page) by (pages - 1).
+    for &(total_bytes, label) in EXECUTE_REAL_MEM_SIZES {
+        let pages = total_bytes / 65536;
         let wat = format!(
             r#"(module
                 (memory (export "memory") 1)
                 (func (export "_start")
                     (local $i i32)
-                    ;; grow to {pages} pages total
                     i32.const {grow}
                     memory.grow
                     drop
-                    ;; touch one byte per page so the kernel commits them
                     (local.set $i (i32.const 0))
                     (loop $touch
                         (i32.store8 (local.get $i) (i32.const 42))
@@ -296,25 +304,22 @@ fn bench_execute_with_real_memory(c: &mut Criterion) {
                         (br_if $touch (i32.lt_s (local.get $i) (i32.const {total})))
                     )
                 ))"#,
-            pages = pages,
             grow = pages.saturating_sub(1),
-            total = mib * 1024 * 1024,
+            total = total_bytes,
         );
         let wasm = wat::parse_str(&wat).expect("wat compiles");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
-        // Fuel cap large enough for the page-touch loop on 100 MiB
-        // (`100 * 1024 = 102_400` iterations * ~5 ops = 512 K instructions).
         let mut cfg = HypervisorConfig::default();
         cfg.sandbox_config.max_fuel = 50_000_000;
         let hv = NexusHypervisor::new(cfg).expect("hv");
 
-        group.throughput(Throughput::Bytes((mib * 1024 * 1024) as u64));
-        group.bench_with_input(BenchmarkId::new("MiB", mib), &wasm, |b, wasm| {
+        group.throughput(Throughput::Bytes(total_bytes as u64));
+        group.bench_with_input(BenchmarkId::new("size", label), &wasm, |b, wasm| {
             b.iter(|| {
-                let tool = ToolDefinition::new(format!("realmem_{mib}"), wasm.clone());
+                let tool = ToolDefinition::new(format!("realmem_{label}"), wasm.clone());
                 let out = rt
                     .block_on(hv.execute_tool(tool, serde_json::json!({})))
                     .expect("execute_tool");
