@@ -17,14 +17,14 @@
 //! Wall-clock mode (default `cargo bench`) runs the full {1, 10, 100} MiB
 //! surface — these absolute numbers go to Bencher.dev for regression tracking.
 //!
-//! CodSpeed mode (`cargo codspeed run`) runs each bench under Valgrind/
-//! cachegrind for deterministic instruction counts. Cachegrind adds 20-100x
-//! wall-clock overhead, so the GitHub workflow shards CodSpeed across benchmark
-//! feature flags. Native Criterion/Bencher runs leave those features disabled
-//! and execute the complete surface; CodSpeed runs compile one selected shard at
-//! a time. For size-parameterized CodSpeed shards, we still restrict the sweep
-//! to the smallest size so each shard stays under timeout. Absolute throughput
-//! is still measured at full surface by the wall-clock Bencher job.
+//! CodSpeed mode (`cargo codspeed run`) runs under Valgrind/cachegrind for
+//! deterministic instruction counts. Compilation dominates wall-clock time
+//! (~50 min cold); the actual cachegrind measurement completes in seconds.
+//! The CI workflow therefore compiles once with all features enabled and runs
+//! every benchmark in a single job. Size-parameterized benchmarks use 64 KiB
+//! under CodSpeed (vs {1, 10, 100} MiB for wall-clock) to keep the
+//! measurement pass lightweight. Absolute throughput is still measured at full
+//! surface by the wall-clock Bencher job.
 
 use std::time::Duration;
 

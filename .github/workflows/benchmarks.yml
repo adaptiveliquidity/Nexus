@@ -9,6 +9,10 @@ on:
     - cron: "0 3 * * 0"
   workflow_dispatch:
 
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -90,6 +94,7 @@ jobs:
 
       - uses: sigstore/cosign-installer@v3
       - name: Sign artifacts with Sigstore
+        continue-on-error: true
         run: |
           tar czf benchmark_evidence/criterion_artifacts.tar.gz \
             target/criterion benchmark_evidence/runner.md \
@@ -105,19 +110,12 @@ jobs:
           retention-days: 90
 
   codspeed:
-    name: "Criterion → Codspeed.io (${{ matrix.feature }})"
+    name: "Criterion → Codspeed.io"
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        feature:
-          - bench-cold-start
-          - bench-snapshot-create
-          - bench-snapshot-rollback
-          - bench-execute-tool
-          - bench-execute-real-memory
-    # CodSpeed runs under cachegrind, so each matrix leg enables exactly one
-    # benchmark feature shard. Native Criterion/Bencher remains unsharded.
+    # Compilation dominates wall-clock time (~50 min cold, ~5 min cached);
+    # the actual cachegrind measurement of all benchmarks takes <10 s total.
+    # A single job that enables every feature compiles once and runs all
+    # benchmarks, instead of 5 shards each recompiling the full dep tree.
     timeout-minutes: 60
     if: ${{ vars.CODSPEED_ENABLED != 'false' }}
     steps:
@@ -137,27 +135,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.cs_config.outputs.configured == 'true'
         with:
-          shared-key: codspeed-${{ runner.os }}-${{ matrix.feature }}
-      # Use taiki-e/install-action to grab a prebuilt cargo-codspeed binary in
-      # ~5 seconds, instead of `cargo install cargo-codspeed --locked` which
-      # compiles from source and costs 3-5 minutes per run. Combined with the
-      # Swatinem rust-cache above, this brings the total install overhead to
-      # ~10 s on a warm cache vs the previous ~5 min cold compile.
+          shared-key: codspeed-${{ runner.os }}
       - name: Install cargo-codspeed (prebuilt)
         if: steps.cs_config.outputs.configured == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-codspeed
-      # cargo-codspeed has exactly two subcommands: `build` and `run`. There is
-      # no `bench` subcommand — `cargo codspeed bench` fails with
-      # "unrecognized subcommand". You must build first, then run; `run` on its
-      # own only executes previously-built benchmarks and will find nothing on
-      # a fresh checkout.
       - uses: CodSpeedHQ/action@v3
         if: steps.cs_config.outputs.configured == 'true'
         with:
           run: |
-            cargo codspeed build --bench nexus_validation --features ${{ matrix.feature }}
+            cargo codspeed build --bench nexus_validation \
+              --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory
             cargo codspeed run --bench nexus_validation
           token: ${{ secrets.CODSPEED_TOKEN }}
 
