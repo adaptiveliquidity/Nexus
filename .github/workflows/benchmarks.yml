@@ -112,11 +112,9 @@ jobs:
   codspeed:
     name: "Criterion → Codspeed.io"
     runs-on: ubuntu-24.04
-    # Compilation dominates wall-clock time (~50 min cold, ~5 min cached);
-    # the actual cachegrind measurement of all benchmarks takes <10 s total.
-    # A single job that enables every feature compiles once and runs all
-    # benchmarks, instead of 5 shards each recompiling the full dep tree.
-    timeout-minutes: 60
+    # Compilation dominates wall-clock time (~35 min cold without LTO, ~5 min
+    # cached); the actual cachegrind measurement takes <10 s total.
+    timeout-minutes: 75
     if: ${{ vars.CODSPEED_ENABLED != 'false' }}
     steps:
       - uses: actions/checkout@v4
