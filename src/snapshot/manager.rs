@@ -9,8 +9,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use sha2::{Sha256, Digest};
-use zstd::bulk::compress_to_buffer;
-
 use crate::error::{NexusError, Result};
 
 /// Represents a complete state snapshot
@@ -206,7 +204,7 @@ pub enum RevertOperation {
 }
 
 /// Execution state for WASM
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionState {
     /// Program counter
     pub pc: u64,
@@ -220,19 +218,6 @@ pub struct ExecutionState {
     pub locals: Vec<i32>,
     /// Global values
     pub globals: Vec<i64>,
-}
-
-impl Default for ExecutionState {
-    fn default() -> Self {
-        ExecutionState {
-            pc: 0,
-            sp: 0,
-            stack_depth: 0,
-            call_stack: Vec::new(),
-            locals: Vec::new(),
-            globals: Vec::new(),
-        }
-    }
 }
 
 /// Snapshot metadata

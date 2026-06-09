@@ -68,6 +68,13 @@ tokio-util = { version = "0.7", optional = true }
 [features]
 default = []
 component-model = []
+# Benchmark shards used by the CodSpeed workflow. Native Criterion/Bencher
+# runs do not enable these features and still execute the complete bench suite.
+bench-cold-start = []
+bench-snapshot-create = []
+bench-snapshot-rollback = []
+bench-execute-tool = []
+bench-execute-real-memory = []
 # Optional LLM-backed recovery suggester (Phase B). Off by default so
 # `cargo build` does not pull in HTTP / TLS / token-secret handling for
 # users who only want the static + instinct policies.
@@ -91,6 +98,9 @@ required-features = []
 [[bench]]
 name = "nexus_validation"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codspeed)'] }
 
 [profile.release]
 opt-level = "z"

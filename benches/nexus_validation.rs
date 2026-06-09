@@ -19,11 +19,12 @@
 //!
 //! CodSpeed mode (`cargo codspeed run`) runs each bench under Valgrind/
 //! cachegrind for deterministic instruction counts. Cachegrind adds 20-100x
-//! wall-clock overhead, and instruction count *per algorithm* is identical
-//! across memory sizes — running 1 MiB tells you the same thing as 100 MiB
-//! but in 1% of the time. We therefore restrict the parameter sweep to the
-//! smallest size under codspeed so the job stays under timeout. Absolute
-//! throughput is still measured at full surface by the wall-clock Bencher job.
+//! wall-clock overhead, so the GitHub workflow shards CodSpeed across benchmark
+//! feature flags. Native Criterion/Bencher runs leave those features disabled
+//! and execute the complete surface; CodSpeed runs compile one selected shard at
+//! a time. For size-parameterized CodSpeed shards, we still restrict the sweep
+//! to the smallest size so each shard stays under timeout. Absolute throughput
+//! is still measured at full surface by the wall-clock Bencher job.
 
 use std::time::Duration;
 
@@ -32,9 +33,7 @@ use codspeed_criterion_compat::{
     black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
 };
 #[cfg(not(codspeed))]
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use nexus::hypervisor::{HypervisorConfig, NexusHypervisor, ToolDefinition};
 use nexus::sandbox::{SandboxConfig, WasmSandbox};
@@ -92,6 +91,7 @@ fn make_snapshot(mgr: &SnapshotManager, mem: Vec<u8>) -> Snapshot {
 
 /// Phase 1A — Cold start: building the engine + sandbox is the dominant
 /// cost path users hit when spawning a new agent context.
+#[cfg(any(not(codspeed), feature = "bench-cold-start"))]
 fn bench_cold_start(c: &mut Criterion) {
     let mut group = c.benchmark_group("cold_start");
     group.warm_up_time(Duration::from_secs(3));
@@ -120,6 +120,7 @@ fn bench_cold_start(c: &mut Criterion) {
 /// Phase 1B — Snapshot creation: zstd compression + SHA-256 of pseudo-random
 /// memory, parameterized by linear memory size (1, 10, 100 MiB in wall-clock
 /// mode; 1 MiB only in codspeed mode — see SNAPSHOT_SIZES_MIB).
+#[cfg(any(not(codspeed), feature = "bench-snapshot-create"))]
 fn bench_snapshot_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot_create");
     group.warm_up_time(Duration::from_secs(3));
@@ -131,17 +132,13 @@ fn bench_snapshot_creation(c: &mut Criterion) {
         let bytes = mb * 1024 * 1024;
         let mem = pseudo_random_buffer(bytes);
         group.throughput(Throughput::Bytes(bytes as u64));
-        group.bench_with_input(
-            BenchmarkId::new("MiB", mb),
-            &mem,
-            |b, mem| {
-                let mgr = SnapshotManager::new(8);
-                b.iter(|| {
-                    let snap = make_snapshot(&mgr, mem.clone());
-                    black_box(snap);
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("MiB", mb), &mem, |b, mem| {
+            let mgr = SnapshotManager::new(8);
+            b.iter(|| {
+                let snap = make_snapshot(&mgr, mem.clone());
+                black_box(snap);
+            })
+        });
     }
 
     group.finish();
@@ -149,6 +146,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
 
 /// Phase 1C — Rollback: pre-create a snapshot of pseudo-random memory of the
 /// given size, then measure `rollback_to` (decompress + integrity revert).
+#[cfg(any(not(codspeed), feature = "bench-snapshot-rollback"))]
 fn bench_rollback(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot_rollback");
     group.warm_up_time(Duration::from_secs(3));
@@ -178,6 +176,7 @@ fn bench_rollback(c: &mut Criterion) {
 ///
 /// Uses the synchronous bencher with a single shared tokio current-thread
 /// runtime so we are not paying for runtime construction inside the loop.
+#[cfg(any(not(codspeed), feature = "bench-execute-tool"))]
 fn bench_execute_end_to_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_tool");
     group.warm_up_time(Duration::from_secs(3));
@@ -224,6 +223,7 @@ fn bench_execute_end_to_end(c: &mut Criterion) {
 /// hypervisor's pre-call-memory capture (Phase A) is what feeds the
 /// snapshot. Together this measures the *real* end-to-end snap cost for
 /// a workload that actually owns N MiB of WASM linear memory.
+#[cfg(any(not(codspeed), feature = "bench-execute-real-memory"))]
 fn bench_execute_with_real_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_tool_real_memory");
     group.warm_up_time(Duration::from_secs(3));
@@ -268,29 +268,31 @@ fn bench_execute_with_real_memory(c: &mut Criterion) {
         let hv = NexusHypervisor::new(cfg).expect("hv");
 
         group.throughput(Throughput::Bytes((mib * 1024 * 1024) as u64));
-        group.bench_with_input(
-            BenchmarkId::new("MiB", mib),
-            &wasm,
-            |b, wasm| {
-                b.iter(|| {
-                    let tool = ToolDefinition::new(format!("realmem_{mib}"), wasm.clone());
-                    let out = rt
-                        .block_on(hv.execute_tool(tool, serde_json::json!({})))
-                        .expect("execute_tool");
-                    black_box(out);
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("MiB", mib), &wasm, |b, wasm| {
+            b.iter(|| {
+                let tool = ToolDefinition::new(format!("realmem_{mib}"), wasm.clone());
+                let out = rt
+                    .block_on(hv.execute_tool(tool, serde_json::json!({})))
+                    .expect("execute_tool");
+                black_box(out);
+            })
+        });
     }
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_cold_start,
-    bench_snapshot_creation,
-    bench_rollback,
-    bench_execute_end_to_end,
-    bench_execute_with_real_memory,
-);
+fn selected_benches(c: &mut Criterion) {
+    #[cfg(any(not(codspeed), feature = "bench-cold-start"))]
+    bench_cold_start(c);
+    #[cfg(any(not(codspeed), feature = "bench-snapshot-create"))]
+    bench_snapshot_creation(c);
+    #[cfg(any(not(codspeed), feature = "bench-snapshot-rollback"))]
+    bench_rollback(c);
+    #[cfg(any(not(codspeed), feature = "bench-execute-tool"))]
+    bench_execute_end_to_end(c);
+    #[cfg(any(not(codspeed), feature = "bench-execute-real-memory"))]
+    bench_execute_with_real_memory(c);
+}
+
+criterion_group!(benches, selected_benches);
 criterion_main!(benches);
