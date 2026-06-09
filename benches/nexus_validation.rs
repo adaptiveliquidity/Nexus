@@ -94,9 +94,18 @@ fn make_snapshot(mgr: &SnapshotManager, mem: Vec<u8>) -> Snapshot {
 #[cfg(any(not(codspeed), feature = "bench-cold-start"))]
 fn bench_cold_start(c: &mut Criterion) {
     let mut group = c.benchmark_group("cold_start");
-    group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(100);
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(10));
+        group.sample_size(100);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
 
     group.bench_function("sandbox_new", |b| {
         b.iter(|| {
@@ -123,10 +132,18 @@ fn bench_cold_start(c: &mut Criterion) {
 #[cfg(any(not(codspeed), feature = "bench-snapshot-create"))]
 fn bench_snapshot_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot_create");
-    group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(Duration::from_secs(15));
-    // Sample size scaled down for the 100 MiB case so wall time stays bounded.
-    group.sample_size(50);
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(15));
+        group.sample_size(50);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
 
     for &mb in SNAPSHOT_SIZES_MIB {
         let bytes = mb * 1024 * 1024;
@@ -149,9 +166,18 @@ fn bench_snapshot_creation(c: &mut Criterion) {
 #[cfg(any(not(codspeed), feature = "bench-snapshot-rollback"))]
 fn bench_rollback(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot_rollback");
-    group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(50);
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(15));
+        group.sample_size(50);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
 
     for &mb in SNAPSHOT_SIZES_MIB {
         let bytes = mb * 1024 * 1024;
@@ -179,9 +205,18 @@ fn bench_rollback(c: &mut Criterion) {
 #[cfg(any(not(codspeed), feature = "bench-execute-tool"))]
 fn bench_execute_end_to_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_tool");
-    group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(60);
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(15));
+        group.sample_size(60);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
 
     let wasm = wat::parse_str(
         r#"
@@ -226,9 +261,18 @@ fn bench_execute_end_to_end(c: &mut Criterion) {
 #[cfg(any(not(codspeed), feature = "bench-execute-real-memory"))]
 fn bench_execute_with_real_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_tool_real_memory");
-    group.warm_up_time(Duration::from_secs(3));
-    group.measurement_time(Duration::from_secs(20));
-    group.sample_size(30);
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(20));
+        group.sample_size(30);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
 
     for &mib in EXECUTE_REAL_MEM_SIZES_MIB {
         let pages = (mib * 1024 * 1024) / 65536;
