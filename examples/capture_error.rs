@@ -111,7 +111,7 @@ fn main() -> ExitCode {
     if args.len() != 3 {
         eprintln!(
             "usage: {} <scenario> <output.json>\nscenarios: infinite_loop, trap_unreachable, div_by_zero, stack_overflow, missing_start",
-            args.get(0).map(String::as_str).unwrap_or("capture_error")
+            args.first().map(String::as_str).unwrap_or("capture_error")
         );
         return ExitCode::from(2);
     }

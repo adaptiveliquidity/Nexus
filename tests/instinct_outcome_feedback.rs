@@ -45,8 +45,10 @@ fn instinct_is_debited_after_failed_retries() {
         Box::new(InstinctPolicy::new(store.clone())),
     ]));
 
-    let mut cfg = HypervisorConfig::default();
-    cfg.max_retries = 3; // execute_with_retry will call execute_tool 4 times
+    let cfg = HypervisorConfig {
+        max_retries: 3, // execute_with_retry will call execute_tool 4 times
+        ..HypervisorConfig::default()
+    };
     let hv = NexusHypervisor::new_with_policy(cfg, policy)
         .unwrap()
         .with_instinct_store(store.clone());

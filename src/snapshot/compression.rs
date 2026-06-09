@@ -167,7 +167,7 @@ pub fn compress_snapshot_memory(memory: &[u8]) -> Result<(Vec<u8>, usize), Strin
     // 3. LZ4 for fast decompression
 
     let page_size = 65536; // 64KB WASM page
-    if memory.len() % page_size != 0 {
+    if !memory.len().is_multiple_of(page_size) {
         return Err("Snapshot memory length must be a multiple of the WASM page size".to_string());
     }
 
@@ -246,7 +246,7 @@ pub fn decompress_snapshot_memory(compressed: &[u8]) -> Result<Vec<u8>, String> 
         match marker {
             0x00 => {
                 seen_zero_pages += 1;
-                result.extend(std::iter::repeat(0u8).take(page_size));
+                result.extend(std::iter::repeat_n(0u8, page_size));
             }
             0x01 => {
                 seen_nonzero_pages += 1;

@@ -374,7 +374,7 @@ impl SnapshotManager {
         {
             let mut stats = self.stats.write().unwrap();
             stats.total_snapshots += 1;
-            stats.total_memory_saved_mb += (snapshot.original_size - snapshot.compressed_size) as f64 / 1_048_576.0;
+            stats.total_memory_saved_mb += snapshot.original_size.saturating_sub(snapshot.compressed_size) as f64 / 1_048_576.0;
             stats.avg_compression_ratio = (stats.avg_compression_ratio * (stats.total_snapshots - 1) as f64 
                 + snapshot.compression_ratio()) / stats.total_snapshots as f64;
             stats.last_snapshot_time_us = start.elapsed().as_micros() as u64;

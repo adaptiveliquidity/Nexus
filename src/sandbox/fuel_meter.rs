@@ -91,9 +91,8 @@ impl FuelMeter {
 
         // Update consumption rate
         let elapsed = self.start_time.elapsed().as_secs();
-        if elapsed > 0 {
-            let ops = self.operations.load(Ordering::SeqCst);
-            self.consumption_rate.store(ops / elapsed, Ordering::SeqCst);
+        if let Some(rate) = self.operations.load(Ordering::SeqCst).checked_div(elapsed) {
+            self.consumption_rate.store(rate, Ordering::SeqCst);
         }
 
         true
