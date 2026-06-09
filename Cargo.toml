@@ -9,8 +9,8 @@ repository = "https://github.com/nexus-ai/nexus"
 
 [dependencies]
 # WebAssembly runtime
-wasmtime = { version = "37.0", features = ["cranelift", "async"] }
-wasmtime-wasi = { version = "37.0" }
+wasmtime = { version = "45.0", features = ["cranelift", "async"] }
+wasmtime-wasi = { version = "45.0" }
 
 # Async runtime
 tokio = { version = "1.44", features = ["full"] }
@@ -49,7 +49,7 @@ sysinfo = "0.32"
 sha2 = "0.10"
 
 # Optional: metrics
-prometheus = { version = "0.13", optional = true }
+prometheus = { version = "0.14", optional = true }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
