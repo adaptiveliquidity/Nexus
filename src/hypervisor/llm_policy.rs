@@ -21,14 +21,14 @@
 //! gate the layered policy assembly.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::failure_mode::FailureMode;
-use super::recovery::{RecoveryAction, RecoveryPolicy, RecoverySource};
+use super::recovery::{RecoveryAction, RecoveryPolicy};
+#[cfg(feature = "ai-recovery")]
+use super::recovery::RecoverySource;
 
 /// What model family to call. The HTTP client is built once per `LLMPolicy`
 /// and shared across requests.
@@ -99,10 +99,11 @@ impl LLMPolicy {
     /// Sanitize `error_log.description` for inclusion in an LLM prompt.
     ///
     /// Defenses, in order:
-    ///   1. Strip ASCII control characters except `\n` and `\t`.
-    ///   2. Truncate to `budget.max_input_chars`.
-    ///   3. Reject strings that contain known prompt-injection prefixes
-    ///      (returns `None` so the caller skips the LLM call).
+    ///
+    /// 1. Strip ASCII control characters except `\n` and `\t`.
+    /// 2. Truncate to `budget.max_input_chars`.
+    /// 3. Reject strings that contain known prompt-injection prefixes
+    ///    (returns `None` so the caller skips the LLM call).
     pub fn sanitize_for_prompt(&self, raw: &str) -> Option<String> {
         const INJECTION_MARKERS: &[&str] = &[
             "ignore previous",
@@ -167,10 +168,10 @@ impl RecoveryPolicy for LLMPolicy {
 
         #[cfg(feature = "ai-recovery")]
         {
-            let start = Instant::now();
+            let start = std::time::Instant::now();
             let result = futures_lite_blocking_call(self, &sanitized, mode, operation);
             let elapsed_ms = start.elapsed().as_millis();
-            debug!(
+            tracing::debug!(
                 target: "nexus.llm",
                 operation = operation,
                 failure_category = mode.category(),
@@ -325,8 +326,10 @@ mod tests {
 
     #[test]
     fn input_chars_are_capped() {
-        let mut budget = LlmBudget::default();
-        budget.max_input_chars = 16;
+        let budget = LlmBudget {
+            max_input_chars: 16,
+            ..LlmBudget::default()
+        };
         let p = LLMPolicy::new(
             LlmProvider::Openai {
                 api_key: "x".into(),
@@ -342,8 +345,10 @@ mod tests {
 
     #[test]
     fn rate_limit_blocks_after_max_calls() {
-        let mut budget = LlmBudget::default();
-        budget.max_calls_per_minute = 2;
+        let budget = LlmBudget {
+            max_calls_per_minute: 2,
+            ..LlmBudget::default()
+        };
         let p = LLMPolicy::new(
             LlmProvider::Openai {
                 api_key: "x".into(),

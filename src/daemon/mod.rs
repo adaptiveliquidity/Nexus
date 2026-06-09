@@ -14,7 +14,7 @@
 //! Default socket path:
 //!   * POSIX: `${XDG_RUNTIME_DIR:-/tmp}/nexus-agentd.sock`
 //!   * Windows: `\\.\pipe\nexus-agentd`
-//! Override with `NEXUS_AGENTD_SOCKET=<path>` for either platform.
+//!     Override with `NEXUS_AGENTD_SOCKET=<path>` for either platform.
 //!
 //! Concurrency model
 //! -----------------

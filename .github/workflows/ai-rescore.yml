@@ -21,13 +21,29 @@ on:
 jobs:
   rescore:
     runs-on: ubuntu-latest
-    if: ${{ secrets.OPENAI_API_KEY != '' || secrets.ANTHROPIC_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check LLM API key presence
+        id: llm_config
+        run: |
+          if [ -n "$OPENAI_KEY" ] || [ -n "$ANTHROPIC_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "⚠ Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY secret is set — skipping rescore."
+          fi
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.llm_config.outputs.configured == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.llm_config.outputs.configured == 'true'
 
       - name: Capture Phase 3 ErrorLogs
+        if: steps.llm_config.outputs.configured == 'true'
         env:
           CARGO_TARGET_DIR: ./target
         run: |
@@ -36,6 +52,7 @@ jobs:
           bash scripts/run_phase3_capture.sh
 
       - name: Score via external LLM
+        if: steps.llm_config.outputs.configured == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -47,6 +64,7 @@ jobs:
             --out artifacts/raw/phase3_ai_rescore_ci.md
 
       - name: Fail the job if accuracy regressed
+        if: steps.llm_config.outputs.configured == 'true'
         run: |
           # Parse the headline accuracy out of the rescore file; require >= 70%.
           acc=$(grep -oE "Aggregate accuracy rate: [0-9]+" \
@@ -62,7 +80,7 @@ jobs:
           echo "AI accuracy ${acc}% OK"
 
       - name: Upload rescore
-        if: always()
+        if: always() && steps.llm_config.outputs.configured == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: phase3-ai-rescore

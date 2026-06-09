@@ -440,9 +440,11 @@ fn start_session(name: &str, max_snapshots: usize) -> anyhow::Result<()> {
     println!("🧠 Starting Nexus Session: {}", name);
     println!("   Max snapshots: {}", max_snapshots);
     
-    let mut config = HypervisorConfig::default();
-    config.snapshot_capacity = max_snapshots;
-    
+    let config = HypervisorConfig {
+        snapshot_capacity: max_snapshots,
+        ..HypervisorConfig::default()
+    };
+
     let _hypervisor = NexusHypervisor::new(config)?;
     
     println!("\n✅ Session started!");
@@ -468,7 +470,6 @@ fn run_benchmark(iterations: u32) -> anyhow::Result<()> {
     
     use std::time::Instant;
     use std::thread;
-    use std::sync::atomic::{AtomicBool, Ordering};
     
     // =================================================================
     // BENCHMARK 1: Cold Start Time

@@ -1,0 +1,187 @@
+name: Benchmarks (Nexus vs. competitors)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+  checks: write   # bencher needs this to post a GitHub Check on push/dispatch runs
+
+jobs:
+  bencher:
+    name: "Criterion → Bencher.dev"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-${{ runner.os }}
+      - uses: bencherdev/bencher@main
+
+      - name: Record runner provenance
+        run: |
+          mkdir -p benchmark_evidence
+          {
+            echo "## Runner Provenance"
+            echo "- Date (UTC): $(date -u --iso-8601=seconds)"
+            echo "- Commit: ${{ github.sha }}"
+            echo "- Runner: ubuntu-24.04 (GitHub-hosted)"
+            echo "- CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+            echo "- Cores: $(nproc)"
+            echo "- Memory: $(free -h | awk '/^Mem:/ {print $2}')"
+            echo "- Kernel: $(uname -r)"
+            echo "- rustc: $(rustc --version)"
+          } > benchmark_evidence/runner.md
+
+      # Detect whether external benchmark services are configured. PR runs from
+      # forks can't see secrets, and config drift on the main repo can leave one
+      # of these unset. We resolve this once into an env flag so downstream steps
+      # can conditionally upload — the bench itself always runs so contributors
+      # can still iterate locally and CI artifacts are always produced.
+      - name: Detect external service configuration
+        id: config
+        run: |
+          if [ -n "${{ vars.BENCHER_PROJECT }}" ] && [ -n "${{ secrets.BENCHER_API_TOKEN }}" ]; then
+            echo "bencher_configured=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Bencher.dev upload is configured"
+          else
+            echo "bencher_configured=false" >> "$GITHUB_OUTPUT"
+            echo "⚠ Bencher.dev upload will be skipped"
+            echo "  vars.BENCHER_PROJECT set: $([ -n "${{ vars.BENCHER_PROJECT }}" ] && echo yes || echo no)"
+            echo "  secrets.BENCHER_API_TOKEN set: $([ -n "${{ secrets.BENCHER_API_TOKEN }}" ] && echo yes || echo no)"
+            echo "  See SETUP.md — BENCHER_PROJECT goes under 'Variables' (not 'Secrets')"
+          fi
+
+      # Native Criterion output — Bencher's rust_criterion adapter parses this
+      # directly. Do NOT pass --output-format bencher; that produces libtest-style
+      # output meant for the rust_bench adapter, and would cause Bencher to fail
+      # parsing.
+      - name: Run Criterion
+        run: |
+          cargo bench --bench nexus_validation \
+            | tee benchmark_evidence/criterion_raw.log
+
+      # Skip upload if Bencher isn't configured. The bench data is still produced
+      # and signed/archived in later steps, so a missing token doesn't lose data.
+      # On pull_request events bencher posts a PR comment; on push / schedule /
+      # workflow_dispatch it falls back to creating a GitHub Check (requires
+      # `checks: write`, granted at workflow level above).
+      - name: Upload to Bencher.dev
+        if: steps.config.outputs.bencher_configured == 'true'
+        run: |
+          bencher run \
+            --project "${{ vars.BENCHER_PROJECT }}" \
+            --token "${{ secrets.BENCHER_API_TOKEN }}" \
+            --branch "${{ github.ref_name }}" \
+            --testbed "ubuntu-24.04-github" \
+            --adapter rust_criterion \
+            --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+            --file benchmark_evidence/criterion_raw.log
+
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign artifacts with Sigstore
+        continue-on-error: true
+        run: |
+          tar czf benchmark_evidence/criterion_artifacts.tar.gz \
+            target/criterion benchmark_evidence/runner.md \
+            benchmark_evidence/criterion_raw.log
+          cosign sign-blob --yes \
+            --bundle benchmark_evidence/criterion_artifacts.sigstore \
+            benchmark_evidence/criterion_artifacts.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: criterion-evidence-${{ github.sha }}
+          path: benchmark_evidence/
+          retention-days: 90
+
+  codspeed:
+    name: "Criterion → Codspeed.io"
+    runs-on: ubuntu-24.04
+    # Compilation dominates wall-clock time (~35 min cold without LTO, ~5 min
+    # cached); the actual cachegrind measurement takes <10 s total.
+    timeout-minutes: 75
+    if: ${{ vars.CODSPEED_ENABLED != 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check CodSpeed token presence
+        id: cs_config
+        run: |
+          if [ -n "${{ secrets.CODSPEED_TOKEN }}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "⚠ CODSPEED_TOKEN secret not set — skipping CodSpeed run."
+            echo "  See SETUP.md step 2."
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.cs_config.outputs.configured == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.cs_config.outputs.configured == 'true'
+        with:
+          shared-key: codspeed-${{ runner.os }}
+      - name: Install cargo-codspeed (prebuilt)
+        if: steps.cs_config.outputs.configured == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - uses: CodSpeedHQ/action@v3
+        if: steps.cs_config.outputs.configured == 'true'
+        with:
+          run: |
+            cargo codspeed build --bench nexus_validation \
+              --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory
+            cargo codspeed run --bench nexus_validation
+          token: ${{ secrets.CODSPEED_TOKEN }}
+
+  publish-dashboard:
+    name: Publish public dashboard
+    needs: [bencher, codspeed]
+    # Only deploy on main, and tolerate the codspeed job being skipped (which
+    # happens before SETUP.md is fully complete or on fork PRs). `always()` runs
+    # this regardless of upstream skip; the `result == 'success'` check on
+    # bencher ensures we still gate on the wall-clock pipeline working.
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.bencher.result == 'success' &&
+      (needs.codspeed.result == 'success' || needs.codspeed.result == 'skipped')
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Build dashboard
+        run: |
+          cd dashboard
+          npm ci
+          npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/out
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

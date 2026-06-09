@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{BufReader, BufWriter};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -226,9 +226,3 @@ mod _unused {
     pub fn _force_link(_: BufReader<tokio::io::Stdin>, _: BufWriter<tokio::io::Stdout>) {}
 }
 
-// Pull AsyncReadExt/AsyncWriteExt into scope on Windows too so the
-// imports are not flagged as unused.
-#[cfg(windows)]
-fn _silence_unused_async_imports() {
-    fn _t<R: AsyncReadExt + AsyncWriteExt>(_: &mut R) {}
-}

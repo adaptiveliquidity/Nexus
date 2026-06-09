@@ -1,0 +1,142 @@
+:root {
+  --color-green: #9cff3b;
+  --color-void: #020404;
+  --color-cyan: #00d8ff;
+  --color-bone: #f4f7f2;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  background: var(--color-void);
+  color: var(--color-bone);
+  line-height: 1.6;
+}
+
+a {
+  color: var(--color-cyan);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+h1 {
+  font-size: 2.5rem;
+  color: var(--color-green);
+  margin-bottom: 0.5rem;
+}
+
+h2 {
+  font-size: 1.5rem;
+  color: var(--color-cyan);
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+}
+
+.subtitle {
+  color: #888;
+  font-size: 1rem;
+  margin-bottom: 2rem;
+}
+
+.chart-container {
+  background: #0a0f0a;
+  border: 1px solid #1a2a1a;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 2rem;
+}
+
+th {
+  text-align: left;
+  padding: 0.75rem 1rem;
+  border-bottom: 2px solid var(--color-green);
+  color: var(--color-green);
+  font-weight: 600;
+}
+
+td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #1a2a1a;
+}
+
+tr:hover td {
+  background: #0a0f0a;
+}
+
+.nexus-row td {
+  color: var(--color-green);
+  font-weight: 600;
+}
+
+.source-link {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.badge-live {
+  background: rgba(156, 255, 59, 0.15);
+  color: var(--color-green);
+  border: 1px solid rgba(156, 255, 59, 0.3);
+}
+
+.badge-cited {
+  background: rgba(0, 216, 255, 0.1);
+  color: var(--color-cyan);
+  border: 1px solid rgba(0, 216, 255, 0.2);
+}
+
+.links {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 2rem;
+  flex-wrap: wrap;
+}
+
+.links a {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-cyan);
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.links a:hover {
+  background: rgba(0, 216, 255, 0.1);
+  text-decoration: none;
+}
+
+.footer {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #1a2a1a;
+  color: #555;
+  font-size: 0.85rem;
+}

@@ -387,20 +387,11 @@ impl WasmSandbox {
     }
 }
 
-/// State stored in the WASM store
 #[derive(Debug, Clone)]
-pub struct WasmState {
-    /// Remaining fuel
-    fuel: u64,
-    /// Execution metadata
-    metadata: std::collections::HashMap<String, Vec<u8>>,
-}
+pub struct WasmState;
 
 impl WasmState {
-    pub fn new(fuel: u64) -> Self {
-        WasmState {
-            fuel,
-            metadata: std::collections::HashMap::new(),
-        }
+    pub fn new(_fuel: u64) -> Self {
+        WasmState
     }
 }

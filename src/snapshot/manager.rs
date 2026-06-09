@@ -2,15 +2,13 @@
 //! 
 //! Provides microsecond snapshots and instant rollback for WASM state.
 
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use sha2::{Sha256, Digest};
-use zstd::bulk::compress_to_buffer;
-
 use crate::error::{NexusError, Result};
 
 /// Represents a complete state snapshot
@@ -206,7 +204,7 @@ pub enum RevertOperation {
 }
 
 /// Execution state for WASM
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionState {
     /// Program counter
     pub pc: u64,
@@ -220,19 +218,6 @@ pub struct ExecutionState {
     pub locals: Vec<i32>,
     /// Global values
     pub globals: Vec<i64>,
-}
-
-impl Default for ExecutionState {
-    fn default() -> Self {
-        ExecutionState {
-            pc: 0,
-            sp: 0,
-            stack_depth: 0,
-            call_stack: Vec::new(),
-            locals: Vec::new(),
-            globals: Vec::new(),
-        }
-    }
 }
 
 /// Snapshot metadata
@@ -389,7 +374,7 @@ impl SnapshotManager {
         {
             let mut stats = self.stats.write().unwrap();
             stats.total_snapshots += 1;
-            stats.total_memory_saved_mb += (snapshot.original_size - snapshot.compressed_size) as f64 / 1_048_576.0;
+            stats.total_memory_saved_mb += snapshot.original_size.saturating_sub(snapshot.compressed_size) as f64 / 1_048_576.0;
             stats.avg_compression_ratio = (stats.avg_compression_ratio * (stats.total_snapshots - 1) as f64 
                 + snapshot.compression_ratio()) / stats.total_snapshots as f64;
             stats.last_snapshot_time_us = start.elapsed().as_micros() as u64;

@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn test_recovery_suggestions() {
         // Test suggestion generation
-        let suggestions = vec![
+        let suggestions = [
             "Break the operation into smaller steps".to_string(),
             "Add validation before execution".to_string(),
         ];

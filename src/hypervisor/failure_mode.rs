@@ -153,13 +153,13 @@ impl FailureMode {
         )
     }
 
-    /// Best-effort classification of an `anyhow::Error` returned from a
+    /// Best-effort classification of a `wasmtime::Error` returned from a
     /// wasmtime call. Downcasts to `wasmtime::Trap` when possible and falls
     /// back to a string-anchored heuristic for the small set of host errors
     /// wasmtime does not type. Returns `None` when the caller should look
     /// at the textual error themselves (and probably classify as
     /// `HostError`).
-    pub fn from_anyhow_error(err: &anyhow::Error) -> Option<FailureMode> {
+    pub fn from_anyhow_error(err: &wasmtime::Error) -> Option<FailureMode> {
         if let Some(t) = err.downcast_ref::<Trap>() {
             return Some(FailureMode::from_wasmtime_trap(t));
         }
