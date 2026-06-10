@@ -1,13 +1,11 @@
 //! WASM Micro-Sandbox Runtime
-//! 
+//!
 //! High-performance WebAssembly sandbox with fuel metering for AI agent execution.
 
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use wasmtime::{
-    Config, Engine, Linker, Module, Store,
-};
-use serde::{Deserialize, Serialize};
+use wasmtime::{Config, Engine, Linker, Module, Store};
 
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
@@ -30,8 +28,8 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         SandboxConfig {
-            max_fuel: 10_000_000, // 10 million instructions
-            max_memory_pages: 512, // 32MB
+            max_fuel: 10_000_000,                   // 10 million instructions
+            max_memory_pages: 512,                  // 32MB
             time_limit: Duration::from_millis(500), // 500ms for fast demo
             module_bytes: None,
             enable_wasi: true,
@@ -132,8 +130,15 @@ pub struct WasmSandbox {
 /// `pre_call_memory` is populated whenever instantiation succeeded so the
 /// hypervisor can build a real snapshot from the actual WASM linear memory.
 enum ExecReply {
-    Ok { fuel_consumed: u64, pre_call_memory: Option<Vec<u8>> },
-    Failed { mode: FailureMode, fuel_consumed: u64, pre_call_memory: Option<Vec<u8>> },
+    Ok {
+        fuel_consumed: u64,
+        pre_call_memory: Option<Vec<u8>>,
+    },
+    Failed {
+        mode: FailureMode,
+        fuel_consumed: u64,
+        pre_call_memory: Option<Vec<u8>>,
+    },
 }
 
 impl WasmSandbox {
@@ -217,9 +222,9 @@ impl WasmSandbox {
             // instantiation. This is what the hypervisor needs to build a
             // snapshot it can actually roll back to. `None` here means the
             // module has no `"memory"` export, which is legal.
-            let pre_call_memory: Option<Vec<u8>> =
-                instance.get_memory(&mut store, "memory")
-                    .map(|m| m.data(&store).to_vec());
+            let pre_call_memory: Option<Vec<u8>> = instance
+                .get_memory(&mut store, "memory")
+                .map(|m| m.data(&store).to_vec());
 
             // Resolve entrypoint: prefer `_start`, fall back to `main`.
             let start_func = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
@@ -246,14 +251,16 @@ impl WasmSandbox {
 
             match call_result {
                 Ok(_) => {
-                    let _ = tx.send(ExecReply::Ok { fuel_consumed, pre_call_memory });
+                    let _ = tx.send(ExecReply::Ok {
+                        fuel_consumed,
+                        pre_call_memory,
+                    });
                 }
                 Err(e) => {
                     // Prefer typed Trap classification; fall back to a
                     // HostError carrying the textual chain otherwise.
-                    let mode = FailureMode::from_anyhow_error(&e).unwrap_or_else(|| {
-                        FailureMode::HostError(format!("wasm error: {e:#}"))
-                    });
+                    let mode = FailureMode::from_anyhow_error(&e)
+                        .unwrap_or_else(|| FailureMode::HostError(format!("wasm error: {e:#}")));
                     // If wasmtime told us OutOfFuel, fill in the real limit.
                     let mode = match mode {
                         FailureMode::FuelExhausted { .. } => {
@@ -261,7 +268,11 @@ impl WasmSandbox {
                         }
                         other => other,
                     };
-                    let _ = tx.send(ExecReply::Failed { mode, fuel_consumed, pre_call_memory });
+                    let _ = tx.send(ExecReply::Failed {
+                        mode,
+                        fuel_consumed,
+                        pre_call_memory,
+                    });
                 }
             }
         });
@@ -270,15 +281,26 @@ impl WasmSandbox {
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match recv_result {
-            Ok(ExecReply::Ok { fuel_consumed, pre_call_memory }) => {
+            Ok(ExecReply::Ok {
+                fuel_consumed,
+                pre_call_memory,
+            }) => {
                 let _ = handle.join();
-                Ok(ExecutionResult::success(Vec::new(), fuel_consumed, duration_ms)
-                    .with_pre_call_memory(pre_call_memory))
+                Ok(
+                    ExecutionResult::success(Vec::new(), fuel_consumed, duration_ms)
+                        .with_pre_call_memory(pre_call_memory),
+                )
             }
-            Ok(ExecReply::Failed { mode, fuel_consumed, pre_call_memory }) => {
+            Ok(ExecReply::Failed {
+                mode,
+                fuel_consumed,
+                pre_call_memory,
+            }) => {
                 let _ = handle.join();
-                Ok(ExecutionResult::failure_from_mode(mode, fuel_consumed, duration_ms)
-                    .with_pre_call_memory(pre_call_memory))
+                Ok(
+                    ExecutionResult::failure_from_mode(mode, fuel_consumed, duration_ms)
+                        .with_pre_call_memory(pre_call_memory),
+                )
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 // Detach the worker — the WASM is sandboxed so the loop is
@@ -301,33 +323,33 @@ impl WasmSandbox {
         }
     }
 
-    
     /// Execute a specific function with arguments
     pub fn execute_function(
-        &self, 
-        wasm_bytes: &[u8], 
-        function_name: &str, 
+        &self,
+        wasm_bytes: &[u8],
+        function_name: &str,
         args: &[i32],
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
         let start_fuel = self.config.max_fuel;
-        
+
         let module = Module::from_binary(&self.engine, wasm_bytes)
             .map_err(|e| NexusError::WasmError(format!("Failed to compile module: {}", e)))?;
-        
+
         let mut store = self.create_store()?;
         let linker = if self.config.enable_wasi {
             self.create_wasi_linker()?
         } else {
             self.create_minimal_linker()?
         };
-        
-        let instance = linker.instantiate(&mut store, &module)
+
+        let instance = linker
+            .instantiate(&mut store, &module)
             .map_err(|e| NexusError::WasmError(format!("Failed to instantiate: {}", e)))?;
-        
+
         // Try to find the function
         let func = instance.get_typed_func::<(i32,), (i32,)>(&mut store, function_name);
-        
+
         match func {
             Ok(f) => {
                 let mut results = Vec::new();
@@ -343,35 +365,40 @@ impl WasmSandbox {
                         }
                     }
                 }
-                
+
                 let fuel_consumed = start_fuel;
                 let duration_ms = start.elapsed().as_millis() as u64;
-                
+
                 // Encode results as bytes
-                let return_bytes = results.iter()
-                    .flat_map(|&v| v.to_le_bytes())
-                    .collect();
-                
-                Ok(ExecutionResult::success(return_bytes, fuel_consumed, duration_ms))
+                let return_bytes = results.iter().flat_map(|&v| v.to_le_bytes()).collect();
+
+                Ok(ExecutionResult::success(
+                    return_bytes,
+                    fuel_consumed,
+                    duration_ms,
+                ))
             }
-            Err(_) => Err(NexusError::WasmError(format!("Function {} not found", function_name))),
+            Err(_) => Err(NexusError::WasmError(format!(
+                "Function {} not found",
+                function_name
+            ))),
         }
     }
-    
+
     /// Create a store with fuel metering and resource limits
     fn create_store(&self) -> Result<Store<WasmState>> {
         let state = WasmState::new(self.config.max_fuel);
         let mut store = Store::new(&self.engine, state);
-        
+
         // Set fuel for this execution (fuel is enabled via engine config)
         if let Err(e) = store.set_fuel(self.config.max_fuel) {
             // Fuel setting failed, but continue without it
             eprintln!("Warning: Could not set fuel: {}", e);
         }
-        
+
         Ok(store)
     }
-    
+
     /// Create linker with WASI support
     fn create_wasi_linker(&self) -> Result<Linker<WasmState>> {
         // For now, use minimal linker without WASI
@@ -379,7 +406,7 @@ impl WasmSandbox {
         let linker = Linker::new(&self.engine);
         Ok(linker)
     }
-    
+
     /// Create minimal linker without WASI
     fn create_minimal_linker(&self) -> Result<Linker<WasmState>> {
         let linker = Linker::new(&self.engine);

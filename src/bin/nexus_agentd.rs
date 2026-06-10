@@ -169,7 +169,13 @@ async fn serve(
                 version: env!("CARGO_PKG_VERSION").into(),
             }
         }
-        DaemonRequest::Execute { name, wasm_bytes, wasm_path, entry, input } => {
+        DaemonRequest::Execute {
+            name,
+            wasm_bytes,
+            wasm_path,
+            entry,
+            input,
+        } => {
             let bytes = match (wasm_bytes, wasm_path) {
                 (Some(b), _) => b,
                 (None, Some(p)) => match std::fs::read(&p) {
@@ -225,4 +231,3 @@ mod _unused {
     use super::*;
     pub fn _force_link(_: BufReader<tokio::io::Stdin>, _: BufWriter<tokio::io::Stdout>) {}
 }
-

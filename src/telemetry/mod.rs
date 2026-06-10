@@ -1,14 +1,14 @@
 //! Telemetry Module
-//! 
+//!
 //! Execution tracking and AI feedback for self-correction.
 
-use std::sync::RwLock;
-use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::RwLock;
 
-use crate::hypervisor::validator::health::{HealthStatus, ResourceSnapshot};
 use crate::hypervisor::validator::error_log::ErrorLog;
+use crate::hypervisor::validator::health::{HealthStatus, ResourceSnapshot};
 
 /// An execution record for history
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +112,7 @@ impl TelemetrySink {
             stats: RwLock::new(TelemetryStats::default()),
         }
     }
-    
+
     /// Record a successful execution
     pub fn record_success(&self, record: ExecutionRecord) {
         self.add_to_history(record.clone());
@@ -120,14 +120,16 @@ impl TelemetrySink {
         self.update_stats(|s| {
             s.total_executions += 1;
             s.successful_executions += 1;
-            s.avg_duration_ms = (s.avg_duration_ms * (s.total_executions - 1) as f64 
-                + record.duration_ms as f64) / s.total_executions as f64;
-            s.avg_fuel_per_execution = (s.avg_fuel_per_execution * (s.total_executions - 1) as f64 
-                + record.fuel_consumed as f64) / s.total_executions as f64;
+            s.avg_duration_ms = (s.avg_duration_ms * (s.total_executions - 1) as f64
+                + record.duration_ms as f64)
+                / s.total_executions as f64;
+            s.avg_fuel_per_execution = (s.avg_fuel_per_execution * (s.total_executions - 1) as f64
+                + record.fuel_consumed as f64)
+                / s.total_executions as f64;
             s.success_rate = s.successful_executions as f64 / s.total_executions as f64;
         });
     }
-    
+
     /// Record a failed execution
     pub fn record_failure(&self, record: ExecutionRecord) {
         self.add_to_history(record.clone());
@@ -138,12 +140,13 @@ impl TelemetrySink {
             if record.error.is_some() {
                 s.total_rollbacks += 1;
             }
-            s.avg_duration_ms = (s.avg_duration_ms * (s.total_executions - 1) as f64 
-                + record.duration_ms as f64) / s.total_executions as f64;
+            s.avg_duration_ms = (s.avg_duration_ms * (s.total_executions - 1) as f64
+                + record.duration_ms as f64)
+                / s.total_executions as f64;
             s.success_rate = s.successful_executions as f64 / s.total_executions as f64;
         });
     }
-    
+
     fn add_to_history(&self, record: ExecutionRecord) {
         let mut history = self.history.write().unwrap();
         if history.len() >= self.max_history {
@@ -151,7 +154,7 @@ impl TelemetrySink {
         }
         history.push_back(record);
     }
-    
+
     fn update_pattern(&self, operation: &str, success: bool) {
         let mut patterns = self.patterns.write().unwrap();
 
@@ -174,7 +177,7 @@ impl TelemetrySink {
             });
         }
     }
-    
+
     fn update_stats<F>(&self, f: F)
     where
         F: FnOnce(&mut TelemetryStats),
@@ -182,14 +185,14 @@ impl TelemetrySink {
         let mut stats = self.stats.write().unwrap();
         f(&mut stats);
     }
-    
+
     /// Get execution history
     pub fn get_history(&self, limit: Option<usize>) -> Vec<ExecutionRecord> {
         let history = self.history.read().unwrap();
         let limit = limit.unwrap_or(history.len());
         history.iter().rev().take(limit).cloned().collect()
     }
-    
+
     /// Get successful patterns for an operation
     pub fn get_patterns(&self, operation: &str) -> Vec<String> {
         let patterns = self.patterns.read().unwrap();
@@ -199,19 +202,19 @@ impl TelemetrySink {
             .map(|p| p.pattern.clone())
             .collect()
     }
-    
+
     /// Get telemetry statistics
     pub fn stats(&self) -> TelemetryStats {
         self.stats.read().unwrap().clone()
     }
-    
+
     /// Generate AI feedback context for an error
     pub fn generate_feedback(&self, operation: &str) -> String {
         let patterns = self.get_patterns(operation);
         let recent = self.get_history(Some(5));
-        
+
         let mut feedback = String::new();
-        
+
         if !patterns.is_empty() {
             feedback.push_str("## Previously Successful Approaches\n");
             for pattern in patterns.iter().take(3) {
@@ -219,26 +222,24 @@ impl TelemetrySink {
             }
             feedback.push('\n');
         }
-        
+
         feedback.push_str("## Recent Executions\n");
         for record in recent.iter().take(3) {
             let status = if record.success { "✓" } else { "✗" };
             feedback.push_str(&format!(
-                "{} {} ({}ms)\n", 
-                status, 
-                record.operation, 
-                record.duration_ms
+                "{} {} ({}ms)\n",
+                status, record.operation, record.duration_ms
             ));
         }
-        
+
         feedback
     }
-    
+
     /// Get all learned patterns
     pub fn all_patterns(&self) -> Vec<LearnedPattern> {
         self.patterns.read().unwrap().clone()
     }
-    
+
     /// Clear history (for privacy)
     pub fn clear_history(&self) {
         self.history.write().unwrap().clear();

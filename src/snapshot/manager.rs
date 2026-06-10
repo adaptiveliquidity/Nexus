@@ -1,15 +1,15 @@
 //! Snapshot Manager with Ring Buffer
-//! 
+//!
 //! Provides microsecond snapshots and instant rollback for WASM state.
 
-use std::sync::RwLock;
-use std::collections::VecDeque;
-use std::time::Instant;
+use crate::error::{NexusError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::sync::RwLock;
+use std::time::Instant;
 use uuid::Uuid;
-use sha2::{Sha256, Digest};
-use crate::error::{NexusError, Result};
 
 /// Represents a complete state snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,20 +43,20 @@ impl Snapshot {
         metadata: SnapshotMetadata,
     ) -> Self {
         let original_size = memory.len();
-        
+
         // Compress memory
         let mut compressed = Vec::new();
         let compression_level = 3; // Balance speed and size
         zstd::stream::copy_encode(&memory[..], &mut compressed, compression_level)
             .expect("compression should not fail");
-        
+
         let compressed_size = compressed.len();
-        
+
         // Calculate checksum
         let mut hasher = Sha256::new();
         hasher.update(&memory);
         let memory_checksum = format!("{:x}", hasher.finalize());
-        
+
         Snapshot {
             id: Uuid::new_v4(),
             timestamp: Utc::now(),
@@ -69,7 +69,7 @@ impl Snapshot {
             compressed_size,
         }
     }
-    
+
     /// Verify memory integrity
     pub fn verify(&self, memory: &[u8]) -> bool {
         let mut hasher = Sha256::new();
@@ -77,7 +77,7 @@ impl Snapshot {
         let checksum = format!("{:x}", hasher.finalize());
         checksum == self.memory_checksum
     }
-    
+
     /// Decompress memory back to original
     pub fn decompress_memory(&self) -> Result<Vec<u8>> {
         let mut decompressed = Vec::new();
@@ -85,7 +85,7 @@ impl Snapshot {
             .map_err(|e| NexusError::SerializationError(format!("Failed to decompress: {}", e)))?;
         Ok(decompressed)
     }
-    
+
     /// Get compression ratio
     pub fn compression_ratio(&self) -> f64 {
         if self.original_size == 0 {
@@ -114,70 +114,84 @@ impl FilesystemDiff {
     pub fn new() -> Self {
         FilesystemDiff::default()
     }
-    
+
     /// Record a file creation
     pub fn record_create(&mut self, path: FilePath, content: Vec<u8>) {
-        self.created.push(FileChange { path, content, old_content: None });
+        self.created.push(FileChange {
+            path,
+            content,
+            old_content: None,
+        });
     }
-    
+
     /// Record a file modification
     pub fn record_modify(&mut self, path: FilePath, new_content: Vec<u8>, old_content: Vec<u8>) {
-        self.modified.push(FileChange { path, content: new_content, old_content: Some(old_content) });
+        self.modified.push(FileChange {
+            path,
+            content: new_content,
+            old_content: Some(old_content),
+        });
     }
-    
+
     /// Record a file deletion
     pub fn record_delete(&mut self, path: FilePath) {
         self.deleted.push(path);
     }
-    
+
     /// Revert all changes
     pub fn revert(&self) -> Vec<RevertOperation> {
         let mut ops = Vec::new();
-        
+
         // Undo deletes (restore files)
         for path in &self.deleted {
             ops.push(RevertOperation::Restore(path.clone()));
         }
-        
+
         // Undo modifies (restore original content)
         for change in &self.modified {
             if let Some(old) = &change.old_content {
                 ops.push(RevertOperation::Overwrite(change.path.clone(), old.clone()));
             }
         }
-        
+
         // Undo creates (delete files)
         for change in &self.created {
             ops.push(RevertOperation::Delete(change.path.clone()));
         }
-        
+
         ops
     }
-    
+
     /// Apply changes (forward)
     pub fn apply(&self) -> Vec<RevertOperation> {
         let mut ops = Vec::new();
-        
+
         // Create directories first
         for path in &self.dirs_created {
             ops.push(RevertOperation::CreateDir(path.clone()));
         }
-        
+
         // Create files
         for change in &self.created {
-            ops.push(RevertOperation::Create(change.path.clone(), change.content.clone()));
+            ops.push(RevertOperation::Create(
+                change.path.clone(),
+                change.content.clone(),
+            ));
         }
-        
+
         // Modify files
         for change in &self.modified {
-            ops.push(RevertOperation::Overwrite(change.path.clone(), change.content.clone()));
+            ops.push(RevertOperation::Overwrite(
+                change.path.clone(),
+                change.content.clone(),
+            ));
         }
-        
+
         // Delete files
         for path in &self.deleted {
             ops.push(RevertOperation::Delete(path.clone()));
         }
-        
+
         ops
     }
 }
@@ -266,7 +280,7 @@ impl SnapshotRingBuffer {
             index: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Add a snapshot (evicts oldest if full)
     pub fn push(&mut self, snapshot: Snapshot) {
         // Evict oldest if at capacity
@@ -275,38 +289,38 @@ impl SnapshotRingBuffer {
                 self.index.remove(&old.id);
             }
         }
-        
+
         let id = snapshot.id;
         self.snapshots.push_back(snapshot);
         self.index.insert(id, self.snapshots.len() - 1);
     }
-    
+
     /// Get a snapshot by ID
     pub fn get(&self, id: &Uuid) -> Option<&Snapshot> {
         self.index.get(id).and_then(|&i| self.snapshots.get(i))
     }
-    
+
     /// Get the most recent snapshot
     pub fn latest(&self) -> Option<&Snapshot> {
         self.snapshots.back()
     }
-    
+
     /// Get all snapshots
     pub fn all(&self) -> Vec<&Snapshot> {
         self.snapshots.iter().collect()
     }
-    
+
     /// Clear all snapshots
     pub fn clear(&mut self) {
         self.snapshots.clear();
         self.index.clear();
     }
-    
+
     /// Get number of snapshots
     pub fn len(&self) -> usize {
         self.snapshots.len()
     }
-    
+
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.snapshots.is_empty()
@@ -344,12 +358,12 @@ impl SnapshotManager {
             stats: RwLock::new(SnapshotStats::default()),
         }
     }
-    
+
     /// Create with persistence enabled
     pub fn with_persistence(capacity: usize, persist_dir: std::path::PathBuf) -> Self {
         // Ensure directory exists
         std::fs::create_dir_all(&persist_dir).ok();
-        
+
         SnapshotManager {
             buffer: RwLock::new(SnapshotRingBuffer::new(capacity)),
             persist_enabled: true,
@@ -357,7 +371,7 @@ impl SnapshotManager {
             stats: RwLock::new(SnapshotStats::default()),
         }
     }
-    
+
     /// Create a new snapshot
     pub fn create_snapshot(
         &self,
@@ -367,50 +381,57 @@ impl SnapshotManager {
         metadata: SnapshotMetadata,
     ) -> Result<Snapshot> {
         let start = Instant::now();
-        
+
         let snapshot = Snapshot::new(memory, fs_changes, execution_state, metadata);
-        
+
         // Update stats
         {
             let mut stats = self.stats.write().unwrap();
             stats.total_snapshots += 1;
-            stats.total_memory_saved_mb += snapshot.original_size.saturating_sub(snapshot.compressed_size) as f64 / 1_048_576.0;
-            stats.avg_compression_ratio = (stats.avg_compression_ratio * (stats.total_snapshots - 1) as f64 
-                + snapshot.compression_ratio()) / stats.total_snapshots as f64;
+            stats.total_memory_saved_mb += snapshot
+                .original_size
+                .saturating_sub(snapshot.compressed_size)
+                as f64
+                / 1_048_576.0;
+            stats.avg_compression_ratio = (stats.avg_compression_ratio
+                * (stats.total_snapshots - 1) as f64
+                + snapshot.compression_ratio())
+                / stats.total_snapshots as f64;
             stats.last_snapshot_time_us = start.elapsed().as_micros() as u64;
         }
-        
+
         // Add to buffer
         self.buffer.write().unwrap().push(snapshot.clone());
-        
+
         // Optionally persist
         if self.persist_enabled {
             self.persist_snapshot(&snapshot)?;
         }
-        
+
         Ok(snapshot)
     }
-    
+
     /// Rollback to a specific snapshot
     pub fn rollback_to(&self, snapshot_id: &Uuid) -> Result<RollbackResult> {
         let buffer = self.buffer.read().unwrap();
-        
-        let snapshot = buffer.get(snapshot_id)
-            .ok_or_else(|| NexusError::RollbackFailed(format!("Snapshot {} not found", snapshot_id)))?;
-        
+
+        let snapshot = buffer.get(snapshot_id).ok_or_else(|| {
+            NexusError::RollbackFailed(format!("Snapshot {} not found", snapshot_id))
+        })?;
+
         // Decompress memory
         let memory = snapshot.decompress_memory()?;
-        
+
         // Get filesystem revert operations
         let fs_ops = snapshot.fs_changes.revert();
-        
+
         // Update stats
         drop(buffer);
         {
             let mut stats = self.stats.write().unwrap();
             stats.total_rollbacks += 1;
         }
-        
+
         Ok(RollbackResult {
             snapshot_id: *snapshot_id,
             memory,
@@ -418,50 +439,54 @@ impl SnapshotManager {
             timestamp: Utc::now(),
         })
     }
-    
+
     /// Get the latest snapshot
     pub fn latest(&self) -> Option<Snapshot> {
         self.buffer.read().unwrap().latest().cloned()
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> SnapshotStats {
         self.stats.read().unwrap().clone()
     }
-    
+
     /// Persist snapshot to disk
     fn persist_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
-        let dir = self.persist_dir.as_ref()
+        let dir = self
+            .persist_dir
+            .as_ref()
             .ok_or_else(|| NexusError::ConfigError("No persistence directory set".to_string()))?;
-        
+
         let path = dir.join(format!("{}.snap", snapshot.id));
-        
+
         let bytes = bincode::serialize(snapshot)
             .map_err(|e| NexusError::SerializationError(format!("Failed to serialize: {}", e)))?;
-        
+
         std::fs::write(&path, &bytes)
             .map_err(|e| NexusError::FilesystemError(format!("Failed to write: {}", e)))?;
-        
+
         Ok(())
     }
-    
+
     /// Load snapshot from disk
     pub fn load_snapshot(&self, snapshot_id: &Uuid) -> Result<Option<Snapshot>> {
-        let dir = self.persist_dir.as_ref()
+        let dir = self
+            .persist_dir
+            .as_ref()
             .ok_or_else(|| NexusError::ConfigError("No persistence directory set".to_string()))?;
-        
+
         let path = dir.join(format!("{}.snap", snapshot_id));
-        
+
         if !path.exists() {
             return Ok(None);
         }
-        
+
         let bytes = std::fs::read(&path)
             .map_err(|e| NexusError::FilesystemError(format!("Failed to read: {}", e)))?;
-        
+
         let snapshot: Snapshot = bincode::deserialize(&bytes)
             .map_err(|e| NexusError::SerializationError(format!("Failed to deserialize: {}", e)))?;
-        
+
         Ok(Some(snapshot))
     }
 }
@@ -478,28 +503,28 @@ pub struct RollbackResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_snapshot_compression() {
         let data = vec![0u8; 10000]; // 10KB of zeros
         let diff = FilesystemDiff::new();
         let state = ExecutionState::default();
         let metadata = SnapshotMetadata::new("test".to_string(), "hash".to_string());
-        
+
         let snapshot = Snapshot::new(data.clone(), diff, state, metadata);
-        
+
         // Should be highly compressed
         assert!(snapshot.compression_ratio() < 0.1);
-        
+
         // Should decompress correctly
         let decompressed = snapshot.decompress_memory().unwrap();
         assert_eq!(decompressed, data);
     }
-    
+
     #[test]
     fn test_ring_buffer() {
         let mut buffer = SnapshotRingBuffer::new(3);
-        
+
         // Add 3 snapshots
         for i in 0..3 {
             let diff = FilesystemDiff::new();
@@ -508,25 +533,25 @@ mod tests {
             let snap = Snapshot::new(vec![i as u8], diff, state, metadata);
             buffer.push(snap);
         }
-        
+
         assert_eq!(buffer.len(), 3);
-        
+
         // Add 4th - should evict first
         let diff = FilesystemDiff::new();
         let state = ExecutionState::default();
         let metadata = SnapshotMetadata::new("snap3".to_string(), "hash".to_string());
         let snap = Snapshot::new(vec![3u8], diff, state, metadata);
         buffer.push(snap);
-        
+
         assert_eq!(buffer.len(), 3);
     }
-    
+
     #[test]
     fn test_filesystem_diff_revert() {
         let mut diff = FilesystemDiff::new();
         diff.record_create("/tmp/test.txt".to_string(), b"hello".to_vec());
         diff.record_delete("/tmp/old.txt".to_string());
-        
+
         let ops = diff.revert();
         assert_eq!(ops.len(), 2);
     }

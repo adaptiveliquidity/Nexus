@@ -58,7 +58,11 @@ pub struct Instinct {
 }
 
 impl Instinct {
-    fn new(failure_category: String, operation_pattern: String, recovery_description: String) -> Self {
+    fn new(
+        failure_category: String,
+        operation_pattern: String,
+        recovery_description: String,
+    ) -> Self {
         let now = Utc::now();
         Instinct {
             id: Uuid::new_v4(),
@@ -123,27 +127,22 @@ impl InstinctStore {
     /// does not exist; existing `<category>.json` files are loaded into
     /// the in-memory cache.
     pub fn open(dir: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&dir).map_err(|e| {
-            NexusError::FilesystemError(format!("instinct dir {dir:?}: {e}"))
-        })?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| NexusError::FilesystemError(format!("instinct dir {dir:?}: {e}")))?;
 
         let mut cache: HashMap<String, Vec<Instinct>> = HashMap::new();
-        for entry in fs::read_dir(&dir).map_err(|e| {
-            NexusError::FilesystemError(format!("read_dir {dir:?}: {e}"))
-        })? {
-            let entry = entry.map_err(|e| {
-                NexusError::FilesystemError(format!("entry: {e}"))
-            })?;
+        for entry in fs::read_dir(&dir)
+            .map_err(|e| NexusError::FilesystemError(format!("read_dir {dir:?}: {e}")))?
+        {
+            let entry = entry.map_err(|e| NexusError::FilesystemError(format!("entry: {e}")))?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            let bytes = fs::read(&path).map_err(|e| {
-                NexusError::FilesystemError(format!("read {path:?}: {e}"))
-            })?;
-            let parsed: Vec<Instinct> = serde_json::from_slice(&bytes).map_err(|e| {
-                NexusError::SerializationError(format!("parse {path:?}: {e}"))
-            })?;
+            let bytes = fs::read(&path)
+                .map_err(|e| NexusError::FilesystemError(format!("read {path:?}: {e}")))?;
+            let parsed: Vec<Instinct> = serde_json::from_slice(&bytes)
+                .map_err(|e| NexusError::SerializationError(format!("parse {path:?}: {e}")))?;
             if let Some(first) = parsed.first() {
                 cache.insert(first.failure_category.clone(), parsed);
             }
@@ -179,9 +178,18 @@ impl InstinctStore {
         let key = mode.category();
         let mut out: Vec<Instinct> = cache
             .get(key)
-            .map(|v| v.iter().filter(|i| i.matches_operation(operation)).cloned().collect())
+            .map(|v| {
+                v.iter()
+                    .filter(|i| i.matches_operation(operation))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
-        out.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         out
     }
 
@@ -294,9 +302,8 @@ impl InstinctStore {
     pub fn export_all(&self) -> Result<String> {
         let cache = self.cache.read().unwrap();
         let all: Vec<&Instinct> = cache.values().flat_map(|v| v.iter()).collect();
-        serde_json::to_string_pretty(&all).map_err(|e| {
-            NexusError::SerializationError(format!("export: {e}"))
-        })
+        serde_json::to_string_pretty(&all)
+            .map_err(|e| NexusError::SerializationError(format!("export: {e}")))
     }
 
     /// Import an array of instincts produced by `export_all`. Returns
@@ -304,9 +311,8 @@ impl InstinctStore {
     /// description)` triple is merged (counts and confidence preserved
     /// from the existing entry).
     pub fn import_all(&self, json: &str) -> Result<(usize, usize)> {
-        let parsed: Vec<Instinct> = serde_json::from_str(json).map_err(|e| {
-            NexusError::SerializationError(format!("import: {e}"))
-        })?;
+        let parsed: Vec<Instinct> = serde_json::from_str(json)
+            .map_err(|e| NexusError::SerializationError(format!("import: {e}")))?;
         let mut added = 0;
         let mut merged = 0;
         let mut touched: std::collections::HashSet<String> = Default::default();
@@ -340,12 +346,10 @@ impl InstinctStore {
             None => return Ok(()),
         };
         let path = self.dir.join(format!("{category}.json"));
-        let bytes = serde_json::to_vec_pretty(bucket).map_err(|e| {
-            NexusError::SerializationError(format!("serialize {category}: {e}"))
-        })?;
-        fs::write(&path, bytes).map_err(|e| {
-            NexusError::FilesystemError(format!("write {path:?}: {e}"))
-        })?;
+        let bytes = serde_json::to_vec_pretty(bucket)
+            .map_err(|e| NexusError::SerializationError(format!("serialize {category}: {e}")))?;
+        fs::write(&path, bytes)
+            .map_err(|e| NexusError::FilesystemError(format!("write {path:?}: {e}")))?;
         Ok(())
     }
 }
@@ -366,7 +370,10 @@ pub struct InstinctPolicy {
 
 impl InstinctPolicy {
     pub fn new(store: std::sync::Arc<InstinctStore>) -> Self {
-        InstinctPolicy { store, min_confidence: 0.0 }
+        InstinctPolicy {
+            store,
+            min_confidence: 0.0,
+        }
     }
 
     /// Filter out instincts below this confidence threshold.
@@ -455,8 +462,12 @@ mod tests {
         let tmp = tempdir().unwrap();
         let s = InstinctStore::open(tmp.path().to_path_buf()).unwrap();
         let id = s.register(&mode(), "*", "guard").unwrap();
-        for _ in 0..3 { s.record_success(&id).unwrap(); }
-        for _ in 0..10 { s.record_failure(&id).unwrap(); }
+        for _ in 0..3 {
+            s.record_success(&id).unwrap();
+        }
+        for _ in 0..10 {
+            s.record_failure(&id).unwrap();
+        }
         let q = s.query(&mode(), "x");
         // (3 + 1) / (3 + 10 + 2) = 4/15 ~ 0.267 — eroded, not zero
         assert!(q[0].confidence > 0.0 && q[0].confidence < 0.4);
@@ -486,7 +497,8 @@ mod tests {
         let tmp_b = tempdir().unwrap();
         let a = InstinctStore::open(tmp_a.path().to_path_buf()).unwrap();
         a.register(&mode(), "*", "guard").unwrap();
-        a.register(&FailureMode::TrapStackOverflow, "*", "convert to iteration").unwrap();
+        a.register(&FailureMode::TrapStackOverflow, "*", "convert to iteration")
+            .unwrap();
         let json = a.export_all().unwrap();
 
         let b = InstinctStore::open(tmp_b.path().to_path_buf()).unwrap();
@@ -508,8 +520,12 @@ mod tests {
         let s = Arc::new(InstinctStore::open(tmp.path().to_path_buf()).unwrap());
         let id_good = s.register(&mode(), "*", "good").unwrap();
         let id_bad = s.register(&mode(), "*", "bad").unwrap();
-        for _ in 0..10 { s.record_success(&id_good).unwrap(); }
-        for _ in 0..10 { s.record_failure(&id_bad).unwrap(); }
+        for _ in 0..10 {
+            s.record_success(&id_good).unwrap();
+        }
+        for _ in 0..10 {
+            s.record_failure(&id_bad).unwrap();
+        }
 
         let policy = InstinctPolicy::new(s).with_min_confidence(0.7);
         let actions = policy.recover(&mode(), "x");

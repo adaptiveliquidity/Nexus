@@ -1,5 +1,5 @@
 //! Security Module
-//! 
+//!
 //! Provides cryptographic capability tokens and access control.
 
 pub mod capability;

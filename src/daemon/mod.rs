@@ -28,12 +28,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ToolOutput;
 
-pub mod pool;
 pub mod module_cache;
+pub mod pool;
 pub mod protocol;
 
-pub use pool::HypervisorPool;
 pub use module_cache::ModuleCache;
+pub use pool::HypervisorPool;
 
 /// Single request frame. Keep this small and stable — both `nexus run`
 /// (client) and `nexus-agentd` (server) live in the same repo, but
@@ -66,7 +66,9 @@ pub enum DaemonRequest {
     Shutdown,
 }
 
-fn default_entry() -> String { "_start".into() }
+fn default_entry() -> String {
+    "_start".into()
+}
 
 /// Single response frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +87,9 @@ pub fn default_socket_path() -> PathBuf {
         return PathBuf::from(p);
     }
     #[cfg(windows)]
-    { PathBuf::from(r"\\.\pipe\nexus-agentd") }
+    {
+        PathBuf::from(r"\\.\pipe\nexus-agentd")
+    }
     #[cfg(not(windows))]
     {
         let dir = std::env::var("XDG_RUNTIME_DIR")

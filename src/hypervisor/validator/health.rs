@@ -1,11 +1,11 @@
 //! Health Validator
-//! 
+//!
 //! Validates execution health and detects issues.
 
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
 /// Health status of an execution.
@@ -113,13 +113,13 @@ impl HealthValidator {
             start: RwLock::new(None),
         }
     }
-    
+
     pub fn start_execution(&self) {
         let resources = self.capture();
         *self.baseline.write().unwrap() = Some(resources);
         *self.start.write().unwrap() = Some(Instant::now());
     }
-    
+
     fn capture(&self) -> ResourceSnapshot {
         let mut sys = self.system.write().unwrap();
         sys.refresh_specifics(
@@ -127,7 +127,7 @@ impl HealthValidator {
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything()),
         );
-        
+
         ResourceSnapshot {
             cpu_usage: sys.global_cpu_usage(),
             memory_used_mb: sys.used_memory() / 1024,
@@ -135,59 +135,59 @@ impl HealthValidator {
             timestamp: Utc::now(),
         }
     }
-    
+
     pub fn validate(&self) -> HealthStatus {
         if let Some(start) = *self.start.read().unwrap() {
             if start.elapsed() > self.config.timeout {
                 return HealthStatus::Timeout;
             }
         }
-        
+
         let current = self.capture();
-        
+
         if let Some(baseline) = self.baseline.read().unwrap().as_ref() {
             if current.cpu_usage > self.config.max_cpu_percent {
                 return HealthStatus::ResourceExhausted;
             }
-            
+
             let spike = current.cpu_usage - baseline.cpu_usage;
             if spike > self.config.cpu_spike_threshold {
                 return HealthStatus::ResourceExhausted;
             }
-            
+
             let growth = if baseline.memory_used_mb > 0 {
                 current.memory_used_mb as f64 / baseline.memory_used_mb as f64
             } else {
                 1.0
             };
-            
+
             if growth > self.config.max_memory_growth_ratio {
                 return HealthStatus::ResourceExhausted;
             }
         }
-        
+
         HealthStatus::Healthy
     }
-    
+
     pub fn check_corruption(&self) -> Option<String> {
         let resources = self.capture();
-        
+
         if resources.memory_usage_percent() > 99.0 {
             return Some("Memory usage critical".to_string());
         }
-        
+
         if resources.cpu_usage > 99.0 {
             return Some("CPU usage stuck at maximum".to_string());
         }
-        
+
         None
     }
-    
+
     pub fn reset(&self) {
         *self.baseline.write().unwrap() = None;
         *self.start.write().unwrap() = None;
     }
-    
+
     pub fn current_resources(&self) -> ResourceSnapshot {
         self.capture()
     }
@@ -196,7 +196,7 @@ impl HealthValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_health_status() {
         assert!(HealthStatus::Healthy.is_healthy());
