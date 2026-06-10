@@ -1,7 +1,7 @@
 //! Nexus: AI-Native WASM Snap-Rollback Sandbox
 //!
 //! Next-generation sandboxing infrastructure for AI agents with
-//! microsecond snapshots, instant rollback, and self-correction.
+//! microsecond snapshots, instant rollback, and opt-in self-correction.
 
 pub mod daemon;
 pub mod error;

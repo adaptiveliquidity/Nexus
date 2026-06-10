@@ -2,7 +2,7 @@
 
 **Game save-states for AI agents.**
 
-Nexus provides microsecond-class cold starts, native snapshot/rollback capabilities, and built-in AI telemetry for self-correcting agents. The only sandboxing solution with these features combined.
+Nexus provides microsecond-class cold starts, native snapshot/rollback capabilities, and opt-in AI telemetry for self-correcting agents.
 
 [![Benchmarks](https://img.shields.io/badge/benchmarks-live-brightgreen)](https://adaptive-liquidity.github.io/Nexus/)
 
@@ -58,7 +58,7 @@ Nexus is built on three foundational principles:
 
 1. **WebAssembly Runtime** - Pre-compiled WASM modules execute in microseconds, not seconds
 2. **Native State Management** - Snapshots and rollback are built into the core, not layered on top
-3. **AI-Native Telemetry** - Every execution is instrumented for learning and self-correction
+3. **AI-Native Telemetry** - Every execution is instrumented; self-correction is opt-in via `with_self_correction`
 
 ```
 +------------------+------------------+------------------+
@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Native Snapshots | Yes | No | No | External tooling |
 | Sub-ms Rollback (small state) | Yes | No | No | ~4 ms |
 | AI Telemetry | Yes | No | No | No |
-| Self-Correction | Yes | No | No | No |
+| Self-Correction | Opt-in | No | No | No |
 
 ### Detailed Benchmark Data
 

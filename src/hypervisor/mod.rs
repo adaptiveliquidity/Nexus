@@ -188,6 +188,18 @@ impl NexusHypervisor {
         self
     }
 
+    /// Enable self-correction (opt-in). Alias for `with_instinct_store`.
+    /// Without this call, `execute_with_retry` retries but does NOT
+    /// adjust instinct confidence — outcome feedback is a no-op.
+    pub fn with_self_correction(self, store: Arc<crate::instinct::InstinctStore>) -> Self {
+        self.with_instinct_store(store)
+    }
+
+    /// Returns true when self-correction is active (instinct store attached).
+    pub fn self_correction_enabled(&self) -> bool {
+        self.instinct_store.is_some()
+    }
+
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();
