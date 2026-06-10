@@ -41,23 +41,21 @@ impl Snapshot {
         fs_changes: FilesystemDiff,
         execution_state: ExecutionState,
         metadata: SnapshotMetadata,
-    ) -> Self {
+    ) -> Result<Self> {
         let original_size = memory.len();
 
-        // Compress memory
         let mut compressed = Vec::new();
-        let compression_level = 3; // Balance speed and size
+        let compression_level = 3;
         zstd::stream::copy_encode(&memory[..], &mut compressed, compression_level)
-            .expect("compression should not fail");
+            .map_err(|e| NexusError::SerializationError(format!("compression failed: {e}")))?;
 
         let compressed_size = compressed.len();
 
-        // Calculate checksum
         let mut hasher = Sha256::new();
         hasher.update(&memory);
         let memory_checksum = format!("{:x}", hasher.finalize());
 
-        Snapshot {
+        Ok(Snapshot {
             id: Uuid::new_v4(),
             timestamp: Utc::now(),
             memory: compressed,
@@ -67,7 +65,7 @@ impl Snapshot {
             metadata,
             original_size,
             compressed_size,
-        }
+        })
     }
 
     /// Verify memory integrity
@@ -400,7 +398,7 @@ impl SnapshotManager {
     ) -> Result<Snapshot> {
         let start = Instant::now();
 
-        let snapshot = Snapshot::new(memory, fs_changes, execution_state, metadata);
+        let snapshot = Snapshot::new(memory, fs_changes, execution_state, metadata)?;
 
         // Update stats
         {
@@ -579,7 +577,7 @@ mod tests {
         let state = ExecutionState::default();
         let metadata = SnapshotMetadata::new("test".to_string(), "hash".to_string());
 
-        let snapshot = Snapshot::new(data.clone(), diff, state, metadata);
+        let snapshot = Snapshot::new(data.clone(), diff, state, metadata).unwrap();
 
         // Should be highly compressed
         assert!(snapshot.compression_ratio() < 0.1);
@@ -598,7 +596,7 @@ mod tests {
             let diff = FilesystemDiff::new();
             let state = ExecutionState::default();
             let metadata = SnapshotMetadata::new(format!("snap{}", i), "hash".to_string());
-            let snap = Snapshot::new(vec![i as u8], diff, state, metadata);
+            let snap = Snapshot::new(vec![i as u8], diff, state, metadata).unwrap();
             buffer.push(snap);
         }
 
@@ -608,7 +606,7 @@ mod tests {
         let diff = FilesystemDiff::new();
         let state = ExecutionState::default();
         let metadata = SnapshotMetadata::new("snap3".to_string(), "hash".to_string());
-        let snap = Snapshot::new(vec![3u8], diff, state, metadata);
+        let snap = Snapshot::new(vec![3u8], diff, state, metadata).unwrap();
         buffer.push(snap);
 
         assert_eq!(buffer.len(), 3);

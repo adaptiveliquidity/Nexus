@@ -361,11 +361,13 @@ fn bench_capability_checked(c: &mut Criterion) {
         .expect("tokio runtime");
 
     let hv = NexusHypervisor::new(HypervisorConfig::default()).expect("hv");
-    let token = hv.issue_token(
-        Capability::ReadFile(PathBuf::from("/bench")),
-        "bench",
-        Duration::from_secs(3600),
-    );
+    let token = hv
+        .issue_token(
+            Capability::ReadFile(PathBuf::from("/bench")),
+            "bench",
+            Duration::from_secs(3600),
+        )
+        .expect("issue token");
 
     group.bench_function("with_valid_token", |b| {
         b.iter(|| {
@@ -521,11 +523,13 @@ fn bench_full_integrated(c: &mut Criterion) {
 
     let hv = NexusHypervisor::new(HypervisorConfig::default()).expect("hv");
 
-    let token = hv.issue_token(
-        Capability::ReadFile(PathBuf::from("/data")),
-        "bench",
-        Duration::from_secs(3600),
-    );
+    let token = hv
+        .issue_token(
+            Capability::ReadFile(PathBuf::from("/data")),
+            "bench",
+            Duration::from_secs(3600),
+        )
+        .expect("issue token");
 
     let cache = ModuleCache::new();
     let engine = hv.sandbox_engine();

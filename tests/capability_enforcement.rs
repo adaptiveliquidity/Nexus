@@ -79,7 +79,8 @@ async fn expired_token_denied() {
         "test",
         Duration::from_secs(0), // expires immediately
         &ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
-    );
+    )
+    .unwrap();
 
     let tool = make_tool_requiring(vec![Capability::ReadFile(PathBuf::from("/data"))]);
     // Token is expired at creation (Duration::ZERO)
@@ -113,7 +114,8 @@ async fn bad_signature_denied() {
         "attacker",
         Duration::from_secs(3600),
         &foreign_key,
-    );
+    )
+    .unwrap();
 
     let tool = make_tool_requiring(vec![Capability::ReadFile(PathBuf::from("/data"))]);
 
@@ -140,11 +142,13 @@ async fn too_narrow_token_denied() {
 
     // Grant ReadFile(/home) but require WriteFile(/home)
     let mut mgr = CapabilityManager::new();
-    let token = mgr.issue(
-        Capability::ReadFile(PathBuf::from("/home")),
-        "user",
-        Duration::from_secs(3600),
-    );
+    let token = mgr
+        .issue(
+            Capability::ReadFile(PathBuf::from("/home")),
+            "user",
+            Duration::from_secs(3600),
+        )
+        .unwrap();
 
     let tool = make_tool_requiring(vec![Capability::WriteFile(PathBuf::from("/home"))]);
 
@@ -210,11 +214,13 @@ async fn revoked_token_denied() {
     // own key (different manager), but we test the revocation path
     // via the CapabilityManager unit level to ensure revoke works.
     let mut mgr = CapabilityManager::new();
-    let token = mgr.issue(
-        Capability::ReadFile(PathBuf::from("/data")),
-        "user",
-        Duration::from_secs(3600),
-    );
+    let token = mgr
+        .issue(
+            Capability::ReadFile(PathBuf::from("/data")),
+            "user",
+            Duration::from_secs(3600),
+        )
+        .unwrap();
     mgr.revoke(token.id);
 
     // Validate through the manager that issued it — should fail

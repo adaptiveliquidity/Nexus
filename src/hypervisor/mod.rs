@@ -211,7 +211,7 @@ impl NexusHypervisor {
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();
-        manager.issue(capability, "system", validity);
+        manager.issue(capability, "system", validity)?;
         Ok(())
     }
 
@@ -223,7 +223,7 @@ impl NexusHypervisor {
         capability: Capability,
         granted_by: &str,
         validity: Duration,
-    ) -> crate::security::CapabilityToken {
+    ) -> Result<crate::security::CapabilityToken> {
         let mut manager = self.capability_manager.write().unwrap();
         manager.issue(capability, granted_by, validity)
     }
