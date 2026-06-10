@@ -1,0 +1,6 @@
+interface:
+  display_name: "Nexus"
+  short_description: "Repo-specific patterns and workflows for Nexus"
+  default_prompt: "Use the Nexus repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
