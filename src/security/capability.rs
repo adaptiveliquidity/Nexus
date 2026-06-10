@@ -72,6 +72,19 @@ impl Capability {
         }
     }
 
+    /// True if `self` grants no more than `parent` — the relation a child
+    /// capability must satisfy to be attenuated from `parent`. Strict inverse
+    /// of `allows`, with explicit handling for the `None`/`All` lattice ends.
+    pub fn is_subset_of(&self, parent: &Capability) -> bool {
+        match (self, parent) {
+            (Capability::None, _) => true, // deny-all is a subset of everything
+            (_, Capability::All) => true,  // everything is a subset of All
+            (Capability::All, _) => false, // All is only a subset of All (above)
+            // Otherwise: parent must grant self (reuses path/scope logic).
+            _ => parent.allows(self),
+        }
+    }
+
     /// Get a human-readable description
     pub fn description(&self) -> String {
         match self {
@@ -101,9 +114,18 @@ pub struct CapabilityToken {
     pub issued_at: DateTime<Utc>,
     /// When this token expires
     pub expires_at: DateTime<Utc>,
+    /// Parent token id when this token was minted by attenuation. `None` for
+    /// a root token issued directly by the manager.
+    pub parent_id: Option<Uuid>,
+    /// Depth in the attenuation chain. `0` for a root token; each attenuation
+    /// increments it. Capped by `DEFAULT_MAX_CHAIN_DEPTH`.
+    pub chain_depth: u32,
     /// Signature over the token data
     pub signature: Vec<u8>,
 }
+
+/// Default maximum attenuation-chain depth (root token = 0).
+pub const DEFAULT_MAX_CHAIN_DEPTH: u32 = 5;
 
 impl CapabilityToken {
     /// Create a new capability token
@@ -120,6 +142,8 @@ impl CapabilityToken {
             granted_by: granted_by.to_string(),
             issued_at: now,
             expires_at: now + validity_duration,
+            parent_id: None,
+            chain_depth: 0,
             signature: Vec::new(),
         };
 
@@ -129,6 +153,8 @@ impl CapabilityToken {
             &token.granted_by,
             &token.issued_at,
             &token.expires_at,
+            &token.parent_id,
+            &token.chain_depth,
         ))
         .map_err(|e| NexusError::SerializationError(format!("token signing: {e}")))?;
         token.signature = signing_key.sign(&data_to_sign).to_bytes().to_vec();
@@ -143,6 +169,8 @@ impl CapabilityToken {
             &self.granted_by,
             &self.issued_at,
             &self.expires_at,
+            &self.parent_id,
+            &self.chain_depth,
         )) else {
             return false;
         };
@@ -161,6 +189,56 @@ impl CapabilityToken {
     /// Check if token allows a specific capability
     pub fn allows(&self, requested: &Capability) -> bool {
         self.is_valid() && self.capability.allows(requested)
+    }
+
+    /// Mint a strictly-weaker child token bound to this token as its parent.
+    /// Fails if `narrower` is not a subset of this token's capability, or if
+    /// the resulting depth would exceed `max_depth`. The child's expiry is
+    /// clamped so it can never outlive its parent.
+    pub fn attenuate(
+        &self,
+        narrower: Capability,
+        granted_by: &str,
+        validity_duration: std::time::Duration,
+        signing_key: &SigningKey,
+        max_depth: u32,
+    ) -> Result<CapabilityToken> {
+        if !narrower.is_subset_of(&self.capability) {
+            return Err(NexusError::InvalidCapability(format!(
+                "attenuated capability {:?} is not a subset of parent {:?}",
+                narrower, self.capability
+            )));
+        }
+        let child_depth = self.chain_depth + 1;
+        if child_depth > max_depth {
+            return Err(NexusError::InvalidCapability(format!(
+                "attenuation chain depth {child_depth} exceeds max {max_depth}"
+            )));
+        }
+        let now = Utc::now();
+        let expires_at = (now + validity_duration).min(self.expires_at);
+        let mut token = CapabilityToken {
+            id: Uuid::new_v4(),
+            capability: narrower,
+            granted_by: granted_by.to_string(),
+            issued_at: now,
+            expires_at,
+            parent_id: Some(self.id),
+            chain_depth: child_depth,
+            signature: Vec::new(),
+        };
+        let data_to_sign = bincode::serialize(&(
+            &token.id,
+            &token.capability,
+            &token.granted_by,
+            &token.issued_at,
+            &token.expires_at,
+            &token.parent_id,
+            &token.chain_depth,
+        ))
+        .map_err(|e| NexusError::SerializationError(format!("attenuate signing: {e}")))?;
+        token.signature = signing_key.sign(&data_to_sign).to_bytes().to_vec();
+        Ok(token)
     }
 }
 
@@ -220,6 +298,31 @@ impl CapabilityManager {
         Ok(token)
     }
 
+    /// Attenuate an existing (registered) token into a strictly-weaker child,
+    /// signing it with the manager's key and registering it so deeper chains
+    /// can be validated later. Fails if `parent_id` is unknown or the
+    /// narrowing is invalid (see `CapabilityToken::attenuate`).
+    pub fn attenuate(
+        &mut self,
+        parent_id: Uuid,
+        narrower: Capability,
+        granted_by: &str,
+        validity_duration: std::time::Duration,
+    ) -> Result<CapabilityToken> {
+        let parent = self.active_tokens.get(&parent_id).ok_or_else(|| {
+            NexusError::InvalidCapability(format!("parent token {parent_id} not found"))
+        })?;
+        let child = parent.attenuate(
+            narrower,
+            granted_by,
+            validity_duration,
+            &self.signing_key,
+            DEFAULT_MAX_CHAIN_DEPTH,
+        )?;
+        self.active_tokens.insert(child.id, child.clone());
+        Ok(child)
+    }
+
     /// Validate a token and check capability
     pub fn validate(&self, token: &CapabilityToken, requested: &Capability) -> Result<()> {
         // Check if revoked
@@ -246,6 +349,11 @@ impl CapabilityManager {
             )));
         }
 
+        // Walk and verify the attenuation chain (no-op for root tokens).
+        if token.parent_id.is_some() {
+            self.validate_chain(token, DEFAULT_MAX_CHAIN_DEPTH)?;
+        }
+
         // Check capability
         if !token.allows(requested) {
             return Err(NexusError::InvalidCapability(format!(
@@ -254,6 +362,58 @@ impl CapabilityManager {
             )));
         }
 
+        Ok(())
+    }
+
+    /// Walk an attenuation chain from `token` to its root, verifying each
+    /// ancestor's signature, expiry, revocation, depth monotonicity, and that
+    /// every link is a subset of its parent. Ancestors must be registered in
+    /// `active_tokens` (via `issue`/`attenuate`).
+    fn validate_chain(&self, token: &CapabilityToken, max_depth: u32) -> Result<()> {
+        if token.chain_depth > max_depth {
+            return Err(NexusError::InvalidCapability(format!(
+                "chain depth {} exceeds max {max_depth}",
+                token.chain_depth
+            )));
+        }
+        let mut child = token.clone();
+        while let Some(pid) = child.parent_id {
+            // Check revocation before the active_tokens lookup: revoke() removes
+            // the token from active_tokens but records it in revoked_tokens.
+            if let Some(at) = self.revoked_tokens.get(&pid) {
+                return Err(NexusError::InvalidCapability(format!(
+                    "ancestor {pid} was revoked at {at}"
+                )));
+            }
+            let parent = self.active_tokens.get(&pid).ok_or_else(|| {
+                NexusError::InvalidCapability(format!(
+                    "broken attenuation chain: parent {pid} not found"
+                ))
+            })?;
+            if !parent.verify_signature(&self.verifying_key) {
+                return Err(NexusError::InvalidCapability(format!(
+                    "ancestor {pid} has invalid signature"
+                )));
+            }
+            if !parent.is_valid() {
+                return Err(NexusError::InvalidCapability(format!(
+                    "ancestor {pid} expired at {}",
+                    parent.expires_at
+                )));
+            }
+            if child.chain_depth != parent.chain_depth + 1 {
+                return Err(NexusError::InvalidCapability(format!(
+                    "non-monotonic chain depth at {pid}"
+                )));
+            }
+            if !child.capability.is_subset_of(&parent.capability) {
+                return Err(NexusError::InvalidCapability(format!(
+                    "link {:?} is not a subset of parent {:?}",
+                    child.capability, parent.capability
+                )));
+            }
+            child = parent.clone();
+        }
         Ok(())
     }
 
@@ -321,5 +481,197 @@ mod tests {
         assert!(manager
             .validate(&token, &Capability::ReadFile(PathBuf::from("/project")))
             .is_err());
+    }
+
+    fn hour() -> std::time::Duration {
+        std::time::Duration::from_secs(3600)
+    }
+
+    #[test]
+    fn subset_path_narrowing() {
+        let parent = Capability::ReadFile(PathBuf::from("/home"));
+        let child = Capability::ReadFile(PathBuf::from("/home/user"));
+        assert!(child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_rejects_broader() {
+        let child = Capability::ReadFile(PathBuf::from("/home"));
+        let parent = Capability::ReadFile(PathBuf::from("/home/user"));
+        assert!(!child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_none_and_all() {
+        let read = Capability::ReadFile(PathBuf::from("/home"));
+        assert!(Capability::None.is_subset_of(&read)); // deny-all ⊆ anything
+        assert!(read.is_subset_of(&Capability::All)); // anything ⊆ All
+        assert!(!Capability::All.is_subset_of(&read)); // All ⊄ a narrower cap
+    }
+
+    #[test]
+    fn subset_read_under_write() {
+        // Write implies read, so a read under the write path is a subset.
+        let parent = Capability::WriteFile(PathBuf::from("/data"));
+        let child = Capability::ReadFile(PathBuf::from("/data/file"));
+        assert!(child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn attenuate_narrower_ok() {
+        let mut m = CapabilityManager::new();
+        let root = m
+            .issue(Capability::ReadFile(PathBuf::from("/home")), "root", hour())
+            .unwrap();
+        let child = m
+            .attenuate(
+                root.id,
+                Capability::ReadFile(PathBuf::from("/home/user")),
+                "delegate",
+                hour(),
+            )
+            .unwrap();
+        assert_eq!(child.parent_id, Some(root.id));
+        assert_eq!(child.chain_depth, 1);
+    }
+
+    #[test]
+    fn attenuate_broader_fails() {
+        let mut m = CapabilityManager::new();
+        let root = m
+            .issue(
+                Capability::ReadFile(PathBuf::from("/home/user")),
+                "root",
+                hour(),
+            )
+            .unwrap();
+        // Broader path than parent → rejected.
+        let res = m.attenuate(
+            root.id,
+            Capability::ReadFile(PathBuf::from("/home")),
+            "delegate",
+            hour(),
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn attenuate_depth_cap() {
+        let mut m = CapabilityManager::new();
+        let mut current = m
+            .issue(Capability::ReadFile(PathBuf::from("/a")), "root", hour())
+            .unwrap();
+        // Depth 0 root → 5 attenuations reach depth 5 (== DEFAULT_MAX_CHAIN_DEPTH).
+        for _ in 0..DEFAULT_MAX_CHAIN_DEPTH {
+            current = m
+                .attenuate(
+                    current.id,
+                    Capability::ReadFile(PathBuf::from("/a")),
+                    "d",
+                    hour(),
+                )
+                .unwrap();
+        }
+        assert_eq!(current.chain_depth, DEFAULT_MAX_CHAIN_DEPTH);
+        // The 6th attenuation would be depth 6 > max → error.
+        let res = m.attenuate(
+            current.id,
+            Capability::ReadFile(PathBuf::from("/a")),
+            "d",
+            hour(),
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn validate_full_chain() {
+        let mut m = CapabilityManager::new();
+        let root = m
+            .issue(Capability::ReadFile(PathBuf::from("/home")), "root", hour())
+            .unwrap();
+        let mid = m
+            .attenuate(
+                root.id,
+                Capability::ReadFile(PathBuf::from("/home/user")),
+                "d",
+                hour(),
+            )
+            .unwrap();
+        let leaf = m
+            .attenuate(
+                mid.id,
+                Capability::ReadFile(PathBuf::from("/home/user/docs")),
+                "d",
+                hour(),
+            )
+            .unwrap();
+        assert!(m
+            .validate(
+                &leaf,
+                &Capability::ReadFile(PathBuf::from("/home/user/docs"))
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_revoked_parent() {
+        let mut m = CapabilityManager::new();
+        let root = m
+            .issue(Capability::ReadFile(PathBuf::from("/home")), "root", hour())
+            .unwrap();
+        let child = m
+            .attenuate(
+                root.id,
+                Capability::ReadFile(PathBuf::from("/home/user")),
+                "d",
+                hour(),
+            )
+            .unwrap();
+        m.revoke(root.id);
+        assert!(m
+            .validate(&child, &Capability::ReadFile(PathBuf::from("/home/user")))
+            .is_err());
+    }
+
+    #[test]
+    fn validate_expired_parent() {
+        let mut m = CapabilityManager::new();
+        // Parent already expired (zero validity); child expiry is clamped to it.
+        let root = m
+            .issue(
+                Capability::ReadFile(PathBuf::from("/home")),
+                "root",
+                std::time::Duration::from_secs(0),
+            )
+            .unwrap();
+        let child = m
+            .attenuate(
+                root.id,
+                Capability::ReadFile(PathBuf::from("/home/user")),
+                "d",
+                hour(),
+            )
+            .unwrap();
+        assert!(m
+            .validate(&child, &Capability::ReadFile(PathBuf::from("/home/user")))
+            .is_err());
+    }
+
+    #[test]
+    fn child_expiry_clamped_to_parent() {
+        let mut m = CapabilityManager::new();
+        let root = m
+            .issue(Capability::ReadFile(PathBuf::from("/home")), "root", hour())
+            .unwrap();
+        // Request a far longer validity than the parent has.
+        let child = m
+            .attenuate(
+                root.id,
+                Capability::ReadFile(PathBuf::from("/home/user")),
+                "d",
+                std::time::Duration::from_secs(36_000),
+            )
+            .unwrap();
+        assert_eq!(child.expires_at, root.expires_at);
     }
 }
