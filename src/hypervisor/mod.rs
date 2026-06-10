@@ -334,7 +334,10 @@ impl NexusHypervisor {
         // also skip the rollback path below.
         let snapshot = if let Some(ref mem) = exec_result.pre_call_memory {
             let fs_diff = FilesystemDiff::new();
-            let exec_state = ExecutionState::default();
+            let exec_state = ExecutionState {
+                captured_globals: exec_result.post_call_globals.clone().unwrap_or_default(),
+                captured_tables: exec_result.post_call_tables.clone().unwrap_or_default(),
+            };
             let metadata = SnapshotMetadata::new(
                 tool.name.clone(),
                 format!("{:x}", sha2::Sha256::digest(&tool.wasm_bytes)),

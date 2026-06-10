@@ -66,6 +66,10 @@ pub struct ExecutionResult {
     pub pre_call_memory: Option<Vec<u8>>,
     /// Number of system function calls
     pub syscall_count: u32,
+    /// Post-call exported globals (captured after entrypoint returns)
+    pub post_call_globals: Option<Vec<crate::snapshot::GlobalSnapshot>>,
+    /// Post-call exported tables (captured after entrypoint returns)
+    pub post_call_tables: Option<Vec<crate::snapshot::TableSnapshot>>,
 }
 
 impl ExecutionResult {
@@ -80,11 +84,23 @@ impl ExecutionResult {
             failure_mode: None,
             pre_call_memory: None,
             syscall_count: 0,
+            post_call_globals: None,
+            post_call_tables: None,
         }
     }
 
     pub fn with_pre_call_memory(mut self, mem: Option<Vec<u8>>) -> Self {
         self.pre_call_memory = mem;
+        self
+    }
+
+    pub fn with_post_call_state(
+        mut self,
+        globals: Vec<crate::snapshot::GlobalSnapshot>,
+        tables: Vec<crate::snapshot::TableSnapshot>,
+    ) -> Self {
+        self.post_call_globals = Some(globals);
+        self.post_call_tables = Some(tables);
         self
     }
 
@@ -101,6 +117,8 @@ impl ExecutionResult {
             failure_mode: Some(mode),
             pre_call_memory: None,
             syscall_count: 0,
+            post_call_globals: None,
+            post_call_tables: None,
         }
     }
 
@@ -115,6 +133,8 @@ impl ExecutionResult {
             failure_mode: Some(FailureMode::HostError(error)),
             pre_call_memory: None,
             syscall_count: 0,
+            post_call_globals: None,
+            post_call_tables: None,
         }
     }
 }
@@ -133,11 +153,15 @@ enum ExecReply {
     Ok {
         fuel_consumed: u64,
         pre_call_memory: Option<Vec<u8>>,
+        globals: Vec<crate::snapshot::GlobalSnapshot>,
+        tables: Vec<crate::snapshot::TableSnapshot>,
     },
     Failed {
         mode: FailureMode,
         fuel_consumed: u64,
         pre_call_memory: Option<Vec<u8>>,
+        globals: Vec<crate::snapshot::GlobalSnapshot>,
+        tables: Vec<crate::snapshot::TableSnapshot>,
     },
 }
 
@@ -200,6 +224,58 @@ impl WasmSandbox {
         self.execute_module(module, args)
     }
 
+    fn capture_globals(
+        instance: &wasmtime::Instance,
+        store: &mut Store<WasmState>,
+    ) -> Vec<crate::snapshot::GlobalSnapshot> {
+        let names: Vec<String> = instance
+            .exports(&mut *store)
+            .filter(|e| e.clone().into_global().is_some())
+            .map(|e| e.name().to_string())
+            .collect();
+
+        let mut globals = Vec::new();
+        for name in names {
+            if let Some(global) = instance.get_global(&mut *store, &name) {
+                let mutable = global.ty(&*store).mutability() == wasmtime::Mutability::Var;
+                let val = global.get(&mut *store);
+                let value = match val {
+                    wasmtime::Val::I32(v) => crate::snapshot::GlobalValue::I32(v),
+                    wasmtime::Val::I64(v) => crate::snapshot::GlobalValue::I64(v),
+                    wasmtime::Val::F32(v) => crate::snapshot::GlobalValue::F32(f32::from_bits(v)),
+                    wasmtime::Val::F64(v) => crate::snapshot::GlobalValue::F64(f64::from_bits(v)),
+                    _ => continue,
+                };
+                globals.push(crate::snapshot::GlobalSnapshot {
+                    name,
+                    value,
+                    mutable,
+                });
+            }
+        }
+        globals
+    }
+
+    fn capture_tables(
+        instance: &wasmtime::Instance,
+        store: &mut Store<WasmState>,
+    ) -> Vec<crate::snapshot::TableSnapshot> {
+        let names: Vec<String> = instance
+            .exports(&mut *store)
+            .filter(|e| e.clone().into_table().is_some())
+            .map(|e| e.name().to_string())
+            .collect();
+
+        let mut tables = Vec::new();
+        for name in names {
+            if let Some(table) = instance.get_table(&mut *store, &name) {
+                let size = table.size(&*store) as u32;
+                tables.push(crate::snapshot::TableSnapshot { name, size });
+            }
+        }
+        tables
+    }
+
     fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
         let start = Instant::now();
         let max_fuel = self.config.max_fuel;
@@ -220,6 +296,8 @@ impl WasmSandbox {
                     mode: FailureMode::HostError(format!("set_fuel failed: {e}")),
                     fuel_consumed: 0,
                     pre_call_memory: None,
+                    globals: Vec::new(),
+                    tables: Vec::new(),
                 });
                 return;
             }
@@ -233,6 +311,8 @@ impl WasmSandbox {
                         mode: FailureMode::InvalidModule(format!("instantiate failed: {e}")),
                         fuel_consumed: 0,
                         pre_call_memory: None,
+                        globals: Vec::new(),
+                        tables: Vec::new(),
                     });
                     return;
                 }
@@ -273,6 +353,8 @@ impl WasmSandbox {
                             },
                             fuel_consumed: 0,
                             pre_call_memory,
+                            globals: Vec::new(),
+                            tables: Vec::new(),
                         });
                         return;
                     }
@@ -284,19 +366,21 @@ impl WasmSandbox {
             let fuel_remaining = store.get_fuel().unwrap_or(0);
             let fuel_consumed = max_fuel.saturating_sub(fuel_remaining);
 
+            let globals = WasmSandbox::capture_globals(&instance, &mut store);
+            let tables = WasmSandbox::capture_tables(&instance, &mut store);
+
             match call_result {
                 Ok(_) => {
                     let _ = tx.send(ExecReply::Ok {
                         fuel_consumed,
                         pre_call_memory,
+                        globals,
+                        tables,
                     });
                 }
                 Err(e) => {
-                    // Prefer typed Trap classification; fall back to a
-                    // HostError carrying the textual chain otherwise.
                     let mode = FailureMode::from_anyhow_error(&e)
                         .unwrap_or_else(|| FailureMode::HostError(format!("wasm error: {e:#}")));
-                    // If wasmtime told us OutOfFuel, fill in the real limit.
                     let mode = match mode {
                         FailureMode::FuelExhausted { .. } => {
                             FailureMode::FuelExhausted { limit: max_fuel }
@@ -307,6 +391,8 @@ impl WasmSandbox {
                         mode,
                         fuel_consumed,
                         pre_call_memory,
+                        globals,
+                        tables,
                     });
                 }
             }
@@ -319,22 +405,28 @@ impl WasmSandbox {
             Ok(ExecReply::Ok {
                 fuel_consumed,
                 pre_call_memory,
+                globals,
+                tables,
             }) => {
                 let _ = handle.join();
                 Ok(
                     ExecutionResult::success(Vec::new(), fuel_consumed, duration_ms)
-                        .with_pre_call_memory(pre_call_memory),
+                        .with_pre_call_memory(pre_call_memory)
+                        .with_post_call_state(globals, tables),
                 )
             }
             Ok(ExecReply::Failed {
                 mode,
                 fuel_consumed,
                 pre_call_memory,
+                globals,
+                tables,
             }) => {
                 let _ = handle.join();
                 Ok(
                     ExecutionResult::failure_from_mode(mode, fuel_consumed, duration_ms)
-                        .with_pre_call_memory(pre_call_memory),
+                        .with_pre_call_memory(pre_call_memory)
+                        .with_post_call_state(globals, tables),
                 )
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {

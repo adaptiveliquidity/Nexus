@@ -220,18 +220,36 @@ pub enum RevertOperation {
 /// Execution state for WASM
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionState {
-    /// Program counter
-    pub pc: u64,
-    /// Stack pointer
-    pub sp: u64,
-    /// Current stack depth
-    pub stack_depth: u32,
-    /// Call stack (function addresses)
-    pub call_stack: Vec<u64>,
-    /// Local variables
-    pub locals: Vec<i32>,
-    /// Global values
-    pub globals: Vec<i64>,
+    /// Captured exported globals (name, value, mutability).
+    /// Empty for modules with no exported globals.
+    pub captured_globals: Vec<GlobalSnapshot>,
+    /// Captured exported tables (name, size, element type info).
+    /// Empty for modules with no exported tables.
+    pub captured_tables: Vec<TableSnapshot>,
+}
+
+/// A snapshot of a single WASM exported global.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GlobalSnapshot {
+    pub name: String,
+    pub value: GlobalValue,
+    pub mutable: bool,
+}
+
+/// Typed global value matching the WASM value types.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum GlobalValue {
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+}
+
+/// A snapshot of a single WASM exported table.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TableSnapshot {
+    pub name: String,
+    pub size: u32,
 }
 
 /// Snapshot metadata
@@ -518,6 +536,32 @@ pub fn restore_memory<T>(
     }
     let dest = memory.data_mut(&mut *store);
     dest[..bytes.len()].copy_from_slice(bytes);
+    Ok(())
+}
+
+/// Write captured global values back into a live wasmtime instance.
+/// Only restores mutable globals; immutable globals cannot change
+/// and are skipped. Unknown or type-mismatched globals are silently
+/// skipped (the module may have been recompiled with different exports).
+pub fn restore_globals<T>(
+    instance: &wasmtime::Instance,
+    store: &mut wasmtime::Store<T>,
+    globals: &[GlobalSnapshot],
+) -> Result<()> {
+    for snap in globals {
+        if !snap.mutable {
+            continue;
+        }
+        if let Some(global) = instance.get_global(&mut *store, &snap.name) {
+            let val = match &snap.value {
+                GlobalValue::I32(v) => wasmtime::Val::I32(*v),
+                GlobalValue::I64(v) => wasmtime::Val::I64(*v),
+                GlobalValue::F32(v) => wasmtime::Val::F32(v.to_bits()),
+                GlobalValue::F64(v) => wasmtime::Val::F64(v.to_bits()),
+            };
+            let _ = global.set(&mut *store, val);
+        }
+    }
     Ok(())
 }
 
