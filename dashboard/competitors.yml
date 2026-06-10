@@ -1,4 +1,21 @@
-competitors:
+# Benchmark comparison data for the Nexus dashboard.
+#
+# "measured" entries are benchmarked by Nexus CI on every push to main.
+# "cited" entries come from third-party sources (vendor docs, papers).
+# All cited entries include source URLs for independent verification.
+#
+# To reproduce locally: scripts/run_local_comparison.sh
+
+measured:
+  - name: Wasmtime (raw CLI)
+    description: "Raw wasmtime binary executing the same WASM module — isolates Nexus overhead"
+    how: "hyperfine 'wasmtime run compute.wasm' in Phase 2 CI"
+
+  - name: Docker
+    description: "docker run with the same wasmtime binary — container cold-start baseline"
+    how: "hyperfine 'docker run --rm nexus-bench-runner' in Phase 2 CI"
+
+cited:
   - name: Wasmtime (baseline)
     cold_start_ms: 5.6
     source: "arXiv:2509.09400 (2025) — no-op fn, JIT compile"

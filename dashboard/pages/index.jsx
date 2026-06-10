@@ -26,7 +26,7 @@ function formatMs(ms) {
   return `${(ms / 1000).toFixed(1)} s`;
 }
 
-export default function Dashboard({ competitors, nexusDataSource }) {
+export default function Dashboard({ measured, cited, nexusDataSource }) {
   const [nexusLive, setNexusLive] = useState(null);
   const [fetchError, setFetchError] = useState(null);
 
@@ -52,9 +52,10 @@ export default function Dashboard({ competitors, nexusDataSource }) {
 
   const nexusColdStartMs = nexusLive ? nexusLive.cold_start_ms : 0.023;
 
+  const allCompetitors = [...(cited || [])];
   const chartData = [
     { name: "Nexus", ms: nexusColdStartMs, isNexus: true },
-    ...competitors
+    ...allCompetitors
       .filter((c) => c.cold_start_ms <= 200)
       .map((c) => ({ name: c.name, ms: c.cold_start_ms, isNexus: false })),
   ].sort((a, b) => a.ms - b.ms);
@@ -140,10 +141,33 @@ export default function Dashboard({ competitors, nexusDataSource }) {
               <span className="badge badge-live">Bencher.dev</span>
             </td>
           </tr>
-          {competitors.map((c) => (
+          {measured && measured.length > 0 && (
+            <tr className="section-header">
+              <td colSpan={5}>
+                <span className="badge badge-measured">Measured by Nexus CI</span>
+              </td>
+            </tr>
+          )}
+          {(measured || []).map((m) => (
+            <tr key={m.name}>
+              <td>{m.name}</td>
+              <td colSpan={3} className="measured-note">{m.description}</td>
+              <td>
+                <span className="badge badge-measured">CI</span>
+              </td>
+            </tr>
+          ))}
+          {cited && cited.length > 0 && (
+            <tr className="section-header">
+              <td colSpan={5}>
+                <span className="badge badge-cited">Third-party cited sources</span>
+              </td>
+            </tr>
+          )}
+          {(cited || []).map((c) => (
             <tr key={c.name}>
               <td>{c.name}</td>
-              <td>{formatMs(c.cold_start_ms)}</td>
+              <td>{c.cold_start_ms ? formatMs(c.cold_start_ms) : "—"}</td>
               <td>{c.snapshot_create_ms ? formatMs(c.snapshot_create_ms) : "—"}</td>
               <td>{c.rollback_ms ? formatMs(c.rollback_ms) : "—"}</td>
               <td>
@@ -201,8 +225,13 @@ export default function Dashboard({ competitors, nexusDataSource }) {
         <p>
           All Nexus numbers are measured on GitHub-hosted runners (ubuntu-24.04)
           and published automatically via CI. Competitor numbers are from cited
-          third-party sources. Benchmark artifacts are signed with Sigstore for
-          cryptographic attestation.
+          third-party sources — each entry links to its original source for
+          independent verification. Benchmark artifacts are signed with Sigstore
+          for cryptographic attestation.
+        </p>
+        <p style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}>
+          Reproduce locally:{" "}
+          <code>bash scripts/run_local_comparison.sh</code>
         </p>
       </div>
     </div>
@@ -216,8 +245,9 @@ export async function getStaticProps() {
 
   return {
     props: {
-      competitors: data.competitors,
-      nexusDataSource: data.nexus_data_source,
+      measured: data.measured || [],
+      cited: data.cited || [],
+      nexusDataSource: data.nexus_data_source || data.nexus_data_source,
     },
   };
 }

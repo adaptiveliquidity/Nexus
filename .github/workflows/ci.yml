@@ -76,10 +76,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy (deny warnings)
-        # Per the plan's harness-static todo. We use -A on a small set of
-        # pre-existing dead-code warnings in untouched files; remove the
-        # `-A` flags as the cleanup PRs land.
-        run: cargo clippy --all-targets --locked -- -D warnings -A dead_code -A unused_imports
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: cargo audit
         run: |
           cargo install --locked cargo-audit
