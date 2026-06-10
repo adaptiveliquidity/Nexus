@@ -439,6 +439,7 @@ impl SnapshotManager {
 
         // Decompress memory
         let memory = snapshot.decompress_memory()?;
+        let execution_state = snapshot.execution_state.clone();
 
         // Get filesystem revert operations
         let fs_ops = snapshot.fs_changes.revert();
@@ -453,6 +454,7 @@ impl SnapshotManager {
         Ok(RollbackResult {
             snapshot_id: *snapshot_id,
             memory,
+            execution_state,
             fs_operations: fs_ops,
             timestamp: Utc::now(),
         })
@@ -514,6 +516,7 @@ impl SnapshotManager {
 pub struct RollbackResult {
     pub snapshot_id: Uuid,
     pub memory: Vec<u8>,
+    pub execution_state: ExecutionState,
     pub fs_operations: Vec<RevertOperation>,
     pub timestamp: DateTime<Utc>,
 }

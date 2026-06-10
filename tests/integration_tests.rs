@@ -92,8 +92,8 @@ fn test_execution_snapshot() {
     let memory = WasmMemoryState::from_bytes(&vec![42u8; 512]);
     let snapshot = WasmExecutionSnapshot::new(memory);
 
-    assert_eq!(snapshot.stack_pointer, 0);
-    assert_eq!(snapshot.pc, 0);
+    assert!(snapshot.captured_globals.is_empty());
+    assert!(snapshot.captured_tables.is_empty());
     assert_eq!(snapshot.memory.size_bytes, 512);
 }
 
