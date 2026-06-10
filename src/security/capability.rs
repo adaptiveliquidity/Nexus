@@ -112,9 +112,9 @@ impl CapabilityToken {
         granted_by: &str,
         validity_duration: std::time::Duration,
         signing_key: &SigningKey,
-    ) -> Self {
+    ) -> Result<Self> {
         let now = Utc::now();
-        let token = CapabilityToken {
+        let mut token = CapabilityToken {
             id: Uuid::new_v4(),
             capability,
             granted_by: granted_by.to_string(),
@@ -123,7 +123,6 @@ impl CapabilityToken {
             signature: Vec::new(),
         };
 
-        // Sign the token
         let data_to_sign = bincode::serialize(&(
             &token.id,
             &token.capability,
@@ -131,24 +130,22 @@ impl CapabilityToken {
             &token.issued_at,
             &token.expires_at,
         ))
-        .expect("serialization should not fail");
-        let sig = signing_key.sign(&data_to_sign);
-
-        let mut result = token;
-        result.signature = sig.to_bytes().to_vec();
-        result
+        .map_err(|e| NexusError::SerializationError(format!("token signing: {e}")))?;
+        token.signature = signing_key.sign(&data_to_sign).to_bytes().to_vec();
+        Ok(token)
     }
 
     /// Verify the token signature
     pub fn verify_signature(&self, verifying_key: &VerifyingKey) -> bool {
-        let data_to_verify = bincode::serialize(&(
+        let Ok(data_to_verify) = bincode::serialize(&(
             &self.id,
             &self.capability,
             &self.granted_by,
             &self.issued_at,
             &self.expires_at,
-        ))
-        .expect("serialization should not fail");
+        )) else {
+            return false;
+        };
 
         let signature_array: [u8; 64] = self.signature.clone().try_into().unwrap_or([0u8; 64]);
         let sig = Signature::from_bytes(&signature_array);
@@ -215,12 +212,12 @@ impl CapabilityManager {
         capability: Capability,
         granted_by: &str,
         validity_duration: std::time::Duration,
-    ) -> CapabilityToken {
+    ) -> Result<CapabilityToken> {
         let token =
-            CapabilityToken::new(capability, granted_by, validity_duration, &self.signing_key);
+            CapabilityToken::new(capability, granted_by, validity_duration, &self.signing_key)?;
 
         self.active_tokens.insert(token.id, token.clone());
-        token
+        Ok(token)
     }
 
     /// Validate a token and check capability
@@ -304,11 +301,13 @@ mod tests {
     fn test_token_lifecycle() {
         let mut manager = CapabilityManager::new();
 
-        let token = manager.issue(
-            Capability::ReadFile(PathBuf::from("/project")),
-            "test-agent",
-            std::time::Duration::from_secs(3600),
-        );
+        let token = manager
+            .issue(
+                Capability::ReadFile(PathBuf::from("/project")),
+                "test-agent",
+                std::time::Duration::from_secs(3600),
+            )
+            .unwrap();
 
         assert!(token.is_valid());
         assert!(manager

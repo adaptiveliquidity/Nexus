@@ -286,8 +286,7 @@ impl WasmSandbox {
         let (tx, rx) = std::sync::mpsc::channel::<ExecReply>();
 
         let handle = std::thread::spawn(move || {
-            let state = WasmState::new(max_fuel);
-            let mut store = Store::new(&engine, state);
+            let mut store = Store::new(&engine, WasmState);
 
             // With consume_fuel(true) in Config, set_fuel is required and
             // succeeds; failures here mean the engine config drifted.
@@ -449,91 +448,7 @@ impl WasmSandbox {
             }
         }
     }
-
-    /// Execute a specific function with arguments
-    pub fn execute_function(
-        &self,
-        wasm_bytes: &[u8],
-        function_name: &str,
-        args: &[i32],
-    ) -> Result<ExecutionResult> {
-        let start = Instant::now();
-        let start_fuel = self.config.max_fuel;
-
-        let module = Module::from_binary(&self.engine, wasm_bytes)
-            .map_err(|e| NexusError::WasmError(format!("Failed to compile module: {}", e)))?;
-
-        let mut store = self.create_store()?;
-        let linker = self.create_linker()?;
-
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| NexusError::WasmError(format!("Failed to instantiate: {}", e)))?;
-
-        // Try to find the function
-        let func = instance.get_typed_func::<(i32,), (i32,)>(&mut store, function_name);
-
-        match func {
-            Ok(f) => {
-                let mut results = Vec::new();
-                for &arg in args {
-                    let result = f.call(&mut store, (arg,));
-                    match result {
-                        Ok((ret,)) => results.push(ret),
-                        Err(e) => {
-                            return Ok(ExecutionResult::failure(
-                                format!("WASM error: {}", e),
-                                start_fuel,
-                            ));
-                        }
-                    }
-                }
-
-                let fuel_consumed = start_fuel;
-                let duration_ms = start.elapsed().as_millis() as u64;
-
-                // Encode results as bytes
-                let return_bytes = results.iter().flat_map(|&v| v.to_le_bytes()).collect();
-
-                Ok(ExecutionResult::success(
-                    return_bytes,
-                    fuel_consumed,
-                    duration_ms,
-                ))
-            }
-            Err(_) => Err(NexusError::WasmError(format!(
-                "Function {} not found",
-                function_name
-            ))),
-        }
-    }
-
-    /// Create a store with fuel metering and resource limits
-    fn create_store(&self) -> Result<Store<WasmState>> {
-        let state = WasmState::new(self.config.max_fuel);
-        let mut store = Store::new(&self.engine, state);
-
-        // Set fuel for this execution (fuel is enabled via engine config)
-        if let Err(e) = store.set_fuel(self.config.max_fuel) {
-            // Fuel setting failed, but continue without it
-            eprintln!("Warning: Could not set fuel: {}", e);
-        }
-
-        Ok(store)
-    }
-
-    fn create_linker(&self) -> Result<Linker<WasmState>> {
-        // WASI integration is in development; for now, bare linker only.
-        let linker = Linker::new(&self.engine);
-        Ok(linker)
-    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WasmState;
-
-impl WasmState {
-    pub fn new(_fuel: u64) -> Self {
-        WasmState
-    }
-}

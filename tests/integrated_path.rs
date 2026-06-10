@@ -18,11 +18,13 @@ fn trivial_wasm() -> Vec<u8> {
 #[tokio::test]
 async fn full_integrated_path_succeeds() {
     let hv = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
-    let token = hv.issue_token(
-        Capability::ReadFile(PathBuf::from("/data")),
-        "test",
-        Duration::from_secs(60),
-    );
+    let token = hv
+        .issue_token(
+            Capability::ReadFile(PathBuf::from("/data")),
+            "test",
+            Duration::from_secs(60),
+        )
+        .unwrap();
 
     let cache = ModuleCache::new();
     let engine = hv.sandbox_engine();
