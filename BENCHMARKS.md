@@ -38,21 +38,25 @@ The benchmark pipeline uses two independent third-party services:
 - **Hardware**: GitHub-hosted runner (ubuntu-24.04), hardware specs recorded per run
 - **Operating System**: Ubuntu 24.04 LTS
 - **Statistical rigor**: Criterion with configurable warm-up, measurement time, and sample size
-- **WASM Runtime**: wasmtime 37.0 with Cranelift JIT compiler
+- **WASM Runtime**: wasmtime 45.0 with Cranelift JIT compiler
 - **Memory buffers**: Pseudo-random (LCG-generated) to prevent compression from skewing results
 
 ### Test Cases
 
 The `nexus_validation` benchmark harness measures:
 
-| Benchmark Group | What It Measures |
-|----------------|-----------------|
-| `cold_start/sandbox_new` | `WasmSandbox::new` — struct initialization |
-| `cold_start/hypervisor_new` | `NexusHypervisor::new` — full hypervisor init |
-| `snapshot_create/MiB/{1,10,100}` | `SnapshotManager::create_snapshot` with pseudo-random memory |
-| `snapshot_rollback/MiB/{1,10,100}` | `SnapshotManager::rollback_to` — decompress + integrity restore |
-| `execute_tool/trivial_wasm_start` | End-to-end `execute_tool` with a minimal WASM module |
-| `execute_tool_real_memory/MiB/{1,10,100}` | End-to-end with WASM modules that allocate real linear memory |
+| Benchmark Group | What It Measures | Category |
+|----------------|-----------------|----------|
+| `cold_start/sandbox_new` | `WasmSandbox::new` — struct initialization | benchmarked-primitive |
+| `cold_start/hypervisor_new` | `NexusHypervisor::new` — full hypervisor init | benchmarked-primitive |
+| `snapshot_create/size/{1,10,100}MiB` | `SnapshotManager::create_snapshot` with pseudo-random memory | integrated-live |
+| `snapshot_rollback/size/{1,10,100}MiB` | `SnapshotManager::rollback_to` — decompress + integrity restore | benchmarked-primitive |
+| `execute_tool/trivial_wasm_start` | End-to-end `execute_tool` with a minimal WASM module | integrated-live |
+| `execute_tool_real_memory/size/{1,10,100}MiB` | End-to-end with WASM modules that allocate real linear memory | integrated-live |
+| `integrated_capability_checked` | `execute_tool_with_tokens` with ed25519 token validation | integrated-live |
+| `integrated_input_fed` | `execute_tool` with non-trivial JSON input plumbing | integrated-live |
+| `integrated_precompiled` | `execute_tool_precompiled` vs `execute_tool` (cache hit vs recompile) | integrated-live |
+| `integrated_full_stack` | Combined: capability + input + precompiled in a single call | integrated-live |
 
 ### Competitor Data Sources
 
