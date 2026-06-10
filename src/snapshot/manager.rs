@@ -500,6 +500,27 @@ pub struct RollbackResult {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Write `bytes` into a live wasmtime `Memory`, growing it if necessary.
+/// This is the mechanism that makes rollback actually restore state: the
+/// caller decompresses a snapshot's memory via `RollbackResult.memory` and
+/// passes it here to overwrite the instance's linear memory.
+pub fn restore_memory<T>(
+    memory: &wasmtime::Memory,
+    store: &mut wasmtime::Store<T>,
+    bytes: &[u8],
+) -> Result<()> {
+    let current_size = memory.data_size(&*store);
+    if bytes.len() > current_size {
+        let pages_needed = (bytes.len() - current_size).div_ceil(65536);
+        memory
+            .grow(&mut *store, pages_needed as u64)
+            .map_err(|e| NexusError::RollbackFailed(format!("memory grow failed: {e}")))?;
+    }
+    let dest = memory.data_mut(&mut *store);
+    dest[..bytes.len()].copy_from_slice(bytes);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

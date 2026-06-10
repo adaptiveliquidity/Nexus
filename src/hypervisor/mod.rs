@@ -117,6 +117,10 @@ pub struct NexusHypervisor {
     /// matching instincts after a successful retry and debits them after
     /// a still-failed retry. When unset, outcome feedback is a no-op.
     instinct_store: Option<Arc<crate::instinct::InstinctStore>>,
+    /// Decompressed memory from the most recent rollback. Callers can
+    /// use `last_rollback_memory()` to retrieve these bytes and
+    /// `restore_memory` to write them into a live wasmtime instance.
+    last_rollback_memory: RwLock<Option<Vec<u8>>>,
 }
 
 impl NexusHypervisor {
@@ -166,6 +170,7 @@ impl NexusHypervisor {
             current_snapshot: RwLock::new(None),
             recovery_policy,
             instinct_store: None,
+            last_rollback_memory: RwLock::new(None),
         })
     }
 
@@ -310,7 +315,8 @@ impl NexusHypervisor {
             let mut rollback_performed = false;
             if mode.requires_rollback() {
                 if let Some(snap) = snapshot.as_ref() {
-                    if self.snapshot_manager.rollback_to(&snap.id).is_ok() {
+                    if let Ok(result) = self.snapshot_manager.rollback_to(&snap.id) {
+                        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
                         rollback_performed = true;
                     }
                 }
@@ -457,9 +463,20 @@ impl NexusHypervisor {
     /// Rollback to a specific snapshot manually
     pub async fn manual_rollback(&self, snapshot_id: uuid::Uuid) -> Result<()> {
         let result = self.snapshot_manager.rollback_to(&snapshot_id)?;
-        // Would restore memory and filesystem from result
-        let _ = result;
+        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
         Ok(())
+    }
+
+    /// Return the decompressed memory from the most recent rollback,
+    /// consuming it so subsequent calls return `None` until another
+    /// rollback occurs.
+    pub fn take_rollback_memory(&self) -> Option<Vec<u8>> {
+        self.last_rollback_memory.write().unwrap().take()
+    }
+
+    /// Peek at the rollback memory without consuming it.
+    pub fn last_rollback_memory(&self) -> Option<Vec<u8>> {
+        self.last_rollback_memory.read().unwrap().clone()
     }
 }
 
