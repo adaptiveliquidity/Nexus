@@ -3,7 +3,6 @@
 //! Captures actual WASM linear memory for true state snapshots.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Captured WASM memory state (serializable for snapshots)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,36 +63,26 @@ impl WasmMemoryState {
 /// Snapshot of WASM execution state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasmExecutionSnapshot {
-    /// Memory state
     pub memory: WasmMemoryState,
-    /// Global values (stored separately)
-    pub globals: HashMap<String, Vec<u8>>,
-    /// Stack pointer
-    pub stack_pointer: u32,
-    /// PC value
-    pub pc: u32,
+    pub captured_globals: Vec<crate::snapshot::GlobalSnapshot>,
+    pub captured_tables: Vec<crate::snapshot::TableSnapshot>,
 }
 
 impl WasmExecutionSnapshot {
-    /// Create a new execution snapshot
     pub fn new(memory: WasmMemoryState) -> Self {
         WasmExecutionSnapshot {
             memory,
-            globals: HashMap::new(),
-            stack_pointer: 0,
-            pc: 0,
+            captured_globals: Vec::new(),
+            captured_tables: Vec::new(),
         }
     }
 
-    /// Create empty snapshot
     pub fn empty() -> Self {
         WasmExecutionSnapshot::new(WasmMemoryState::empty())
     }
 
-    /// Estimate snapshot size
     pub fn size_bytes(&self) -> usize {
-        self.memory.total_size() + self.globals.values().map(|v| v.len()).sum::<usize>() + 16
-        // overhead for other fields
+        self.memory.total_size() + 16
     }
 }
 

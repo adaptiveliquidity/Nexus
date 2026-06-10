@@ -10,6 +10,7 @@ pub use compression::{
     CompressionAlgo, CompressionConfig,
 };
 pub use manager::{
-    restore_memory, ExecutionState, FileChange, FilePath, FilesystemDiff, RevertOperation,
-    RollbackResult, Snapshot, SnapshotManager, SnapshotMetadata, SnapshotRingBuffer, SnapshotStats,
+    restore_globals, restore_memory, ExecutionState, FileChange, FilePath, FilesystemDiff,
+    GlobalSnapshot, GlobalValue, RevertOperation, RollbackResult, Snapshot, SnapshotManager,
+    SnapshotMetadata, SnapshotRingBuffer, SnapshotStats, TableSnapshot,
 };

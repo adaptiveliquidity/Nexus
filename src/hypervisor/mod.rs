@@ -121,6 +121,8 @@ pub struct NexusHypervisor {
     /// use `last_rollback_memory()` to retrieve these bytes and
     /// `restore_memory` to write them into a live wasmtime instance.
     last_rollback_memory: RwLock<Option<Vec<u8>>>,
+    /// Execution state (globals/tables) from the most recent rollback.
+    last_rollback_execution_state: RwLock<Option<ExecutionState>>,
 }
 
 impl NexusHypervisor {
@@ -171,6 +173,7 @@ impl NexusHypervisor {
             recovery_policy,
             instinct_store: None,
             last_rollback_memory: RwLock::new(None),
+            last_rollback_execution_state: RwLock::new(None),
         })
     }
 
@@ -334,7 +337,10 @@ impl NexusHypervisor {
         // also skip the rollback path below.
         let snapshot = if let Some(ref mem) = exec_result.pre_call_memory {
             let fs_diff = FilesystemDiff::new();
-            let exec_state = ExecutionState::default();
+            let exec_state = ExecutionState {
+                captured_globals: exec_result.post_call_globals.clone().unwrap_or_default(),
+                captured_tables: exec_result.post_call_tables.clone().unwrap_or_default(),
+            };
             let metadata = SnapshotMetadata::new(
                 tool.name.clone(),
                 format!("{:x}", sha2::Sha256::digest(&tool.wasm_bytes)),
@@ -392,6 +398,8 @@ impl NexusHypervisor {
                 if let Some(snap) = snapshot.as_ref() {
                     if let Ok(result) = self.snapshot_manager.rollback_to(&snap.id) {
                         *self.last_rollback_memory.write().unwrap() = Some(result.memory);
+                        *self.last_rollback_execution_state.write().unwrap() =
+                            Some(result.execution_state);
                         rollback_performed = true;
                     }
                 }
@@ -539,6 +547,7 @@ impl NexusHypervisor {
     pub async fn manual_rollback(&self, snapshot_id: uuid::Uuid) -> Result<()> {
         let result = self.snapshot_manager.rollback_to(&snapshot_id)?;
         *self.last_rollback_memory.write().unwrap() = Some(result.memory);
+        *self.last_rollback_execution_state.write().unwrap() = Some(result.execution_state);
         Ok(())
     }
 
@@ -552,6 +561,16 @@ impl NexusHypervisor {
     /// Peek at the rollback memory without consuming it.
     pub fn last_rollback_memory(&self) -> Option<Vec<u8>> {
         self.last_rollback_memory.read().unwrap().clone()
+    }
+
+    /// Return the execution state from the most recent rollback, consuming it.
+    pub fn take_rollback_execution_state(&self) -> Option<ExecutionState> {
+        self.last_rollback_execution_state.write().unwrap().take()
+    }
+
+    /// Peek at the rollback execution state without consuming it.
+    pub fn last_rollback_execution_state(&self) -> Option<ExecutionState> {
+        self.last_rollback_execution_state.read().unwrap().clone()
     }
 }
 
