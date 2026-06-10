@@ -1,0 +1,320 @@
+# Instincts generated from https://github.com/Adaptive-Liquidity/Nexus
+# Generated: 2026-06-10T14:53:10.620Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: Nexus-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/Adaptive-Liquidity/Nexus
+---
+
+# Nexus Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat, fix
+
+## Evidence
+
+- 2 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat(hypervisor): speculative execution with snapshot forking, fix(health): stop spurious host-CPU reading from failing guests
+
+---
+id: Nexus-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/Adaptive-Liquidity/Nexus
+---
+
+# Nexus Commit Length
+
+## Action
+
+Write moderate-length commit messages (~62 characters)
+
+## Evidence
+
+- Average commit message length: 62 chars
+- Based on 2 commits
+
+---
+id: Nexus-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Adaptive-Liquidity/Nexus
+---
+
+# Nexus Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: Nexus-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Adaptive-Liquidity/Nexus
+---
+
+# Nexus Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: Nexus-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Adaptive-Liquidity/Nexus
+---
+
+# Nexus Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: Nexus-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/Adaptive-Liquidity/Nexus
+---
+
+# Nexus Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: nexus-instinct-file-naming
+trigger: "When creating a new source file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct File Naming
+
+## Action
+
+Name the file using snake_case
+
+## Evidence
+
+- Pattern in namingConventions.files: snake_case
+
+---
+id: nexus-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Function Naming
+
+## Action
+
+Use camelCase for the function name
+
+## Evidence
+
+- Pattern in namingConventions.functions: camelCase
+
+---
+id: nexus-instinct-class-naming
+trigger: "When defining a new class or struct"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Class Naming
+
+## Action
+
+Use PascalCase for the class or struct name
+
+## Evidence
+
+- Pattern in namingConventions.classes: PascalCase
+
+---
+id: nexus-instinct-constant-naming
+trigger: "When declaring a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for the constant name
+
+## Evidence
+
+- Pattern in namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: nexus-instinct-import-style
+trigger: "When importing modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Import Style
+
+## Action
+
+Use relative import paths
+
+## Evidence
+
+- Pattern in importStyle: relative
+
+---
+id: nexus-instinct-export-style
+trigger: "When exporting functions or types"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle: named
+
+---
+id: nexus-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Test Location
+
+## Action
+
+Place test files in the separate 'tests' folder
+
+## Evidence
+
+- Pattern in folderStructure.testLocation: separate
+- commonFolders includes 'tests'
+
+---
+id: nexus-instinct-commit-prefix
+trigger: "When writing a commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Commit Prefix
+
+## Action
+
+Start the commit message with a conventional prefix such as 'feat' or 'fix'
+
+## Evidence
+
+- commits.prefixes: ['feat', 'fix']
+- Examples: 'feat(hypervisor): ...', 'fix(health): ...'
+
+---
+id: nexus-instinct-commit-format
+trigger: "When writing a commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Commit Format
+
+## Action
+
+Format the commit as '<type>(<scope>): <description>'
+
+## Evidence
+
+- commits.type: conventional
+- Examples: 'feat(hypervisor): ...', 'fix(health): ...'
+
+---
+id: nexus-instinct-commit-length
+trigger: "When composing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: Adaptive-Liquidity/Nexus
+---
+
+# Nexus Instinct Commit Length
+
+## Action
+
+Keep the commit message around 62 characters on average
+
+## Evidence
+
+- commits.averageLength: 62
+
