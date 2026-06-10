@@ -586,6 +586,43 @@ impl NexusHypervisor {
         .await
     }
 
+    /// Execute a tool while recording an [`ExecutionTrace`] for replay /
+    /// time-travel debugging. Opt-in.
+    ///
+    /// The checkpoint is built from the state the run already captured — the
+    /// per-execution snapshot's memory hash (`memory_checksum`) and exported
+    /// globals — so this adds no cost to the execution path. The trace is empty
+    /// when the module exported no `"memory"` (nothing was snapshotted).
+    ///
+    /// Anti-overclaim: mid-execution fuel-interval checkpoints are roadmap —
+    /// the synchronous sandbox cannot pause the guest. The trace currently
+    /// holds the end-of-execution checkpoint; the replay engine
+    /// ([`crate::telemetry::TraceReplay`]) is interval-agnostic.
+    pub async fn execute_tool_traced(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        config: &crate::telemetry::TraceConfig,
+    ) -> Result<(ToolOutput, crate::telemetry::ExecutionTrace)> {
+        let tool_name = tool.name.clone();
+        let output = self.execute_tool(tool, input).await?;
+        let mut trace = crate::telemetry::ExecutionTrace::new(tool_name);
+        if let Some(snap) = self.current_snapshot.read().unwrap().clone() {
+            let memory_hash = if config.capture_memory {
+                snap.memory_checksum.clone()
+            } else {
+                String::new()
+            };
+            trace.push(
+                output.fuel_consumed,
+                memory_hash,
+                snap.execution_state.captured_globals.clone(),
+                config.max_checkpoints,
+            );
+        }
+        Ok((output, trace))
+    }
+
     /// Read-only access to the attached instinct store (Phase B).
     pub fn instinct_store(&self) -> Option<&Arc<crate::instinct::InstinctStore>> {
         self.instinct_store.as_ref()
