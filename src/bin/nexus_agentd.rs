@@ -156,7 +156,7 @@ async fn handle_unix(
 async fn serve(
     req: DaemonRequest,
     pool: &Arc<HypervisorPool>,
-    _module_cache: &Arc<ModuleCache>,
+    module_cache: &Arc<ModuleCache>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) -> DaemonResponse {
     match req {
@@ -192,10 +192,6 @@ async fn serve(
                     }
                 }
             };
-            // Note: the ModuleCache speeds up sandbox-internal compile in
-            // a follow-up; today's hypervisor still calls Module::from_binary
-            // inside execute_tool. The cache will land when the sandbox
-            // exposes an "execute with precompiled module" entry point.
             let guard = match pool.acquire().await {
                 Ok(g) => g,
                 Err(e) => {
@@ -204,8 +200,21 @@ async fn serve(
                     }
                 }
             };
+            let engine = guard.hv().sandbox_engine();
+            let module = match module_cache.get_or_compile(&engine, &bytes) {
+                Ok(m) => m,
+                Err(e) => {
+                    return DaemonResponse::Error {
+                        message: format!("module compile failed: {e}"),
+                    }
+                }
+            };
             let tool = ToolDefinition::new(name, bytes).with_entry(&entry);
-            match guard.hv().execute_tool(tool, input).await {
+            match guard
+                .hv()
+                .execute_tool_precompiled(tool, input, module)
+                .await
+            {
                 Ok(output) => DaemonResponse::Executed {
                     output: Box::new(output),
                 },

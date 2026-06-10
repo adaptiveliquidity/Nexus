@@ -200,6 +200,11 @@ impl NexusHypervisor {
         self.instinct_store.is_some()
     }
 
+    /// Access the sandbox's wasmtime `Engine` for use with `ModuleCache`.
+    pub fn sandbox_engine(&self) -> wasmtime::Engine {
+        self.sandbox.read().unwrap().engine().clone()
+    }
+
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();
@@ -242,6 +247,29 @@ impl NexusHypervisor {
         input: serde_json::Value,
         caller_tokens: &[crate::security::CapabilityToken],
     ) -> Result<ToolOutput> {
+        self.execute_tool_inner(tool, input, caller_tokens, None)
+            .await
+    }
+
+    /// Execute a tool using a precompiled `Module` from `ModuleCache`.
+    /// Skips `Module::from_binary`, making repeat invocations faster.
+    pub async fn execute_tool_precompiled(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        module: std::sync::Arc<wasmtime::Module>,
+    ) -> Result<ToolOutput> {
+        self.execute_tool_inner(tool, input, &[], Some(module))
+            .await
+    }
+
+    async fn execute_tool_inner(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+        precompiled: Option<std::sync::Arc<wasmtime::Module>>,
+    ) -> Result<ToolOutput> {
         let start = Instant::now();
 
         if !tool.required_capabilities.is_empty() {
@@ -258,13 +286,17 @@ impl NexusHypervisor {
         // deltas are anchored at the pre-call sample.
         self.health_validator.start_execution();
 
-        // Execute in the WASM sandbox. The sandbox returns a typed
-        // `FailureMode` on failure and the real pre-call memory bytes.
-        let exec_result = self
-            .sandbox
-            .read()
-            .unwrap()
-            .execute(&tool.wasm_bytes, &[input_bytes])?;
+        let exec_result = if let Some(module) = precompiled {
+            self.sandbox
+                .read()
+                .unwrap()
+                .execute_precompiled(module, &[input_bytes])?
+        } else {
+            self.sandbox
+                .read()
+                .unwrap()
+                .execute(&tool.wasm_bytes, &[input_bytes])?
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let fuel_consumed = exec_result.fuel_consumed;

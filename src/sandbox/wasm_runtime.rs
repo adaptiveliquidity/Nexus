@@ -160,6 +160,11 @@ impl WasmSandbox {
         })
     }
 
+    /// Access the wasmtime `Engine` for use with `ModuleCache`.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
     /// Execute WASM code with fuel + timeout metering.
     ///
     /// Returns a typed `FailureMode` via `ExecutionResult.failure_mode` on
@@ -167,12 +172,10 @@ impl WasmSandbox {
     /// `HealthStatus` and recovery actions without substring matching.
     pub fn execute(&self, wasm_bytes: &[u8], args: &[Vec<u8>]) -> Result<ExecutionResult> {
         let start = Instant::now();
-        let max_fuel = self.config.max_fuel;
-        let time_limit = self.config.time_limit;
 
         // Module compilation failures are load-time errors with no execution.
         let module = match Module::from_binary(&self.engine, wasm_bytes) {
-            Ok(m) => m,
+            Ok(m) => Arc::new(m),
             Err(e) => {
                 let mode = FailureMode::InvalidModule(e.to_string());
                 return Ok(ExecutionResult::failure_from_mode(
@@ -183,6 +186,24 @@ impl WasmSandbox {
             }
         };
 
+        self.execute_module(module, args)
+    }
+
+    /// Execute a precompiled `Module`. Skips `Module::from_binary`,
+    /// making repeat invocations of the same WASM significantly faster
+    /// when paired with `ModuleCache`.
+    pub fn execute_precompiled(
+        &self,
+        module: Arc<Module>,
+        args: &[Vec<u8>],
+    ) -> Result<ExecutionResult> {
+        self.execute_module(module, args)
+    }
+
+    fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
+        let start = Instant::now();
+        let max_fuel = self.config.max_fuel;
+        let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
 
