@@ -227,7 +227,7 @@ impl NexusHypervisor {
     pub async fn execute_tool_with_tokens(
         &self,
         tool: ToolDefinition,
-        _input: serde_json::Value,
+        input: serde_json::Value,
         caller_tokens: &[crate::security::CapabilityToken],
     ) -> Result<ToolOutput> {
         let start = Instant::now();
@@ -236,6 +236,11 @@ impl NexusHypervisor {
             let manager = self.capability_manager.read().unwrap();
             manager.authorize(caller_tokens, &tool.required_capabilities)?;
         }
+
+        // Serialize input to JSON bytes for delivery to the guest.
+        let input_bytes = serde_json::to_vec(&input).map_err(|e| {
+            NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
+        })?;
 
         // Start health monitoring before the execute call so resource
         // deltas are anchored at the pre-call sample.
@@ -247,7 +252,7 @@ impl NexusHypervisor {
             .sandbox
             .read()
             .unwrap()
-            .execute(&tool.wasm_bytes, &[])?;
+            .execute(&tool.wasm_bytes, &[input_bytes])?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let fuel_consumed = exec_result.fuel_consumed;

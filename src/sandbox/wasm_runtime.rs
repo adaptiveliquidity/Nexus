@@ -165,7 +165,7 @@ impl WasmSandbox {
     /// Returns a typed `FailureMode` via `ExecutionResult.failure_mode` on
     /// every failure path so the hypervisor can derive the correct
     /// `HealthStatus` and recovery actions without substring matching.
-    pub fn execute(&self, wasm_bytes: &[u8], _args: &[Vec<u8>]) -> Result<ExecutionResult> {
+    pub fn execute(&self, wasm_bytes: &[u8], args: &[Vec<u8>]) -> Result<ExecutionResult> {
         let start = Instant::now();
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
@@ -184,6 +184,7 @@ impl WasmSandbox {
         };
 
         let engine = self.engine.clone();
+        let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
 
         let (tx, rx) = std::sync::mpsc::channel::<ExecReply>();
 
@@ -223,6 +224,21 @@ impl WasmSandbox {
             let pre_call_memory: Option<Vec<u8>> = instance
                 .get_memory(&mut store, "memory")
                 .map(|m| m.data(&store).to_vec());
+
+            // Write input into guest memory: [len: u32 LE][data].
+            // Skipped when input is empty or the module has no memory export.
+            if !input_data.is_empty() {
+                if let Some(mem) = instance.get_memory(&mut store, "memory") {
+                    let header_size = 4;
+                    let needed = header_size + input_data.len();
+                    let data = mem.data_mut(&mut store);
+                    if needed <= data.len() {
+                        let len_bytes = (input_data.len() as u32).to_le_bytes();
+                        data[..4].copy_from_slice(&len_bytes);
+                        data[4..4 + input_data.len()].copy_from_slice(&input_data);
+                    }
+                }
+            }
 
             // Resolve entrypoint: prefer `_start`, fall back to `main`.
             let start_func = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
