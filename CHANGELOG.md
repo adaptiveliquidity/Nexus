@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WASM Sandbox**: High-performance WebAssembly execution using wasmtime 37.0
   - Sub-microsecond cold start (measured: 23 microseconds)
   - Fuel metering for resource control
-  - WASI support for filesystem and network access
+  - WASI support is in development (not yet integrated)
 
 - **Snapshot Engine**: Native snapshot/rollback system
   - Microsecond snapshot creation (measured: 56 microseconds)
@@ -76,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Limitations
 
-- WASI filesystem integration is partial
+- WASI filesystem integration is not yet implemented
 - Real WASM memory state capture is placeholder
 - Distributed snapshot sync not yet implemented
 

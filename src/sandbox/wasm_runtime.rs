@@ -184,7 +184,6 @@ impl WasmSandbox {
         };
 
         let engine = self.engine.clone();
-        let enable_wasi = self.config.enable_wasi;
 
         let (tx, rx) = std::sync::mpsc::channel::<ExecReply>();
 
@@ -203,7 +202,6 @@ impl WasmSandbox {
                 return;
             }
 
-            let _ = enable_wasi; // WASI integration still TODO; see wasm_runtime.rs
             let linker = Linker::new(&engine);
 
             let instance = match linker.instantiate(&mut store, &module) {
@@ -337,11 +335,7 @@ impl WasmSandbox {
             .map_err(|e| NexusError::WasmError(format!("Failed to compile module: {}", e)))?;
 
         let mut store = self.create_store()?;
-        let linker = if self.config.enable_wasi {
-            self.create_wasi_linker()?
-        } else {
-            self.create_minimal_linker()?
-        };
+        let linker = self.create_linker()?;
 
         let instance = linker
             .instantiate(&mut store, &module)
@@ -399,16 +393,8 @@ impl WasmSandbox {
         Ok(store)
     }
 
-    /// Create linker with WASI support
-    fn create_wasi_linker(&self) -> Result<Linker<WasmState>> {
-        // For now, use minimal linker without WASI
-        // WASI integration requires more careful setup
-        let linker = Linker::new(&self.engine);
-        Ok(linker)
-    }
-
-    /// Create minimal linker without WASI
-    fn create_minimal_linker(&self) -> Result<Linker<WasmState>> {
+    fn create_linker(&self) -> Result<Linker<WasmState>> {
+        // WASI integration is in development; for now, bare linker only.
         let linker = Linker::new(&self.engine);
         Ok(linker)
     }

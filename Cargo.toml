@@ -10,7 +10,6 @@ repository = "https://github.com/nexus-ai/nexus"
 [dependencies]
 # WebAssembly runtime
 wasmtime = { version = "45.0", features = ["cranelift", "async"] }
-wasmtime-wasi = { version = "45.0" }
 
 # Async runtime
 tokio = { version = "1.44", features = ["full"] }
