@@ -330,6 +330,231 @@ fn bench_execute_with_real_memory(c: &mut Criterion) {
     group.finish();
 }
 
+/// Integrated benchmark: capability-checked execution.
+///
+/// Taxonomy: **integrated-live** — enforced production path.
+#[cfg(any(not(codspeed), feature = "bench-integrated"))]
+fn bench_capability_checked(c: &mut Criterion) {
+    use nexus::security::Capability;
+    use std::path::PathBuf;
+
+    let mut group = c.benchmark_group("integrated_capability_checked");
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(15));
+        group.sample_size(60);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
+
+    let wasm = wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+        .expect("wat compiles");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    let hv = NexusHypervisor::new(HypervisorConfig::default()).expect("hv");
+    let token = hv.issue_token(
+        Capability::ReadFile(PathBuf::from("/bench")),
+        "bench",
+        Duration::from_secs(3600),
+    );
+
+    group.bench_function("with_valid_token", |b| {
+        b.iter(|| {
+            let tool = ToolDefinition::new("bench_cap".into(), wasm.clone())
+                .with_capabilities(vec![Capability::ReadFile(PathBuf::from("/bench"))]);
+            let out = rt
+                .block_on(hv.execute_tool_with_tokens(
+                    tool,
+                    serde_json::json!({}),
+                    std::slice::from_ref(&token),
+                ))
+                .expect("execute_tool_with_tokens");
+            black_box(out);
+        })
+    });
+
+    group.finish();
+}
+
+/// Integrated benchmark: input-fed execution.
+///
+/// Taxonomy: **integrated-live** — tool input plumbing is the default path.
+#[cfg(any(not(codspeed), feature = "bench-integrated"))]
+fn bench_input_fed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("integrated_input_fed");
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(15));
+        group.sample_size(60);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
+
+    let wasm = wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+        .expect("wat compiles");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let hv = NexusHypervisor::new(HypervisorConfig::default()).expect("hv");
+
+    let input = serde_json::json!({
+        "action": "transform",
+        "payload": {"key": "value", "nested": [1, 2, 3, 4, 5]},
+        "options": {"verbose": true, "retries": 3}
+    });
+
+    group.bench_function("json_input", |b| {
+        b.iter(|| {
+            let tool = ToolDefinition::new("bench_input".into(), wasm.clone());
+            let out = rt
+                .block_on(hv.execute_tool(tool, input.clone()))
+                .expect("execute_tool");
+            black_box(out);
+        })
+    });
+
+    group.finish();
+}
+
+/// Integrated benchmark: precompiled module via ModuleCache.
+///
+/// Taxonomy: **integrated-live** — daemon hot path (Phase C).
+#[cfg(any(not(codspeed), feature = "bench-integrated"))]
+fn bench_precompiled(c: &mut Criterion) {
+    use nexus::daemon::module_cache::ModuleCache;
+
+    let mut group = c.benchmark_group("integrated_precompiled");
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(15));
+        group.sample_size(60);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
+
+    let wasm = wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+        .expect("wat compiles");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let hv = NexusHypervisor::new(HypervisorConfig::default()).expect("hv");
+    let cache = ModuleCache::new();
+    let engine = hv.sandbox_engine();
+    let module = cache.get_or_compile(&engine, &wasm).expect("compile");
+
+    group.bench_function("primitive_recompile", |b| {
+        b.iter(|| {
+            let tool = ToolDefinition::new("bench_recompile".into(), wasm.clone());
+            let out = rt
+                .block_on(hv.execute_tool(tool, serde_json::json!({})))
+                .expect("execute_tool");
+            black_box(out);
+        })
+    });
+
+    group.bench_function("cached_precompiled", |b| {
+        b.iter(|| {
+            let tool = ToolDefinition::new("bench_precompiled".into(), wasm.clone());
+            let out = rt
+                .block_on(hv.execute_tool_precompiled(tool, serde_json::json!({}), module.clone()))
+                .expect("execute_tool_precompiled");
+            black_box(out);
+        })
+    });
+
+    group.finish();
+}
+
+/// Integrated benchmark: full stack — capability + input + precompiled.
+///
+/// Taxonomy: **integrated-live** — combined enforced production path.
+#[cfg(any(not(codspeed), feature = "bench-integrated"))]
+fn bench_full_integrated(c: &mut Criterion) {
+    use nexus::daemon::module_cache::ModuleCache;
+    use nexus::security::Capability;
+    use std::path::PathBuf;
+
+    let mut group = c.benchmark_group("integrated_full_stack");
+    #[cfg(not(codspeed))]
+    {
+        group.warm_up_time(Duration::from_secs(3));
+        group.measurement_time(Duration::from_secs(15));
+        group.sample_size(60);
+    }
+    #[cfg(codspeed)]
+    {
+        group.warm_up_time(Duration::from_millis(1));
+        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(10);
+    }
+
+    let wasm = wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+        .expect("wat compiles");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    let hv = NexusHypervisor::new(HypervisorConfig::default()).expect("hv");
+
+    let token = hv.issue_token(
+        Capability::ReadFile(PathBuf::from("/data")),
+        "bench",
+        Duration::from_secs(3600),
+    );
+
+    let cache = ModuleCache::new();
+    let engine = hv.sandbox_engine();
+    let module = cache.get_or_compile(&engine, &wasm).expect("compile");
+
+    let input = serde_json::json!({
+        "action": "process",
+        "payload": {"items": [1, 2, 3]},
+    });
+
+    group.bench_function("full_path", |b| {
+        b.iter(|| {
+            let tool = ToolDefinition::new("bench_full".into(), wasm.clone())
+                .with_capabilities(vec![Capability::ReadFile(PathBuf::from("/data"))]);
+            let out = rt
+                .block_on(hv.execute_tool_precompiled_with_tokens(
+                    tool,
+                    input.clone(),
+                    std::slice::from_ref(&token),
+                    module.clone(),
+                ))
+                .expect("execute_tool_precompiled_with_tokens");
+            black_box(out);
+        })
+    });
+
+    group.finish();
+}
+
 fn selected_benches(c: &mut Criterion) {
     #[cfg(any(not(codspeed), feature = "bench-cold-start"))]
     bench_cold_start(c);
@@ -341,6 +566,14 @@ fn selected_benches(c: &mut Criterion) {
     bench_execute_end_to_end(c);
     #[cfg(any(not(codspeed), feature = "bench-execute-real-memory"))]
     bench_execute_with_real_memory(c);
+    #[cfg(any(not(codspeed), feature = "bench-integrated"))]
+    bench_capability_checked(c);
+    #[cfg(any(not(codspeed), feature = "bench-integrated"))]
+    bench_input_fed(c);
+    #[cfg(any(not(codspeed), feature = "bench-integrated"))]
+    bench_precompiled(c);
+    #[cfg(any(not(codspeed), feature = "bench-integrated"))]
+    bench_full_integrated(c);
 }
 
 criterion_group!(benches, selected_benches);

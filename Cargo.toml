@@ -71,6 +71,7 @@ bench-snapshot-create = []
 bench-snapshot-rollback = []
 bench-execute-tool = []
 bench-execute-real-memory = []
+bench-integrated = []
 # Optional LLM-backed recovery suggester (Phase B). Off by default so
 # `cargo build` does not pull in HTTP / TLS / token-secret handling for
 # users who only want the static + instinct policies.

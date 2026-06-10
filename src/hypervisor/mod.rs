@@ -212,6 +212,19 @@ impl NexusHypervisor {
         Ok(())
     }
 
+    /// Issue a capability token signed by the hypervisor's own key.
+    /// The returned token can be passed to `execute_tool_with_tokens`
+    /// or `execute_tool_precompiled_with_tokens`.
+    pub fn issue_token(
+        &self,
+        capability: Capability,
+        granted_by: &str,
+        validity: Duration,
+    ) -> crate::security::CapabilityToken {
+        let mut manager = self.capability_manager.write().unwrap();
+        manager.issue(capability, granted_by, validity)
+    }
+
     /// Execute a tool with automatic snapshot/rollback.
     ///
     /// Phase A rewrite. Key semantic changes versus the prior version:
@@ -260,6 +273,19 @@ impl NexusHypervisor {
         module: std::sync::Arc<wasmtime::Module>,
     ) -> Result<ToolOutput> {
         self.execute_tool_inner(tool, input, &[], Some(module))
+            .await
+    }
+
+    /// Execute a precompiled tool with capability-token validation.
+    /// Combines `execute_tool_with_tokens` and `execute_tool_precompiled`.
+    pub async fn execute_tool_precompiled_with_tokens(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+        module: std::sync::Arc<wasmtime::Module>,
+    ) -> Result<ToolOutput> {
+        self.execute_tool_inner(tool, input, caller_tokens, Some(module))
             .await
     }
 

@@ -144,7 +144,7 @@ jobs:
         with:
           run: |
             cargo codspeed build --bench nexus_validation \
-              --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory
+              --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory,bench-integrated
             cargo codspeed run --bench nexus_validation
           token: ${{ secrets.CODSPEED_TOKEN }}
 
