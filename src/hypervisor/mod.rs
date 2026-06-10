@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
-use crate::sandbox::{SandboxConfig, WasmSandbox};
+use crate::sandbox::{FuelBudgetPolicy, FuelProfile, SandboxConfig, WasmSandbox};
 use crate::security::{Capability, CapabilityManager};
 use crate::snapshot::{
     ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
@@ -117,6 +117,9 @@ pub struct NexusHypervisor {
     /// matching instincts after a successful retry and debits them after
     /// a still-failed retry. When unset, outcome feedback is a no-op.
     instinct_store: Option<Arc<crate::instinct::InstinctStore>>,
+    /// Adaptive fuel budgeting policy. Computes per-tool fuel limits
+    /// from historical telemetry instead of using a single global max.
+    fuel_policy: RwLock<FuelBudgetPolicy>,
     /// Decompressed memory from the most recent rollback. Callers can
     /// use `last_rollback_memory()` to retrieve these bytes and
     /// `restore_memory` to write them into a live wasmtime instance.
@@ -144,7 +147,7 @@ impl NexusHypervisor {
         let enable_persistence = config.enable_persistence;
         let health_config = config.health_config.clone();
 
-        let sandbox = WasmSandbox::new(sandbox_config)
+        let sandbox = WasmSandbox::new(sandbox_config.clone())
             .map_err(|e| NexusError::ConfigError(format!("Failed to create sandbox: {}", e)))?;
 
         let snapshot_manager = if enable_persistence {
@@ -162,6 +165,8 @@ impl NexusHypervisor {
 
         let capability_manager = CapabilityManager::new();
 
+        let fuel_policy = FuelBudgetPolicy::new(sandbox_config.max_fuel);
+
         Ok(NexusHypervisor {
             config,
             sandbox: RwLock::new(sandbox),
@@ -172,6 +177,7 @@ impl NexusHypervisor {
             current_snapshot: RwLock::new(None),
             recovery_policy,
             instinct_store: None,
+            fuel_policy: RwLock::new(fuel_policy),
             last_rollback_memory: RwLock::new(None),
             last_rollback_execution_state: RwLock::new(None),
         })
@@ -311,6 +317,24 @@ impl NexusHypervisor {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
         })?;
 
+        // Adaptive fuel budget: override per-invocation max_fuel with
+        // the policy's recommendation for this tool.
+        let tool_budget = self.fuel_policy.read().unwrap().budget_for(&tool.name);
+        {
+            let mut sandbox = self.sandbox.write().unwrap();
+            // Temporarily swap the sandbox to one configured with the
+            // per-tool budget. We rebuild only when the budget differs
+            // from the current config to avoid unnecessary engine churn.
+            let current_fuel = self.config.sandbox_config.max_fuel;
+            if tool_budget != current_fuel {
+                let mut per_call_config = self.config.sandbox_config.clone();
+                per_call_config.max_fuel = tool_budget;
+                if let Ok(new_sandbox) = WasmSandbox::new(per_call_config) {
+                    *sandbox = new_sandbox;
+                }
+            }
+        }
+
         // Start health monitoring before the execute call so resource
         // deltas are anchored at the pre-call sample.
         self.health_validator.start_execution();
@@ -329,6 +353,14 @@ impl NexusHypervisor {
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let fuel_consumed = exec_result.fuel_consumed;
+
+        // Record this execution's fuel consumption in the adaptive policy
+        // so future invocations of the same tool benefit from the updated
+        // profile.
+        self.fuel_policy
+            .write()
+            .unwrap()
+            .record(&tool.name, fuel_consumed);
 
         // Build the snapshot from the *real* pre-call memory whenever we
         // have it. For load-time failures the worker did not capture any
@@ -571,6 +603,16 @@ impl NexusHypervisor {
     /// Peek at the rollback execution state without consuming it.
     pub fn last_rollback_execution_state(&self) -> Option<ExecutionState> {
         self.last_rollback_execution_state.read().unwrap().clone()
+    }
+
+    /// Inspect the adaptive fuel profile for a specific tool.
+    /// Returns `None` if the tool has never been executed.
+    pub fn fuel_profile(&self, tool_name: &str) -> Option<FuelProfile> {
+        self.fuel_policy
+            .read()
+            .unwrap()
+            .profile_for(tool_name)
+            .cloned()
     }
 }
 

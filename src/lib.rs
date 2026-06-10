@@ -17,12 +17,14 @@ pub use error::{NexusError, Result};
 pub use hypervisor::{FailureMode, HypervisorConfig, NexusHypervisor, ToolDefinition, ToolOutput};
 pub use instinct::{Instinct, InstinctPolicy, InstinctStats, InstinctStore};
 pub use sandbox::{
-    ExecutionResult, FuelMeter, FuelStats, MemoryStats, SandboxConfig, WasmExecutionSnapshot,
-    WasmMemoryState, WasmSandbox,
+    ExecutionResult, FuelBudgetPolicy, FuelMeter, FuelProfile, FuelStats, MemoryStats,
+    SandboxConfig, WasmExecutionSnapshot, WasmMemoryState, WasmSandbox,
 };
 pub use security::{Capability, CapabilityManager, CapabilityToken};
 pub use snapshot::{
+    apply_diff, apply_diff_chain, compute_dirty_pages, DiffSnapshot, DiffSnapshotResult,
     ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata, SnapshotStats,
+    PAGE_SIZE,
 };
 pub use telemetry::{ExecutionRecord, LearnedPattern, TelemetrySink, TelemetryStats};
 

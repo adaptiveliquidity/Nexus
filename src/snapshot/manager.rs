@@ -3,6 +3,7 @@
 //! Provides microsecond snapshots and instant rollback for WASM state.
 
 use crate::error::{NexusError, Result};
+use crate::snapshot::differential::DiffSnapshot;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -343,10 +344,17 @@ impl SnapshotRingBuffer {
     }
 }
 
+/// Default maximum diff chain depth before auto-promoting to a full snapshot.
+const DEFAULT_MAX_DIFF_DEPTH: u32 = 8;
+
 /// Snapshot manager with compression and persistence
 pub struct SnapshotManager {
     /// Ring buffer for in-memory snapshots
     buffer: RwLock<SnapshotRingBuffer>,
+    /// Buffer for differential snapshots
+    diff_buffer: RwLock<VecDeque<DiffSnapshot>>,
+    /// Maximum diff chain depth before auto-promotion to a full snapshot
+    max_diff_depth: u32,
     /// Enable persistent storage
     persist_enabled: bool,
     /// Persistence directory
@@ -364,11 +372,24 @@ pub struct SnapshotStats {
     pub last_snapshot_time_us: u64,
 }
 
+/// The result of `create_diff_snapshot`: either a diff or a full snapshot
+/// (when auto-promotion kicks in because the chain depth exceeded
+/// `max_diff_depth`).
+#[derive(Debug, Clone)]
+pub enum DiffSnapshotResult {
+    /// A normal differential snapshot was created.
+    Diff(DiffSnapshot),
+    /// The diff chain was too deep; a full snapshot was created instead.
+    Promoted(Snapshot),
+}
+
 impl SnapshotManager {
     /// Create a new snapshot manager
     pub fn new(capacity: usize) -> Self {
         SnapshotManager {
             buffer: RwLock::new(SnapshotRingBuffer::new(capacity)),
+            diff_buffer: RwLock::new(VecDeque::new()),
+            max_diff_depth: DEFAULT_MAX_DIFF_DEPTH,
             persist_enabled: false,
             persist_dir: None,
             stats: RwLock::new(SnapshotStats::default()),
@@ -382,8 +403,22 @@ impl SnapshotManager {
 
         SnapshotManager {
             buffer: RwLock::new(SnapshotRingBuffer::new(capacity)),
+            diff_buffer: RwLock::new(VecDeque::new()),
+            max_diff_depth: DEFAULT_MAX_DIFF_DEPTH,
             persist_enabled: true,
             persist_dir: Some(persist_dir),
+            stats: RwLock::new(SnapshotStats::default()),
+        }
+    }
+
+    /// Create with a custom max diff depth.
+    pub fn with_max_diff_depth(capacity: usize, max_diff_depth: u32) -> Self {
+        SnapshotManager {
+            buffer: RwLock::new(SnapshotRingBuffer::new(capacity)),
+            diff_buffer: RwLock::new(VecDeque::new()),
+            max_diff_depth,
+            persist_enabled: false,
+            persist_dir: None,
             stats: RwLock::new(SnapshotStats::default()),
         }
     }
@@ -466,6 +501,198 @@ impl SnapshotManager {
     /// Get statistics
     pub fn stats(&self) -> SnapshotStats {
         self.stats.read().unwrap().clone()
+    }
+
+    /// Create a differential snapshot against a base full snapshot.
+    ///
+    /// If the resulting diff's generation would exceed `max_diff_depth`, the
+    /// method auto-promotes by creating a full snapshot instead and returns
+    /// `None` for the diff (the full snapshot is returned via the `Ok` variant
+    /// of the inner enum).
+    pub fn create_diff_snapshot(
+        &self,
+        current_memory: Vec<u8>,
+        base_id: &Uuid,
+        execution_state: ExecutionState,
+        metadata: SnapshotMetadata,
+    ) -> Result<DiffSnapshotResult> {
+        // Figure out the generation: look at diff_buffer for a diff with this
+        // base_id to determine current chain depth.
+        let generation = {
+            let diff_buf = self.diff_buffer.read().unwrap();
+            // If the base_id refers to a diff, its generation + 1; otherwise 1.
+            diff_buf
+                .iter()
+                .find(|d| d.id == *base_id)
+                .map(|d| d.generation + 1)
+                .unwrap_or(1)
+        };
+
+        // Auto-promote: if the generation would exceed max_diff_depth,
+        // create a full snapshot instead.
+        if generation > self.max_diff_depth {
+            let full = self.create_snapshot(
+                current_memory,
+                FilesystemDiff::new(),
+                execution_state,
+                metadata,
+            )?;
+            return Ok(DiffSnapshotResult::Promoted(full));
+        }
+
+        // Decompress the base memory. The base might be a full snapshot or
+        // we might need to reconstruct through a diff chain.
+        let base_memory = self.reconstruct_memory_for(base_id)?;
+
+        let diff = DiffSnapshot::new(
+            *base_id,
+            &base_memory,
+            &current_memory,
+            execution_state,
+            metadata,
+            generation,
+        )?;
+
+        self.diff_buffer.write().unwrap().push_back(diff.clone());
+
+        Ok(DiffSnapshotResult::Diff(diff))
+    }
+
+    /// Rollback to a differential snapshot by ID.
+    ///
+    /// Walks the chain back to the base full snapshot, decompresses it,
+    /// then applies diffs in order to reconstruct the target state.
+    pub fn rollback_to_diff(&self, diff_id: &Uuid) -> Result<RollbackResult> {
+        // Collect the chain of diffs from diff_id back to the base full snapshot.
+        let diff_buf = self.diff_buffer.read().unwrap();
+
+        let target_diff = diff_buf
+            .iter()
+            .find(|d| d.id == *diff_id)
+            .ok_or_else(|| {
+                NexusError::RollbackFailed(format!("Diff snapshot {} not found", diff_id))
+            })?
+            .clone();
+
+        // Build chain from target back to the full snapshot.
+        let mut chain: Vec<DiffSnapshot> = vec![target_diff.clone()];
+        let mut current_base = target_diff.base_id;
+
+        loop {
+            // Check if current_base is a full snapshot
+            let buffer = self.buffer.read().unwrap();
+            if buffer.get(&current_base).is_some() {
+                break; // Found the full snapshot base
+            }
+            drop(buffer);
+
+            // Otherwise it must be another diff
+            let parent = diff_buf
+                .iter()
+                .find(|d| d.id == current_base)
+                .ok_or_else(|| {
+                    NexusError::RollbackFailed(format!(
+                        "Diff chain broken: cannot find snapshot {}",
+                        current_base
+                    ))
+                })?
+                .clone();
+
+            current_base = parent.base_id;
+            chain.push(parent);
+        }
+
+        // `chain` is in reverse order (target first, oldest last). Reverse it.
+        chain.reverse();
+
+        // Decompress base full snapshot memory
+        let base_memory = {
+            let buffer = self.buffer.read().unwrap();
+            let base_snap = buffer.get(&current_base).ok_or_else(|| {
+                NexusError::RollbackFailed(format!("Base snapshot {} not found", current_base))
+            })?;
+            base_snap.decompress_memory()?
+        };
+
+        drop(diff_buf);
+
+        // Apply the chain
+        let chain_refs: Vec<&DiffSnapshot> = chain.iter().collect();
+        let memory = crate::snapshot::differential::apply_diff_chain(&base_memory, &chain_refs)?;
+
+        let execution_state = target_diff.execution_state.clone();
+
+        // Update stats
+        {
+            let mut stats = self.stats.write().unwrap();
+            stats.total_rollbacks += 1;
+        }
+
+        Ok(RollbackResult {
+            snapshot_id: *diff_id,
+            memory,
+            execution_state,
+            fs_operations: Vec::new(),
+            timestamp: Utc::now(),
+        })
+    }
+
+    /// Get the current max diff depth.
+    pub fn max_diff_depth(&self) -> u32 {
+        self.max_diff_depth
+    }
+
+    /// Reconstruct the full memory for a given snapshot id (full or diff).
+    fn reconstruct_memory_for(&self, id: &Uuid) -> Result<Vec<u8>> {
+        // Check full snapshots first
+        {
+            let buffer = self.buffer.read().unwrap();
+            if let Some(snap) = buffer.get(id) {
+                return snap.decompress_memory();
+            }
+        }
+
+        // Must be a diff — walk the chain
+        let diff_buf = self.diff_buffer.read().unwrap();
+        let target = diff_buf
+            .iter()
+            .find(|d| d.id == *id)
+            .ok_or_else(|| {
+                NexusError::RollbackFailed(format!("Snapshot {} not found in any buffer", id))
+            })?
+            .clone();
+
+        let mut chain = vec![target.clone()];
+        let mut current_base = target.base_id;
+
+        loop {
+            let buffer = self.buffer.read().unwrap();
+            if buffer.get(&current_base).is_some() {
+                break;
+            }
+            drop(buffer);
+
+            let parent = diff_buf
+                .iter()
+                .find(|d| d.id == current_base)
+                .ok_or_else(|| {
+                    NexusError::RollbackFailed(format!("Diff chain broken at {}", current_base))
+                })?
+                .clone();
+            current_base = parent.base_id;
+            chain.push(parent);
+        }
+
+        chain.reverse();
+        drop(diff_buf);
+
+        let base_memory = {
+            let buffer = self.buffer.read().unwrap();
+            buffer.get(&current_base).unwrap().decompress_memory()?
+        };
+
+        let chain_refs: Vec<&DiffSnapshot> = chain.iter().collect();
+        crate::snapshot::differential::apply_diff_chain(&base_memory, &chain_refs)
     }
 
     /// Persist snapshot to disk
