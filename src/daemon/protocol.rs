@@ -15,9 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// than this prevents allocating multi-GB buffers from a malicious peer.
 const DEFAULT_MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 
-pub async fn read_frame<R: AsyncReadExt + Unpin, T: DeserializeOwned>(
-    r: &mut R,
-) -> io::Result<T> {
+pub async fn read_frame<R: AsyncReadExt + Unpin, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
     read_frame_with_limit(r, DEFAULT_MAX_PAYLOAD).await
 }
 
@@ -36,21 +34,18 @@ pub async fn read_frame_with_limit<R: AsyncReadExt + Unpin, T: DeserializeOwned>
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
-    serde_json::from_slice(&buf).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("JSON: {e}"))
-    })
+    serde_json::from_slice(&buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON: {e}")))
 }
 
 pub async fn write_frame<W: AsyncWriteExt + Unpin, T: Serialize>(
     w: &mut W,
     msg: &T,
 ) -> io::Result<()> {
-    let body = serde_json::to_vec(msg).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}"))
-    })?;
-    let len = u32::try_from(body.len()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "payload exceeds u32 max")
-    })?;
+    let body = serde_json::to_vec(msg)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}")))?;
+    let len = u32::try_from(body.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "payload exceeds u32 max"))?;
     w.write_all(&len.to_be_bytes()).await?;
     w.write_all(&body).await?;
     w.flush().await?;
@@ -64,12 +59,18 @@ mod tests {
     use tokio::io::duplex;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct Sample { x: u32, name: String }
+    struct Sample {
+        x: u32,
+        name: String,
+    }
 
     #[tokio::test]
     async fn round_trip() {
         let (mut a, mut b) = duplex(4096);
-        let msg = Sample { x: 42, name: "hi".into() };
+        let msg = Sample {
+            x: 42,
+            name: "hi".into(),
+        };
         let writer = async {
             write_frame(&mut a, &msg).await.unwrap();
         };
@@ -85,7 +86,9 @@ mod tests {
         let (mut a, mut b) = duplex(4096);
         // Manually send a fraudulent length prefix announcing 100 MB.
         let writer = async {
-            a.write_all(&(100u32 * 1024 * 1024).to_be_bytes()).await.unwrap();
+            a.write_all(&(100u32 * 1024 * 1024).to_be_bytes())
+                .await
+                .unwrap();
             a.flush().await.unwrap();
         };
         let reader = async {

@@ -18,21 +18,52 @@ use nexus::instinct::{InstinctPolicy, InstinctStore};
 use nexus::{FailureMode, HypervisorConfig, NexusHypervisor, ToolDefinition};
 
 const SCENARIOS: &[(&str, &str, FailureMode)] = &[
-    ("infinite_loop", r#"(module (memory (export "memory") 1) (func (export "_start") (loop $l (br $l))))"#, FailureMode::TrapStackOverflow), // placeholder; we'll use the real mode at runtime
-    ("trap_unreachable", r#"(module (memory (export "memory") 1) (func (export "_start") unreachable))"#, FailureMode::TrapUnreachable),
-    ("div_by_zero", r#"(module (memory (export "memory") 1) (func (export "_start") i32.const 1 i32.const 0 i32.div_s drop))"#, FailureMode::TrapDivByZero),
-    ("stack_overflow", r#"(module (memory (export "memory") 1) (func $rec (call $rec)) (func (export "_start") (call $rec)))"#, FailureMode::TrapStackOverflow),
-    ("memory_out_of_bounds", r#"(module (memory (export "memory") 1) (func (export "_start") i32.const 1000000 i32.load drop))"#, FailureMode::TrapMemoryOutOfBounds),
+    (
+        "infinite_loop",
+        r#"(module (memory (export "memory") 1) (func (export "_start") (loop $l (br $l))))"#,
+        FailureMode::TrapStackOverflow,
+    ), // placeholder; we'll use the real mode at runtime
+    (
+        "trap_unreachable",
+        r#"(module (memory (export "memory") 1) (func (export "_start") unreachable))"#,
+        FailureMode::TrapUnreachable,
+    ),
+    (
+        "div_by_zero",
+        r#"(module (memory (export "memory") 1) (func (export "_start") i32.const 1 i32.const 0 i32.div_s drop))"#,
+        FailureMode::TrapDivByZero,
+    ),
+    (
+        "stack_overflow",
+        r#"(module (memory (export "memory") 1) (func $rec (call $rec)) (func (export "_start") (call $rec)))"#,
+        FailureMode::TrapStackOverflow,
+    ),
+    (
+        "memory_out_of_bounds",
+        r#"(module (memory (export "memory") 1) (func (export "_start") i32.const 1000000 i32.load drop))"#,
+        FailureMode::TrapMemoryOutOfBounds,
+    ),
 ];
 
-fn run_scenario(policy: Arc<dyn RecoveryPolicy>, name: &str, wat: &str) -> Vec<nexus::hypervisor::RecoveryAction> {
+fn run_scenario(
+    policy: Arc<dyn RecoveryPolicy>,
+    name: &str,
+    wat: &str,
+) -> Vec<nexus::hypervisor::RecoveryAction> {
     let wasm = wat::parse_str(wat).unwrap();
     let cfg = HypervisorConfig::default();
     let hv = NexusHypervisor::new_with_policy(cfg, policy).unwrap();
     let tool = ToolDefinition::new(name.into(), wasm);
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let out = rt.block_on(hv.execute_tool(tool, serde_json::json!({}))).unwrap();
-    out.error_log.map(|l| l.recovery_actions).unwrap_or_default()
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = rt
+        .block_on(hv.execute_tool(tool, serde_json::json!({})))
+        .unwrap();
+    out.error_log
+        .map(|l| l.recovery_actions)
+        .unwrap_or_default()
 }
 
 fn seed_store(store: &InstinctStore, sims_per_mode: usize) {
@@ -42,10 +73,18 @@ fn seed_store(store: &InstinctStore, sims_per_mode: usize) {
     // failures through the outcome-feedback loop.
     for (_, _, mode) in SCENARIOS {
         let desc = match mode {
-            FailureMode::TrapDivByZero => "[instinct] team-X playbook: always check denom from API boundary",
-            FailureMode::TrapUnreachable => "[instinct] team-X playbook: assertion failures correlate with empty input list",
-            FailureMode::TrapStackOverflow => "[instinct] team-X playbook: convert this recursion via accumulator + tail call",
-            FailureMode::TrapMemoryOutOfBounds => "[instinct] team-X playbook: this module needs 4 pages min, set memory_pages=4",
+            FailureMode::TrapDivByZero => {
+                "[instinct] team-X playbook: always check denom from API boundary"
+            }
+            FailureMode::TrapUnreachable => {
+                "[instinct] team-X playbook: assertion failures correlate with empty input list"
+            }
+            FailureMode::TrapStackOverflow => {
+                "[instinct] team-X playbook: convert this recursion via accumulator + tail call"
+            }
+            FailureMode::TrapMemoryOutOfBounds => {
+                "[instinct] team-X playbook: this module needs 4 pages min, set memory_pages=4"
+            }
             _ => continue,
         };
         let id = store.register(mode, "*", desc).unwrap();
@@ -56,7 +95,9 @@ fn seed_store(store: &InstinctStore, sims_per_mode: usize) {
 }
 
 fn fmt_actions(acts: &[nexus::hypervisor::RecoveryAction]) -> String {
-    if acts.is_empty() { return "  (none)\n".into(); }
+    if acts.is_empty() {
+        return "  (none)\n".into();
+    }
     acts.iter()
         .enumerate()
         .map(|(i, a)| {
@@ -65,12 +106,17 @@ fn fmt_actions(acts: &[nexus::hypervisor::RecoveryAction]) -> String {
                 i + 1,
                 a.source,
                 a.confidence,
-                if a.non_retryable { ", non-retryable" } else { "" },
+                if a.non_retryable {
+                    ", non-retryable"
+                } else {
+                    ""
+                },
                 a.description
             )
         })
         .collect::<Vec<_>>()
-        .join("\n") + "\n"
+        .join("\n")
+        + "\n"
 }
 
 fn main() -> anyhow::Result<()> {
@@ -111,7 +157,9 @@ fn main() -> anyhow::Result<()> {
         report.push_str(&fmt_actions(&with));
         report.push_str(&format!(
             "\n_Static actions: {} -> {} (added by instinct: {})_\n\n",
-            without.len(), with.len(), added
+            without.len(),
+            with.len(),
+            added
         ));
     }
 

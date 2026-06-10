@@ -2,7 +2,6 @@
 //!
 //! High-performance compression for WASM memory snapshots.
 
-
 /// Compression algorithm selection
 #[derive(Debug, Clone, Copy, Default)]
 pub enum CompressionAlgo {

@@ -1,28 +1,30 @@
 //! Nexus Hypervisor Core
-//! 
+//!
 //! Main orchestrator that ties together sandbox, snapshots, and validation.
 
-pub mod validator;
 pub mod failure_mode;
-pub mod recovery;
 pub mod llm_policy;
+pub mod recovery;
+pub mod validator;
 
 pub use failure_mode::FailureMode;
-pub use recovery::{LayeredPolicy, RecoveryAction, RecoveryPolicy, RecoverySource, StaticPolicy};
 pub use llm_policy::{LLMPolicy, LlmBudget, LlmProvider};
+pub use recovery::{LayeredPolicy, RecoveryAction, RecoveryPolicy, RecoverySource, StaticPolicy};
 
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::error::{NexusError, Result};
-use crate::sandbox::{WasmSandbox, SandboxConfig};
-use crate::snapshot::{SnapshotManager, Snapshot, SnapshotMetadata, FilesystemDiff, ExecutionState};
-use crate::security::{Capability, CapabilityManager};
-use crate::telemetry::{TelemetrySink, ExecutionRecord};
-use crate::hypervisor::validator::health::{HealthValidator, HealthConfig};
 use crate::hypervisor::validator::error_log::ErrorLog;
+use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
+use crate::sandbox::{SandboxConfig, WasmSandbox};
+use crate::security::{Capability, CapabilityManager};
+use crate::snapshot::{
+    ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
+};
+use crate::telemetry::{ExecutionRecord, TelemetrySink};
 // Re-exports at the top of this module bring `FailureMode`, `RecoveryAction`,
 // `RecoveryPolicy`, and `StaticPolicy` into scope; no `use crate::...` here
 // to avoid duplicate-import errors with the `pub use` declarations.
@@ -47,12 +49,12 @@ impl ToolDefinition {
             required_capabilities: Vec::new(),
         }
     }
-    
+
     pub fn with_entry(mut self, entry: &str) -> Self {
         self.entry_point = entry.to_string();
         self
     }
-    
+
     pub fn with_capabilities(mut self, caps: Vec<Capability>) -> Self {
         self.required_capabilities = caps;
         self
@@ -180,18 +182,14 @@ impl NexusHypervisor {
         self.instinct_store = Some(store);
         self
     }
-    
+
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();
-        manager.issue(
-            capability,
-            "system",
-            validity,
-        );
+        manager.issue(capability, "system", validity);
         Ok(())
     }
-    
+
     /// Execute a tool with automatic snapshot/rollback.
     ///
     /// Phase A rewrite. Key semantic changes versus the prior version:
@@ -214,19 +212,24 @@ impl NexusHypervisor {
         tool: ToolDefinition,
         _input: serde_json::Value,
     ) -> Result<ToolOutput> {
+        self.execute_tool_with_tokens(tool, _input, &[]).await
+    }
+
+    /// Execute a tool, validating that `caller_tokens` satisfy the tool's
+    /// `required_capabilities`. When `required_capabilities` is empty, any
+    /// caller is allowed (back-compat). When it is non-empty, every
+    /// required capability must be covered by at least one valid token.
+    pub async fn execute_tool_with_tokens(
+        &self,
+        tool: ToolDefinition,
+        _input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+    ) -> Result<ToolOutput> {
         let start = Instant::now();
 
-        // Validate capabilities (kept identical to the prior version; the
-        // real capability check lives in `CapabilityManager` itself).
-        {
-            let mut manager = self.capability_manager.write().unwrap();
-            for cap in &tool.required_capabilities {
-                let _temp_token = manager.issue(
-                    cap.clone(),
-                    "validation",
-                    Duration::from_secs(60),
-                );
-            }
+        if !tool.required_capabilities.is_empty() {
+            let manager = self.capability_manager.read().unwrap();
+            manager.authorize(caller_tokens, &tool.required_capabilities)?;
         }
 
         // Start health monitoring before the execute call so resource
@@ -235,7 +238,11 @@ impl NexusHypervisor {
 
         // Execute in the WASM sandbox. The sandbox returns a typed
         // `FailureMode` on failure and the real pre-call memory bytes.
-        let exec_result = self.sandbox.read().unwrap().execute(&tool.wasm_bytes, &[])?;
+        let exec_result = self
+            .sandbox
+            .read()
+            .unwrap()
+            .execute(&tool.wasm_bytes, &[])?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let fuel_consumed = exec_result.fuel_consumed;
@@ -274,11 +281,16 @@ impl NexusHypervisor {
         let host_corruption = self.health_validator.check_corruption();
 
         // Reconcile the sandbox's classification with host-side signals.
-        let failure_mode: Option<FailureMode> = match (&exec_result.failure_mode, host_corruption, host_health.clone()) {
+        let failure_mode: Option<FailureMode> = match (
+            &exec_result.failure_mode,
+            host_corruption,
+            host_health.clone(),
+        ) {
             (Some(mode), _, _) => Some(mode.clone()),
             (None, Some(detail), _) => Some(FailureMode::HostError(detail)),
             (None, None, h) if !h.is_healthy() => Some(FailureMode::HostError(format!(
-                "host health degraded: {}", h.category()
+                "host health degraded: {}",
+                h.category()
             ))),
             _ => None,
         };
@@ -288,11 +300,7 @@ impl NexusHypervisor {
                 self.recovery_policy.recover(&mode, &tool.name);
             let successful_patterns = self.telemetry.get_patterns(&tool.name);
 
-            let error_log = ErrorLog::new(
-                tool.name.clone(),
-                mode.clone(),
-                resources.clone(),
-            )
+            let error_log = ErrorLog::new(tool.name.clone(), mode.clone(), resources.clone())
                 .with_recovery(recovery_actions)
                 .with_patterns(successful_patterns);
 
@@ -327,12 +335,8 @@ impl NexusHypervisor {
             })
         } else {
             // Success path.
-            let record = ExecutionRecord::success(
-                tool.name.clone(),
-                duration_ms,
-                fuel_consumed,
-                resources,
-            );
+            let record =
+                ExecutionRecord::success(tool.name.clone(), duration_ms, fuel_consumed, resources);
             self.telemetry.record_success(record);
 
             Ok(ToolOutput {
@@ -346,7 +350,7 @@ impl NexusHypervisor {
             })
         }
     }
-    
+
     /// Execute with automatic retry and outcome feedback.
     ///
     /// Phase B: when an attempt produces an `ErrorLog` containing
@@ -434,23 +438,22 @@ impl NexusHypervisor {
     pub fn instinct_store(&self) -> Option<&Arc<crate::instinct::InstinctStore>> {
         self.instinct_store.as_ref()
     }
-    
-    
+
     /// Get execution history
     pub fn get_history(&self, limit: Option<usize>) -> Vec<ExecutionRecord> {
         self.telemetry.get_history(limit)
     }
-    
+
     /// Get telemetry statistics
     pub fn get_stats(&self) -> crate::telemetry::TelemetryStats {
         self.telemetry.stats()
     }
-    
+
     /// Get snapshot statistics
     pub fn get_snapshot_stats(&self) -> crate::snapshot::SnapshotStats {
         self.snapshot_manager.stats()
     }
-    
+
     /// Rollback to a specific snapshot manually
     pub async fn manual_rollback(&self, snapshot_id: uuid::Uuid) -> Result<()> {
         let result = self.snapshot_manager.rollback_to(&snapshot_id)?;
@@ -463,26 +466,29 @@ impl NexusHypervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_successful_execution() {
         let config = HypervisorConfig::default();
         let hypervisor = NexusHypervisor::new(config).unwrap();
-        
+
         // Simple WASM that does nothing
-        let wasm_bytes = wat::parse_str(r#"
+        let wasm_bytes = wat::parse_str(
+            r#"
             (module
                 (func (export "_start"))
             )
-        "#).unwrap();
-        
+        "#,
+        )
+        .unwrap();
+
         let tool = ToolDefinition::new("test_tool".to_string(), wasm_bytes);
-        
+
         let result = hypervisor.execute_tool(tool, serde_json::json!({})).await;
         assert!(result.is_ok());
         // Note: execution may fail due to missing _start, but that's fine for this test
     }
-    
+
     #[test]
     fn test_recovery_suggestions() {
         // Test suggestion generation
@@ -490,7 +496,7 @@ mod tests {
             "Break the operation into smaller steps".to_string(),
             "Add validation before execution".to_string(),
         ];
-        
+
         assert!(!suggestions.is_empty());
     }
 }

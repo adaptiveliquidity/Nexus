@@ -177,6 +177,9 @@ fn main() -> ExitCode {
         eprintln!("write {out_path} failed: {e}");
         return ExitCode::from(1);
     }
-    println!("wrote {out_path} (success={}, rollback={})", output.success, output.rollback_performed);
+    println!(
+        "wrote {out_path} (success={}, rollback={})",
+        output.success, output.rollback_performed
+    );
     ExitCode::SUCCESS
 }

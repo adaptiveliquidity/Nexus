@@ -135,11 +135,7 @@ fn classification_matches_phase3_expectations() {
             &["TrapUnreachable"],
             &[HealthStatus::Trapped],
         ),
-        (
-            "div_by_zero",
-            &["TrapDivByZero"],
-            &[HealthStatus::Trapped],
-        ),
+        ("div_by_zero", &["TrapDivByZero"], &[HealthStatus::Trapped]),
         (
             "stack_overflow",
             &["TrapStackOverflow"],
@@ -185,7 +181,12 @@ fn runtime_failures_do_trigger_rollback() {
     // rollback path. This is the inverse assertion of
     // `load_time_failures_dont_trigger_rollback` and pins the Phase A
     // semantics: rollback iff `requires_rollback() && pre_call_memory.is_some()`.
-    for name in ["infinite_loop", "trap_unreachable", "div_by_zero", "stack_overflow"] {
+    for name in [
+        "infinite_loop",
+        "trap_unreachable",
+        "div_by_zero",
+        "stack_overflow",
+    ] {
         let out = run_scenario(name);
         assert!(
             out.rollback_performed,
@@ -196,7 +197,12 @@ fn runtime_failures_do_trigger_rollback() {
 
 #[test]
 fn deterministic_traps_are_marked_non_retryable() {
-    for name in ["trap_unreachable", "div_by_zero", "stack_overflow", "missing_start"] {
+    for name in [
+        "trap_unreachable",
+        "div_by_zero",
+        "stack_overflow",
+        "missing_start",
+    ] {
         let out = run_scenario(name);
         let log = out.error_log.expect("error_log");
         assert!(

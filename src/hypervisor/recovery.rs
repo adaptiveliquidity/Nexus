@@ -271,7 +271,10 @@ mod tests {
 
     fn modes() -> Vec<FailureMode> {
         vec![
-            FailureMode::Timeout { limit_ms: 500, observed_ms: 502 },
+            FailureMode::Timeout {
+                limit_ms: 500,
+                observed_ms: 502,
+            },
             FailureMode::FuelExhausted { limit: 10_000_000 },
             FailureMode::TrapUnreachable,
             FailureMode::TrapDivByZero,
@@ -286,9 +289,14 @@ mod tests {
             FailureMode::TrapNullReference,
             FailureMode::TrapCastFailure,
             FailureMode::TrapOther("Interrupt".into()),
-            FailureMode::MemoryLimitExceeded { pages: 100, limit_pages: 1 },
+            FailureMode::MemoryLimitExceeded {
+                pages: 100,
+                limit_pages: 1,
+            },
             FailureMode::InvalidModule("bad header".into()),
-            FailureMode::MissingEntrypoint { expected: "_start".into() },
+            FailureMode::MissingEntrypoint {
+                expected: "_start".into(),
+            },
             FailureMode::HostError("snapshot create failed".into()),
         ]
     }
@@ -298,11 +306,7 @@ mod tests {
         let policy = StaticPolicy::new();
         for mode in modes() {
             let actions = policy.recover(&mode, "op");
-            assert!(
-                !actions.is_empty(),
-                "no actions emitted for {:?}",
-                mode
-            );
+            assert!(!actions.is_empty(), "no actions emitted for {:?}", mode);
         }
     }
 
@@ -311,8 +315,7 @@ mod tests {
         // The validation defect was that every variant produced the SAME
         // two strings. Assert every variant's first action is distinct.
         let policy = StaticPolicy::new();
-        let mut first_actions: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut first_actions: std::collections::HashSet<String> = std::collections::HashSet::new();
         for mode in modes() {
             let actions = policy.recover(&mode, "op");
             let first = actions[0].description.clone();
@@ -331,7 +334,9 @@ mod tests {
         let deterministic = [
             FailureMode::TrapDivByZero,
             FailureMode::TrapUnreachable,
-            FailureMode::MissingEntrypoint { expected: "_start".into() },
+            FailureMode::MissingEntrypoint {
+                expected: "_start".into(),
+            },
             FailureMode::InvalidModule("x".into()),
         ];
         for mode in deterministic {

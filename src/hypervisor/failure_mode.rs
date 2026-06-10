@@ -20,11 +20,16 @@ use super::validator::health::HealthStatus;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureMode {
     /// The wall-clock watchdog fired before execution returned.
-    Timeout { limit_ms: u64, observed_ms: u64 },
+    Timeout {
+        limit_ms: u64,
+        observed_ms: u64,
+    },
 
     /// `wasmtime` fuel was consumed before execution returned. Only emitted
     /// when fuel metering is enabled in `wasmtime::Config`.
-    FuelExhausted { limit: u64 },
+    FuelExhausted {
+        limit: u64,
+    },
 
     // --- Deterministic WASM traps (host state unaffected; isolation held) ---
     TrapUnreachable,
@@ -45,7 +50,10 @@ pub enum FailureMode {
     TrapOther(String),
 
     /// The configured WASM memory page cap was exceeded.
-    MemoryLimitExceeded { pages: u32, limit_pages: u32 },
+    MemoryLimitExceeded {
+        pages: u32,
+        limit_pages: u32,
+    },
 
     /// Module bytes did not compile or link cleanly (validation error,
     /// instantiation error, etc.). No execution occurred.
@@ -53,7 +61,9 @@ pub enum FailureMode {
 
     /// The configured entrypoint export was absent (e.g. no `_start`).
     /// No execution occurred.
-    MissingEntrypoint { expected: String },
+    MissingEntrypoint {
+        expected: String,
+    },
 
     /// Host-side error during snapshot, health check, or other plumbing.
     /// This is the only variant that maps to `HealthStatus::Corrupted`.
@@ -89,7 +99,10 @@ impl FailureMode {
     /// Single-line human-readable description suitable for an error log.
     pub fn describe(&self) -> String {
         match self {
-            FailureMode::Timeout { limit_ms, observed_ms } => {
+            FailureMode::Timeout {
+                limit_ms,
+                observed_ms,
+            } => {
                 format!("Execution exceeded {limit_ms}ms (observed {observed_ms}ms)")
             }
             FailureMode::FuelExhausted { limit } => {
@@ -98,12 +111,18 @@ impl FailureMode {
             FailureMode::TrapUnreachable => "WASM `unreachable` instruction reached".to_string(),
             FailureMode::TrapDivByZero => "Integer division by zero".to_string(),
             FailureMode::TrapIntegerOverflow => "Integer overflow".to_string(),
-            FailureMode::TrapBadConversionToInteger => "Invalid float-to-integer conversion".to_string(),
-            FailureMode::TrapStackOverflow => "Call stack exhausted (recursion / stack budget)".to_string(),
+            FailureMode::TrapBadConversionToInteger => {
+                "Invalid float-to-integer conversion".to_string()
+            }
+            FailureMode::TrapStackOverflow => {
+                "Call stack exhausted (recursion / stack budget)".to_string()
+            }
             FailureMode::TrapMemoryOutOfBounds => "Out-of-bounds linear memory access".to_string(),
             FailureMode::TrapHeapMisaligned => "Unaligned atomic access".to_string(),
             FailureMode::TrapTableOutOfBounds => "Out-of-bounds table access".to_string(),
-            FailureMode::TrapIndirectCallToNull => "Indirect call to a null table entry".to_string(),
+            FailureMode::TrapIndirectCallToNull => {
+                "Indirect call to a null table entry".to_string()
+            }
             FailureMode::TrapBadSignature => "Indirect call signature mismatch".to_string(),
             FailureMode::TrapNullReference => "Null reference dereferenced".to_string(),
             FailureMode::TrapCastFailure => "Type cast failure on a reference".to_string(),
@@ -229,7 +248,10 @@ mod tests {
         // Sanity check that no two variants share a `category()` string,
         // which would defeat the analyzer's failure-mode-keyed routing.
         let modes = vec![
-            FailureMode::Timeout { limit_ms: 500, observed_ms: 502 },
+            FailureMode::Timeout {
+                limit_ms: 500,
+                observed_ms: 502,
+            },
             FailureMode::FuelExhausted { limit: 10_000 },
             FailureMode::TrapUnreachable,
             FailureMode::TrapDivByZero,
@@ -244,9 +266,14 @@ mod tests {
             FailureMode::TrapNullReference,
             FailureMode::TrapCastFailure,
             FailureMode::TrapOther("anything".into()),
-            FailureMode::MemoryLimitExceeded { pages: 10, limit_pages: 1 },
+            FailureMode::MemoryLimitExceeded {
+                pages: 10,
+                limit_pages: 1,
+            },
             FailureMode::InvalidModule("bad".into()),
-            FailureMode::MissingEntrypoint { expected: "_start".into() },
+            FailureMode::MissingEntrypoint {
+                expected: "_start".into(),
+            },
             FailureMode::HostError("snapshot failed".into()),
         ];
         let mut seen = std::collections::HashSet::new();
@@ -262,39 +289,73 @@ mod tests {
 
     #[test]
     fn load_time_failures_dont_require_rollback() {
-        assert!(!FailureMode::MissingEntrypoint { expected: "_start".into() }.requires_rollback());
+        assert!(!FailureMode::MissingEntrypoint {
+            expected: "_start".into()
+        }
+        .requires_rollback());
         assert!(!FailureMode::InvalidModule("x".into()).requires_rollback());
         // Genuine runtime failures still do.
         assert!(FailureMode::TrapUnreachable.requires_rollback());
-        assert!(FailureMode::Timeout { limit_ms: 500, observed_ms: 600 }.requires_rollback());
+        assert!(FailureMode::Timeout {
+            limit_ms: 500,
+            observed_ms: 600
+        }
+        .requires_rollback());
     }
 
     #[test]
     fn deterministic_traps_are_non_retryable() {
         assert!(FailureMode::TrapDivByZero.is_deterministic());
         assert!(FailureMode::TrapUnreachable.is_deterministic());
-        assert!(FailureMode::MissingEntrypoint { expected: "_start".into() }.is_deterministic());
+        assert!(FailureMode::MissingEntrypoint {
+            expected: "_start".into()
+        }
+        .is_deterministic());
         // Resource-limit failures may succeed with a larger budget.
-        assert!(!FailureMode::Timeout { limit_ms: 500, observed_ms: 600 }.is_deterministic());
+        assert!(!FailureMode::Timeout {
+            limit_ms: 500,
+            observed_ms: 600
+        }
+        .is_deterministic());
         assert!(!FailureMode::FuelExhausted { limit: 1 }.is_deterministic());
     }
 
     #[test]
     fn health_status_mapping_is_correct() {
         let cases = [
-            (FailureMode::Timeout { limit_ms: 500, observed_ms: 600 }, HealthStatus::Timeout),
-            (FailureMode::FuelExhausted { limit: 1 }, HealthStatus::FuelExhausted),
-            (FailureMode::TrapStackOverflow, HealthStatus::ResourceExhausted),
+            (
+                FailureMode::Timeout {
+                    limit_ms: 500,
+                    observed_ms: 600,
+                },
+                HealthStatus::Timeout,
+            ),
+            (
+                FailureMode::FuelExhausted { limit: 1 },
+                HealthStatus::FuelExhausted,
+            ),
+            (
+                FailureMode::TrapStackOverflow,
+                HealthStatus::ResourceExhausted,
+            ),
             (FailureMode::TrapDivByZero, HealthStatus::Trapped),
             (FailureMode::TrapUnreachable, HealthStatus::Trapped),
             (
-                FailureMode::MissingEntrypoint { expected: "_start".into() },
+                FailureMode::MissingEntrypoint {
+                    expected: "_start".into(),
+                },
                 HealthStatus::InvalidModule,
             ),
-            (FailureMode::InvalidModule("x".into()), HealthStatus::InvalidModule),
+            (
+                FailureMode::InvalidModule("x".into()),
+                HealthStatus::InvalidModule,
+            ),
             (FailureMode::HostError("x".into()), HealthStatus::Corrupted),
             (
-                FailureMode::MemoryLimitExceeded { pages: 2, limit_pages: 1 },
+                FailureMode::MemoryLimitExceeded {
+                    pages: 2,
+                    limit_pages: 1,
+                },
                 HealthStatus::ResourceExhausted,
             ),
         ];

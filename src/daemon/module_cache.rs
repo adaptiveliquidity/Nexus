@@ -78,10 +78,9 @@ mod tests {
     fn second_call_reuses_compiled_module() {
         let cache = ModuleCache::new();
         let eng = engine();
-        let wasm = wat::parse_str(
-            r#"(module (memory (export "memory") 1) (func (export "_start")))"#,
-        )
-        .unwrap();
+        let wasm =
+            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+                .unwrap();
         let a = cache.get_or_compile(&eng, &wasm).unwrap();
         let b = cache.get_or_compile(&eng, &wasm).unwrap();
         assert!(Arc::ptr_eq(&a, &b), "cache should return the same Arc");
@@ -93,7 +92,9 @@ mod tests {
         let cache = ModuleCache::new();
         let eng = engine();
         let w1 = wat::parse_str(r#"(module (func (export "_start")))"#).unwrap();
-        let w2 = wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#).unwrap();
+        let w2 =
+            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+                .unwrap();
         cache.get_or_compile(&eng, &w1).unwrap();
         cache.get_or_compile(&eng, &w2).unwrap();
         assert_eq!(cache.len(), 2);

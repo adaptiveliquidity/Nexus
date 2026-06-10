@@ -1,13 +1,13 @@
 //! Capability Token System
-//! 
+//!
 //! Cryptographic capability-based access control for Nexus sandboxes.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::error::{NexusError, Result};
@@ -41,39 +41,37 @@ impl Capability {
         match (self, requested) {
             // Wildcard grants all
             (Capability::All, _) => true,
-            
+
             // None denies all
             (Capability::None, _) => false,
-            
+
             // Exact match for ReadFile
-            (Capability::ReadFile(p1), Capability::ReadFile(p2)) => {
-                p1 == p2 || p2.starts_with(p1)
-            }
-            
+            (Capability::ReadFile(p1), Capability::ReadFile(p2)) => p1 == p2 || p2.starts_with(p1),
+
             // Write implies read
             (Capability::WriteFile(p1), Capability::ReadFile(p2)) => p2.starts_with(p1),
-            
+
             // Exact match for WriteFile
             (Capability::WriteFile(p1), Capability::WriteFile(p2)) => p1 == p2,
-            
+
             // Exact match for ListDirectory with subdir support
             (Capability::ListDirectory(p1), Capability::ListDirectory(p2)) => {
                 p1 == p2 || p2.starts_with(p1)
             }
-            
+
             // Exact match for HTTP capabilities
             (Capability::HttpGet(p1), Capability::HttpGet(p2)) => p1 == p2,
             (Capability::HttpPost(p1), Capability::HttpPost(p2)) => p1 == p2,
-            
+
             // Execute and MountTmpfs - exact match only
             (Capability::ExecuteBinary(p1), Capability::ExecuteBinary(p2)) => p1 == p2,
             (Capability::MountTmpfs(p1), Capability::MountTmpfs(p2)) => p1 == p2,
-            
+
             // Default deny
             _ => false,
         }
     }
-    
+
     /// Get a human-readable description
     pub fn description(&self) -> String {
         match self {
@@ -124,33 +122,45 @@ impl CapabilityToken {
             expires_at: now + validity_duration,
             signature: Vec::new(),
         };
-        
+
         // Sign the token
-        let data_to_sign = bincode::serialize(&(&token.id, &token.capability, &token.granted_by, &token.issued_at, &token.expires_at))
-            .expect("serialization should not fail");
+        let data_to_sign = bincode::serialize(&(
+            &token.id,
+            &token.capability,
+            &token.granted_by,
+            &token.issued_at,
+            &token.expires_at,
+        ))
+        .expect("serialization should not fail");
         let sig = signing_key.sign(&data_to_sign);
-        
+
         let mut result = token;
         result.signature = sig.to_bytes().to_vec();
         result
     }
-    
+
     /// Verify the token signature
     pub fn verify_signature(&self, verifying_key: &VerifyingKey) -> bool {
-        let data_to_verify = bincode::serialize(&(&self.id, &self.capability, &self.granted_by, &self.issued_at, &self.expires_at))
-            .expect("serialization should not fail");
-        
+        let data_to_verify = bincode::serialize(&(
+            &self.id,
+            &self.capability,
+            &self.granted_by,
+            &self.issued_at,
+            &self.expires_at,
+        ))
+        .expect("serialization should not fail");
+
         let signature_array: [u8; 64] = self.signature.clone().try_into().unwrap_or([0u8; 64]);
         let sig = Signature::from_bytes(&signature_array);
-        
+
         verifying_key.verify(&data_to_verify, &sig).is_ok()
     }
-    
+
     /// Check if token is valid (not expired)
     pub fn is_valid(&self) -> bool {
         Utc::now() < self.expires_at
     }
-    
+
     /// Check if token allows a specific capability
     pub fn allows(&self, requested: &Capability) -> bool {
         self.is_valid() && self.capability.allows(requested)
@@ -180,7 +190,7 @@ impl CapabilityManager {
     pub fn new() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key = VerifyingKey::from(&signing_key);
-        
+
         CapabilityManager {
             signing_key,
             verifying_key,
@@ -188,7 +198,7 @@ impl CapabilityManager {
             revoked_tokens: HashMap::new(),
         }
     }
-    
+
     /// Create from existing keys
     pub fn from_keys(signing_key: SigningKey, verifying_key: VerifyingKey) -> Self {
         CapabilityManager {
@@ -198,7 +208,7 @@ impl CapabilityManager {
             revoked_tokens: HashMap::new(),
         }
     }
-    
+
     /// Issue a new capability token
     pub fn issue(
         &mut self,
@@ -206,56 +216,72 @@ impl CapabilityManager {
         granted_by: &str,
         validity_duration: std::time::Duration,
     ) -> CapabilityToken {
-        let token = CapabilityToken::new(
-            capability,
-            granted_by,
-            validity_duration,
-            &self.signing_key,
-        );
-        
+        let token =
+            CapabilityToken::new(capability, granted_by, validity_duration, &self.signing_key);
+
         self.active_tokens.insert(token.id, token.clone());
         token
     }
-    
+
     /// Validate a token and check capability
     pub fn validate(&self, token: &CapabilityToken, requested: &Capability) -> Result<()> {
         // Check if revoked
         if let Some(revoked_at) = self.revoked_tokens.get(&token.id) {
-            return Err(NexusError::InvalidCapability(
-                format!("Token {} was revoked at {}", token.id, revoked_at)
-            ));
+            return Err(NexusError::InvalidCapability(format!(
+                "Token {} was revoked at {}",
+                token.id, revoked_at
+            )));
         }
-        
+
         // Check expiration
         if !token.is_valid() {
-            return Err(NexusError::InvalidCapability(
-                format!("Token {} expired at {}", token.id, token.expires_at)
-            ));
+            return Err(NexusError::InvalidCapability(format!(
+                "Token {} expired at {}",
+                token.id, token.expires_at
+            )));
         }
-        
+
         // Verify signature
         if !token.verify_signature(&self.verifying_key) {
-            return Err(NexusError::InvalidCapability(
-                format!("Token {} has invalid signature", token.id)
-            ));
+            return Err(NexusError::InvalidCapability(format!(
+                "Token {} has invalid signature",
+                token.id
+            )));
         }
-        
+
         // Check capability
         if !token.allows(requested) {
-            return Err(NexusError::InvalidCapability(
-                format!("Token {} does not grant {:?}", token.id, requested)
-            ));
+            return Err(NexusError::InvalidCapability(format!(
+                "Token {} does not grant {:?}",
+                token.id, requested
+            )));
         }
-        
+
         Ok(())
     }
-    
+
+    /// Check that every required capability is covered by at least one
+    /// valid, non-revoked token with a correct signature. Returns
+    /// `CapabilityDenied` on the first unsatisfied requirement.
+    pub fn authorize(&self, tokens: &[CapabilityToken], required: &[Capability]) -> Result<()> {
+        for cap in required {
+            let satisfied = tokens.iter().any(|t| self.validate(t, cap).is_ok());
+            if !satisfied {
+                return Err(NexusError::CapabilityDenied(format!(
+                    "no valid token grants {:?}",
+                    cap
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Revoke a token
     pub fn revoke(&mut self, token_id: Uuid) {
         self.revoked_tokens.insert(token_id, Utc::now());
         self.active_tokens.remove(&token_id);
     }
-    
+
     /// Get the public key for external verification
     pub fn public_key(&self) -> Vec<u8> {
         self.verifying_key.as_bytes().to_vec()
@@ -265,7 +291,7 @@ impl CapabilityManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_capability_allow() {
         let read_home = Capability::ReadFile(PathBuf::from("/home"));
@@ -273,22 +299,28 @@ mod tests {
         assert!(read_home.allows(&Capability::ReadFile(PathBuf::from("/home/user"))));
         assert!(!read_home.allows(&Capability::ReadFile(PathBuf::from("/etc"))));
     }
-    
+
     #[test]
     fn test_token_lifecycle() {
         let mut manager = CapabilityManager::new();
-        
+
         let token = manager.issue(
             Capability::ReadFile(PathBuf::from("/project")),
             "test-agent",
             std::time::Duration::from_secs(3600),
         );
-        
+
         assert!(token.is_valid());
-        assert!(manager.validate(&token, &Capability::ReadFile(PathBuf::from("/project"))).is_ok());
-        assert!(manager.validate(&token, &Capability::WriteFile(PathBuf::from("/project"))).is_err());
-        
+        assert!(manager
+            .validate(&token, &Capability::ReadFile(PathBuf::from("/project")))
+            .is_ok());
+        assert!(manager
+            .validate(&token, &Capability::WriteFile(PathBuf::from("/project")))
+            .is_err());
+
         manager.revoke(token.id);
-        assert!(manager.validate(&token, &Capability::ReadFile(PathBuf::from("/project"))).is_err());
+        assert!(manager
+            .validate(&token, &Capability::ReadFile(PathBuf::from("/project")))
+            .is_err());
     }
 }

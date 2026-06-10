@@ -1,5 +1,5 @@
 //! Error Log for AI Feedback
-//! 
+//!
 //! Structured error information for AI model self-correction.
 
 use chrono::{DateTime, Utc};
@@ -32,11 +32,7 @@ pub struct ErrorLog {
 }
 
 impl ErrorLog {
-    pub fn new(
-        operation: String,
-        failure_mode: FailureMode,
-        resources: ResourceSnapshot,
-    ) -> Self {
+    pub fn new(operation: String, failure_mode: FailureMode, resources: ResourceSnapshot) -> Self {
         let trigger_status: HealthStatus = (&failure_mode).into();
         let error_type = failure_mode.category().to_string();
         let description = failure_mode.describe();
@@ -88,7 +84,11 @@ impl ErrorLog {
         if !self.recovery_actions.is_empty() {
             ctx.push_str("## Suggested Recovery Actions\n");
             for (i, action) in self.recovery_actions.iter().enumerate() {
-                let nr = if action.non_retryable { " [non-retryable]" } else { "" };
+                let nr = if action.non_retryable {
+                    " [non-retryable]"
+                } else {
+                    ""
+                };
                 ctx.push_str(&format!(
                     "{}. ({:?}, conf={:.2}){nr} {}\n",
                     i + 1,
