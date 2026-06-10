@@ -5,11 +5,16 @@
 pub mod failure_mode;
 pub mod llm_policy;
 pub mod recovery;
+pub mod speculative;
 pub mod validator;
 
 pub use failure_mode::FailureMode;
 pub use llm_policy::{LLMPolicy, LlmBudget, LlmProvider};
 pub use recovery::{LayeredPolicy, RecoveryAction, RecoveryPolicy, RecoverySource, StaticPolicy};
+pub use speculative::{
+    fork_and_race, BranchOutcome, SelectionStrategy, SpeculativeBranch, SpeculativeConfig,
+    SpeculativeResult,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -553,6 +558,32 @@ impl NexusHypervisor {
             fuel_consumed: 0,
             error_log: None,
         })
+    }
+
+    /// Opt-in speculative recovery: race `branches` (each forked from a base
+    /// snapshot) and return the first one to succeed.
+    ///
+    /// Every branch executes its tool through the normal sandbox path with the
+    /// same `input`. Branches race concurrently via [`fork_and_race`]; the
+    /// first success cancels the rest and their results are discarded.
+    ///
+    /// Anti-overclaim note: branches currently share this hypervisor's single
+    /// sandbox, so wall-clock parallelism is bounded — this is an **opt-in**
+    /// primitive, not the default recovery path. Multi-sandbox pooling for
+    /// truly parallel branches is roadmap (Phase C). The typical use is to
+    /// take the multiple `RecoveryAction`s a policy proposes for a failure and
+    /// race them instead of trying them sequentially.
+    pub async fn speculative_execute(
+        &self,
+        input: serde_json::Value,
+        branches: Vec<SpeculativeBranch>,
+        config: &SpeculativeConfig,
+    ) -> Result<SpeculativeResult> {
+        fork_and_race(branches, config, |branch| {
+            let input = input.clone();
+            async move { self.execute_tool(branch.tool, input).await }
+        })
+        .await
     }
 
     /// Read-only access to the attached instinct store (Phase B).

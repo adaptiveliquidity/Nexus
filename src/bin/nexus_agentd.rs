@@ -11,6 +11,11 @@
 //!   nexus-agentd --pool 8                # custom pool size
 //!   nexus-agentd --socket /tmp/foo.sock  # custom socket path
 
+// The framed-socket serving path (POSIX) is not yet wired up on Windows
+// (named-pipe support is a TODO above), so its helpers read as dead code on
+// this target. Silence rather than delete the in-progress Phase C scaffolding.
+#![allow(dead_code, unused_imports)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

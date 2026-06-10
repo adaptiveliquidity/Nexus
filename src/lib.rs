@@ -14,7 +14,11 @@ pub mod telemetry;
 
 // Re-export commonly used types
 pub use error::{NexusError, Result};
-pub use hypervisor::{FailureMode, HypervisorConfig, NexusHypervisor, ToolDefinition, ToolOutput};
+pub use hypervisor::{
+    fork_and_race, BranchOutcome, FailureMode, HypervisorConfig, NexusHypervisor,
+    SelectionStrategy, SpeculativeBranch, SpeculativeConfig, SpeculativeResult, ToolDefinition,
+    ToolOutput,
+};
 pub use instinct::{Instinct, InstinctPolicy, InstinctStats, InstinctStore};
 pub use sandbox::{
     ExecutionResult, FuelBudgetPolicy, FuelMeter, FuelProfile, FuelStats, MemoryStats,
