@@ -48,9 +48,6 @@ sysinfo = "0.32"
 # SHA for content hashing
 sha2 = "0.10"
 
-# Optional: metrics
-prometheus = { version = "0.14", optional = true }
-
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 

@@ -1,4 +1,4 @@
-name: Benchmarks (Nexus vs. competitors)
+name: Benchmarks
 
 on:
   push:
