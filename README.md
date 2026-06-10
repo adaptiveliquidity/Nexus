@@ -2,7 +2,7 @@
 
 **Game save-states for AI agents.**
 
-Nexus provides microsecond-class cold starts, native snapshot/rollback capabilities, and built-in AI telemetry for self-correcting agents. The only sandboxing solution with these features combined.
+Nexus provides microsecond-class cold starts, native snapshot/rollback capabilities, and opt-in AI telemetry for self-correcting agents.
 
 [![Benchmarks](https://img.shields.io/badge/benchmarks-live-brightgreen)](https://adaptive-liquidity.github.io/Nexus/)
 
@@ -15,15 +15,15 @@ Nexus provides microsecond-class cold starts, native snapshot/rollback capabilit
 > **Live benchmarks:** [adaptive-liquidity.github.io/Nexus](https://adaptive-liquidity.github.io/Nexus/)
 > All numbers below are measured on GitHub-hosted runners (ubuntu-24.04) and published to [Bencher.dev](https://bencher.dev/perf/nexus-ai) + [CodSpeed.io](https://codspeed.io/Adaptive-Liquidity/Nexus). Artifacts are signed with Sigstore.
 
-| Metric | Nexus (measured) | Notes |
-|--------|-----------------|-------|
-| Cold Start (sandbox init) | ~23 µs | `WasmSandbox::new` only; end-to-end first-call latency is higher |
-| Snapshot Creation (1 MiB) | ~2.92 ms | Pseudo-random (incompressible) memory; empty memory is ~56 µs |
-| Snapshot Creation (100 MiB) | ~290 ms | Scales with memory size and compressibility |
-| Rollback (1 MiB) | <1 ms | Decompress + integrity restore |
-| Rollback (10 MiB) | ~1.62 ms | |
-| Rollback (100 MiB) | ~53.6 ms | |
-| AI Telemetry | Native | Only solution with built-in error learning |
+| Metric | Nexus (measured) | Category | Notes |
+|--------|-----------------|----------|-------|
+| Cold Start (sandbox init) | ~23 µs | benchmarked-primitive | `WasmSandbox::new` only; end-to-end first-call latency is higher |
+| Snapshot Creation (1 MiB) | ~2.92 ms | integrated-live | Pseudo-random (incompressible) memory; empty memory is ~56 µs |
+| Snapshot Creation (100 MiB) | ~290 ms | integrated-live | Scales with memory size and compressibility |
+| Rollback (1 MiB) | <1 ms | benchmarked-primitive | Decompress + integrity restore |
+| Rollback (10 MiB) | ~1.62 ms | benchmarked-primitive | |
+| Rollback (100 MiB) | ~53.6 ms | benchmarked-primitive | |
+| AI Telemetry | Default-on | integrated-live | Self-correction is opt-in via `with_self_correction` |
 
 <details>
 <summary>Retired claims (click to expand)</summary>
@@ -58,7 +58,7 @@ Nexus is built on three foundational principles:
 
 1. **WebAssembly Runtime** - Pre-compiled WASM modules execute in microseconds, not seconds
 2. **Native State Management** - Snapshots and rollback are built into the core, not layered on top
-3. **AI-Native Telemetry** - Every execution is instrumented for learning and self-correction
+3. **AI-Native Telemetry** - Every execution is instrumented; self-correction is opt-in via `with_self_correction`
 
 ```
 +------------------+------------------+------------------+
@@ -69,14 +69,14 @@ Nexus is built on three foundational principles:
 +------------------+------------------+------------------+
 |  HealthValidator | SnapshotManager  | TelemetrySink   |
 |  - CPU monitoring |  - Zstd compression| - Error learning|
-|  - Memory monitoring| - Checksum verification| - Pattern detection|
-|  - Timeout detection| - Ring buffer    | - Feedback generation|
+|  - Memory monitor |  - Checksum verify | - Pattern detect|
+|  - Timeout detect |  - Ring buffer     | - Feedback gen  |
 +------------------+------------------+------------------+
      |                  |                  |
      v                  v                  v
 +------------------+------------------+------------------+
 |  WasmSandbox     |  Snapshot Engine |  CapabilityMgr  |
-|  (wasmtime 37)    |  (sub-ms @ 1MiB) |  (Token-based)  |
+|  (wasmtime 45)   |  (sub-ms @ 1MiB)|  (ed25519 tokens)|
 +------------------+------------------+------------------+
 ```
 
@@ -87,24 +87,8 @@ Nexus is built on three foundational principles:
 ```bash
 # From source
 git clone https://github.com/Adaptive-Liquidity/Nexus.git
-cd Nexus/nexus
+cd Nexus
 cargo build --release
-
-# Or install via cargo
-cargo install nexus-ai
-```
-
-### Run the Demo
-
-```bash
-# Infinite loop prevention demo
-cargo run --demo -d infinite-loop
-
-# Benchmark suite
-cargo run --benchmark --iterations 100
-
-# Execute WASM file
-cargo run --execute --wasm your_file.wasm
 ```
 
 ### Rust API
@@ -116,14 +100,14 @@ use nexus::{NexusHypervisor, HypervisorConfig, ToolDefinition};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = HypervisorConfig::default();
     let hypervisor = NexusHypervisor::new(config)?;
-    
+
     let tool = ToolDefinition::new(
         "code_runner".to_string(),
         wasm_bytes,
     );
-    
+
     let result = hypervisor.execute_tool(tool, serde_json::json!({})).await?;
-    
+
     match result.success {
         true => println!("Execution succeeded"),
         false => {
@@ -133,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     Ok(())
 }
 ```
@@ -149,8 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Cold Start < 1ms | Yes (sandbox init) | No | No | No |
 | Native Snapshots | Yes | No | No | External tooling |
 | Sub-ms Rollback (small state) | Yes | No | No | ~4 ms |
-| AI Telemetry | Yes | No | No | No |
-| Self-Correction | Yes | No | No | No |
+| AI Telemetry | Default-on | No | No | No |
+| Self-Correction | Opt-in | No | No | No |
+| Capability Enforcement | Integrated-live | No | No | No |
 
 ### Detailed Benchmark Data
 
@@ -160,32 +145,34 @@ See [BENCHMARKS.md](BENCHMARKS.md) for methodology and the [live dashboard](http
 
 ### Snapshot and Rollback
 
-Nexus implements a microsecond snapshot and rollback system:
+Nexus implements a snapshot and rollback system:
 
-1. **Pre-Execution Snapshot** - Before every tool execution, the complete state is captured
+1. **Pre-Execution Snapshot** - Before every tool execution, the WASM linear memory is captured
 2. **Health Monitoring** - CPU, memory, and execution time are monitored in real-time
-3. **Error Detection** - Failures are classified and logged with full context
-4. **Instant Rollback** - On error, state is restored to the pre-execution snapshot
+3. **Error Detection** - Failures are classified by `FailureMode` with full context
+4. **Rollback** - On error, `rollback_to` decompresses the snapshot; `restore_memory` writes bytes back into a live Store
+
+Note: snapshot captures linear memory only. Globals, tables, and call stack are not yet captured.
 
 ```rust
 // Simplified rollback flow
 async fn execute_with_safety(&self, tool: ToolDefinition) -> ToolOutput {
     // 1. Capture snapshot (~2.92 ms @ 1 MiB)
     let snapshot = self.snapshot_manager.capture().await;
-    
+
     // 2. Execute with health monitoring
     let result = self.execute_with_health_check(tool).await;
-    
+
     // 3. Check for failure
     if !result.success {
         // 4. Rollback (<1 ms @ 1 MiB)
         self.snapshot_manager.restore(&snapshot).await;
-        
+
         // 5. Generate AI feedback
         let feedback = self.telemetry.learn_from_error(&result);
         return ToolOutput { error_log: Some(feedback), ..result };
     }
-    
+
     result
 }
 ```
@@ -206,22 +193,34 @@ Every execution generates structured telemetry that enables:
 2. **Recovery Action Suggestions** - Generates actionable feedback for AI agents
 3. **Successful Pattern Recognition** - Identifies patterns that lead to success
 
+Self-correction (instinct-based outcome feedback) is **opt-in** via `with_self_correction(instinct_store)`. Without this call, telemetry is recorded but instinct confidence is not adjusted.
+
 ## Security Model
 
-Nexus implements capability-based security:
+Nexus implements capability-based security with enforcement:
 
-1. **Cryptographic Tokens** - Every system call requires a valid capability token
-2. **No Host Kernel Access** - WASM sandbox cannot access host resources without explicit grants
-3. **Memory Isolation** - Each sandbox operates in complete isolation
+1. **Ed25519-Signed Tokens** - Every capability token is cryptographically signed
+2. **Validation Before Execution** - `execute_tool_with_tokens` validates all required capabilities before the guest runs
+3. **Memory Isolation** - Each sandbox operates in complete isolation via WASM
+4. **Denial on Failure** - Missing, expired, revoked, or incorrectly-signed tokens produce `CapabilityDenied`
 
 ```rust
-// Capability-based access control
-let capability = CapabilityManager::create_token(
-    "filesystem:read:/tmp/nexus".into(),
+use std::time::Duration;
+use nexus::security::Capability;
+
+// Issue a token from the hypervisor's own signing key
+let token = hypervisor.issue_token(
+    Capability::ReadFile("/tmp/nexus".into()),
+    "agent-session",
     Duration::from_secs(300),
-)?;
-    
-sandbox.grant_capability(capability)?;
+);
+
+// Execute with capability enforcement
+let tool = ToolDefinition::new("reader".into(), wasm_bytes)
+    .with_capabilities(vec![Capability::ReadFile("/tmp/nexus".into())]);
+let result = hypervisor.execute_tool_with_tokens(
+    tool, input, &[token]
+).await?;
 ```
 
 ## Performance Characteristics
@@ -230,20 +229,19 @@ sandbox.grant_capability(capability)?;
 
 For a typical AI agent tool execution:
 
-| Phase | Time (1 MiB state) | Notes |
-|-------|-------------------|-------|
-| Snapshot Creation | ~2.92 ms | Scales with memory size |
-| WASM Execution | Variable | Dominates total latency |
-| Rollback (on error) | <1 ms | At 1 MiB; ~53.6 ms at 100 MiB |
-| Telemetry Recording | <100 µs | |
+| Phase | Time (1 MiB state) | Category | Notes |
+|-------|-------------------|----------|-------|
+| Snapshot Creation | ~2.92 ms | integrated-live | Scales with memory size |
+| WASM Execution | Variable | integrated-live | Dominates total latency |
+| Rollback (on error) | <1 ms | benchmarked-primitive | At 1 MiB; ~53.6 ms at 100 MiB |
+| Telemetry Recording | <100 µs | integrated-live | |
 
 ### Scalability
-
-Nexus is designed for high-density agent deployments:
 
 - **Concurrent Sandboxes**: Not yet benchmarked (density testing planned)
 - **Memory per Sandbox**: <1MB overhead
 - **Snapshot Storage**: Zstd compressed (typically 60-80% reduction)
+- **Module Cache**: SHA-256-keyed `Arc<Module>` reuse avoids recompilation
 
 ## Project Structure
 
@@ -252,28 +250,43 @@ nexus/
 ├── src/
 │   ├── main.rs           # CLI entry point
 │   ├── lib.rs            # Public API
+│   ├── bin/
+│   │   └── nexus_agentd.rs # Long-lived daemon (Phase C)
 │   ├── hypervisor/       # Core orchestration
-│   │   ├── mod.rs
-│   │   ├── executor.rs
-│   │   ├── validator.rs
-│   │   └── health.rs
+│   │   ├── mod.rs        # NexusHypervisor, execute_tool, capability enforcement
+│   │   ├── failure_mode.rs
+│   │   ├── recovery.rs   # StaticPolicy, LayeredPolicy, InstinctPolicy
+│   │   ├── llm_policy.rs # Optional LLM-backed recovery (ai-recovery feature)
+│   │   └── validator/    # HealthValidator, ErrorLog
 │   ├── sandbox/          # WASM execution
 │   │   ├── mod.rs
-│   │   ├── wasm_runtime.rs
+│   │   ├── wasm_runtime.rs  # WasmSandbox, execute, execute_precompiled
 │   │   ├── fuel_meter.rs
 │   │   └── wasm_memory.rs
 │   ├── snapshot/         # State management
 │   │   ├── mod.rs
-│   │   ├── manager.rs
+│   │   ├── manager.rs    # SnapshotManager, restore_memory
 │   │   └── compression.rs
-│   ├── telemetry/         # AI learning
+│   ├── daemon/           # Phase C daemon support
+│   │   ├── mod.rs
+│   │   ├── pool.rs       # HypervisorPool
+│   │   ├── protocol.rs   # Length-prefixed JSON framing
+│   │   └── module_cache.rs # SHA-256-keyed precompiled Module cache
+│   ├── instinct/         # Self-correction (opt-in)
+│   ├── telemetry/        # AI learning (default-on)
 │   │   ├── mod.rs
 │   │   └── learning.rs
-│   ├── security/          # Access control
-│   │   └── capability.rs
-│   └── error.rs           # Error types
+│   ├── security/         # Access control
+│   │   └── capability.rs # Ed25519-signed CapabilityToken, authorize()
+│   └── error.rs          # Error types incl. CapabilityDenied
 ├── tests/
-│   └── integration_tests.rs
+│   ├── capability_enforcement.rs
+│   ├── rollback_restore.rs
+│   ├── tool_input_plumbing.rs
+│   ├── self_correction_optin.rs
+│   └── integrated_path.rs
+├── benches/
+│   └── nexus_validation.rs  # Primitive + integrated benchmarks
 ├── Cargo.toml
 ├── README.md
 ├── BENCHMARKS.md
@@ -283,12 +296,13 @@ nexus/
 
 ## Dependencies
 
-- **wasmtime 37.0** - High-performance WASM runtime
+- **wasmtime 45.0** - High-performance WASM runtime (Cranelift JIT, fuel metering, async)
 - **tokio** - Async runtime for concurrent execution
 - **zstd** - Fast compression for snapshots
+- **ed25519-dalek** - Capability token signing and verification
 - **serde** - Serialization for state management
 - **uuid** - Unique identifiers for snapshots and logs
-- **sha2** - Checksum verification for state integrity
+- **sha2** - Checksum verification for state integrity and module cache keys
 
 ## Contributing
 
@@ -297,13 +311,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing guidelines
 ## Roadmap
 
 ### In Development
-- Full WASI filesystem integration
-- Real WASM memory state capture
+- WASI filesystem and network access
 - Distributed snapshot synchronization
+- Concurrent sandbox density benchmarking
 
 ### Planned
+- Full WASM state capture (globals, tables, call stack)
 - Predictive ML-based rollback triggers
-- Graph-based memory navigation
 - Cross-sandbox state sharing
 
 ### Research

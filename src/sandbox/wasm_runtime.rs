@@ -160,19 +160,22 @@ impl WasmSandbox {
         })
     }
 
+    /// Access the wasmtime `Engine` for use with `ModuleCache`.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
     /// Execute WASM code with fuel + timeout metering.
     ///
     /// Returns a typed `FailureMode` via `ExecutionResult.failure_mode` on
     /// every failure path so the hypervisor can derive the correct
     /// `HealthStatus` and recovery actions without substring matching.
-    pub fn execute(&self, wasm_bytes: &[u8], _args: &[Vec<u8>]) -> Result<ExecutionResult> {
+    pub fn execute(&self, wasm_bytes: &[u8], args: &[Vec<u8>]) -> Result<ExecutionResult> {
         let start = Instant::now();
-        let max_fuel = self.config.max_fuel;
-        let time_limit = self.config.time_limit;
 
         // Module compilation failures are load-time errors with no execution.
         let module = match Module::from_binary(&self.engine, wasm_bytes) {
-            Ok(m) => m,
+            Ok(m) => Arc::new(m),
             Err(e) => {
                 let mode = FailureMode::InvalidModule(e.to_string());
                 return Ok(ExecutionResult::failure_from_mode(
@@ -183,8 +186,26 @@ impl WasmSandbox {
             }
         };
 
+        self.execute_module(module, args)
+    }
+
+    /// Execute a precompiled `Module`. Skips `Module::from_binary`,
+    /// making repeat invocations of the same WASM significantly faster
+    /// when paired with `ModuleCache`.
+    pub fn execute_precompiled(
+        &self,
+        module: Arc<Module>,
+        args: &[Vec<u8>],
+    ) -> Result<ExecutionResult> {
+        self.execute_module(module, args)
+    }
+
+    fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
+        let start = Instant::now();
+        let max_fuel = self.config.max_fuel;
+        let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
-        let enable_wasi = self.config.enable_wasi;
+        let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
 
         let (tx, rx) = std::sync::mpsc::channel::<ExecReply>();
 
@@ -203,7 +224,6 @@ impl WasmSandbox {
                 return;
             }
 
-            let _ = enable_wasi; // WASI integration still TODO; see wasm_runtime.rs
             let linker = Linker::new(&engine);
 
             let instance = match linker.instantiate(&mut store, &module) {
@@ -225,6 +245,21 @@ impl WasmSandbox {
             let pre_call_memory: Option<Vec<u8>> = instance
                 .get_memory(&mut store, "memory")
                 .map(|m| m.data(&store).to_vec());
+
+            // Write input into guest memory: [len: u32 LE][data].
+            // Skipped when input is empty or the module has no memory export.
+            if !input_data.is_empty() {
+                if let Some(mem) = instance.get_memory(&mut store, "memory") {
+                    let header_size = 4;
+                    let needed = header_size + input_data.len();
+                    let data = mem.data_mut(&mut store);
+                    if needed <= data.len() {
+                        let len_bytes = (input_data.len() as u32).to_le_bytes();
+                        data[..4].copy_from_slice(&len_bytes);
+                        data[4..4 + input_data.len()].copy_from_slice(&input_data);
+                    }
+                }
+            }
 
             // Resolve entrypoint: prefer `_start`, fall back to `main`.
             let start_func = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
@@ -337,11 +372,7 @@ impl WasmSandbox {
             .map_err(|e| NexusError::WasmError(format!("Failed to compile module: {}", e)))?;
 
         let mut store = self.create_store()?;
-        let linker = if self.config.enable_wasi {
-            self.create_wasi_linker()?
-        } else {
-            self.create_minimal_linker()?
-        };
+        let linker = self.create_linker()?;
 
         let instance = linker
             .instantiate(&mut store, &module)
@@ -399,16 +430,8 @@ impl WasmSandbox {
         Ok(store)
     }
 
-    /// Create linker with WASI support
-    fn create_wasi_linker(&self) -> Result<Linker<WasmState>> {
-        // For now, use minimal linker without WASI
-        // WASI integration requires more careful setup
-        let linker = Linker::new(&self.engine);
-        Ok(linker)
-    }
-
-    /// Create minimal linker without WASI
-    fn create_minimal_linker(&self) -> Result<Linker<WasmState>> {
+    fn create_linker(&self) -> Result<Linker<WasmState>> {
+        // WASI integration is in development; for now, bare linker only.
         let linker = Linker::new(&self.engine);
         Ok(linker)
     }

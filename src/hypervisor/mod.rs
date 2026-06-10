@@ -117,6 +117,10 @@ pub struct NexusHypervisor {
     /// matching instincts after a successful retry and debits them after
     /// a still-failed retry. When unset, outcome feedback is a no-op.
     instinct_store: Option<Arc<crate::instinct::InstinctStore>>,
+    /// Decompressed memory from the most recent rollback. Callers can
+    /// use `last_rollback_memory()` to retrieve these bytes and
+    /// `restore_memory` to write them into a live wasmtime instance.
+    last_rollback_memory: RwLock<Option<Vec<u8>>>,
 }
 
 impl NexusHypervisor {
@@ -166,6 +170,7 @@ impl NexusHypervisor {
             current_snapshot: RwLock::new(None),
             recovery_policy,
             instinct_store: None,
+            last_rollback_memory: RwLock::new(None),
         })
     }
 
@@ -183,11 +188,41 @@ impl NexusHypervisor {
         self
     }
 
+    /// Enable self-correction (opt-in). Alias for `with_instinct_store`.
+    /// Without this call, `execute_with_retry` retries but does NOT
+    /// adjust instinct confidence — outcome feedback is a no-op.
+    pub fn with_self_correction(self, store: Arc<crate::instinct::InstinctStore>) -> Self {
+        self.with_instinct_store(store)
+    }
+
+    /// Returns true when self-correction is active (instinct store attached).
+    pub fn self_correction_enabled(&self) -> bool {
+        self.instinct_store.is_some()
+    }
+
+    /// Access the sandbox's wasmtime `Engine` for use with `ModuleCache`.
+    pub fn sandbox_engine(&self) -> wasmtime::Engine {
+        self.sandbox.read().unwrap().engine().clone()
+    }
+
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();
         manager.issue(capability, "system", validity);
         Ok(())
+    }
+
+    /// Issue a capability token signed by the hypervisor's own key.
+    /// The returned token can be passed to `execute_tool_with_tokens`
+    /// or `execute_tool_precompiled_with_tokens`.
+    pub fn issue_token(
+        &self,
+        capability: Capability,
+        granted_by: &str,
+        validity: Duration,
+    ) -> crate::security::CapabilityToken {
+        let mut manager = self.capability_manager.write().unwrap();
+        manager.issue(capability, granted_by, validity)
     }
 
     /// Execute a tool with automatic snapshot/rollback.
@@ -222,8 +257,44 @@ impl NexusHypervisor {
     pub async fn execute_tool_with_tokens(
         &self,
         tool: ToolDefinition,
-        _input: serde_json::Value,
+        input: serde_json::Value,
         caller_tokens: &[crate::security::CapabilityToken],
+    ) -> Result<ToolOutput> {
+        self.execute_tool_inner(tool, input, caller_tokens, None)
+            .await
+    }
+
+    /// Execute a tool using a precompiled `Module` from `ModuleCache`.
+    /// Skips `Module::from_binary`, making repeat invocations faster.
+    pub async fn execute_tool_precompiled(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        module: std::sync::Arc<wasmtime::Module>,
+    ) -> Result<ToolOutput> {
+        self.execute_tool_inner(tool, input, &[], Some(module))
+            .await
+    }
+
+    /// Execute a precompiled tool with capability-token validation.
+    /// Combines `execute_tool_with_tokens` and `execute_tool_precompiled`.
+    pub async fn execute_tool_precompiled_with_tokens(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+        module: std::sync::Arc<wasmtime::Module>,
+    ) -> Result<ToolOutput> {
+        self.execute_tool_inner(tool, input, caller_tokens, Some(module))
+            .await
+    }
+
+    async fn execute_tool_inner(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+        precompiled: Option<std::sync::Arc<wasmtime::Module>>,
     ) -> Result<ToolOutput> {
         let start = Instant::now();
 
@@ -232,17 +303,26 @@ impl NexusHypervisor {
             manager.authorize(caller_tokens, &tool.required_capabilities)?;
         }
 
+        // Serialize input to JSON bytes for delivery to the guest.
+        let input_bytes = serde_json::to_vec(&input).map_err(|e| {
+            NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
+        })?;
+
         // Start health monitoring before the execute call so resource
         // deltas are anchored at the pre-call sample.
         self.health_validator.start_execution();
 
-        // Execute in the WASM sandbox. The sandbox returns a typed
-        // `FailureMode` on failure and the real pre-call memory bytes.
-        let exec_result = self
-            .sandbox
-            .read()
-            .unwrap()
-            .execute(&tool.wasm_bytes, &[])?;
+        let exec_result = if let Some(module) = precompiled {
+            self.sandbox
+                .read()
+                .unwrap()
+                .execute_precompiled(module, &[input_bytes])?
+        } else {
+            self.sandbox
+                .read()
+                .unwrap()
+                .execute(&tool.wasm_bytes, &[input_bytes])?
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let fuel_consumed = exec_result.fuel_consumed;
@@ -310,7 +390,8 @@ impl NexusHypervisor {
             let mut rollback_performed = false;
             if mode.requires_rollback() {
                 if let Some(snap) = snapshot.as_ref() {
-                    if self.snapshot_manager.rollback_to(&snap.id).is_ok() {
+                    if let Ok(result) = self.snapshot_manager.rollback_to(&snap.id) {
+                        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
                         rollback_performed = true;
                     }
                 }
@@ -457,9 +538,20 @@ impl NexusHypervisor {
     /// Rollback to a specific snapshot manually
     pub async fn manual_rollback(&self, snapshot_id: uuid::Uuid) -> Result<()> {
         let result = self.snapshot_manager.rollback_to(&snapshot_id)?;
-        // Would restore memory and filesystem from result
-        let _ = result;
+        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
         Ok(())
+    }
+
+    /// Return the decompressed memory from the most recent rollback,
+    /// consuming it so subsequent calls return `None` until another
+    /// rollback occurs.
+    pub fn take_rollback_memory(&self) -> Option<Vec<u8>> {
+        self.last_rollback_memory.write().unwrap().take()
+    }
+
+    /// Peek at the rollback memory without consuming it.
+    pub fn last_rollback_memory(&self) -> Option<Vec<u8>> {
+        self.last_rollback_memory.read().unwrap().clone()
     }
 }
 
