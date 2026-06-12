@@ -22,7 +22,7 @@ pub use hypervisor::{
 pub use instinct::{Instinct, InstinctPolicy, InstinctStats, InstinctStore};
 pub use sandbox::{
     ExecutionResult, FuelBudgetPolicy, FuelMeter, FuelProfile, FuelStats, MemoryStats,
-    SandboxConfig, WasmExecutionSnapshot, WasmMemoryState, WasmSandbox,
+    PreOpen, SandboxConfig, WasiSandboxConfig, WasmExecutionSnapshot, WasmMemoryState, WasmSandbox,
 };
 pub use security::{Capability, CapabilityManager, CapabilityToken};
 pub use snapshot::{

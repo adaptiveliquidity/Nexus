@@ -303,6 +303,93 @@ impl NexusHypervisor {
             .await
     }
 
+    /// Execute a tool with WASI host imports, gated by capability tokens.
+    ///
+    /// Validated capabilities are mapped to WASI pre-opens (read-only or
+    /// read-write directories) via `WasiSandboxConfig::from_capabilities`.
+    pub async fn execute_tool_wasi(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+    ) -> Result<ToolOutput> {
+        let start = Instant::now();
+
+        if !tool.required_capabilities.is_empty() {
+            let manager = self.capability_manager.read().unwrap();
+            manager.authorize(caller_tokens, &tool.required_capabilities)?;
+        }
+
+        let input_bytes = serde_json::to_vec(&input).map_err(|e| {
+            NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
+        })?;
+
+        let wasi_config = crate::sandbox::WasiSandboxConfig::from_capabilities(
+            &tool.required_capabilities,
+        );
+
+        self.health_validator.start_execution();
+
+        let exec_result = self
+            .sandbox
+            .read()
+            .unwrap()
+            .execute_wasi(&tool.wasm_bytes, &[input_bytes], &wasi_config)?;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let fuel_consumed = exec_result.fuel_consumed;
+
+        self.fuel_policy
+            .write()
+            .unwrap()
+            .record(&tool.name, fuel_consumed);
+
+        let resources = self.health_validator.current_resources();
+
+        if !exec_result.success {
+            let mode = exec_result
+                .failure_mode
+                .clone()
+                .unwrap_or_else(|| FailureMode::HostError("unknown WASI error".into()));
+
+            let record = ExecutionRecord::failure(
+                tool.name.clone(),
+                crate::hypervisor::validator::error_log::ErrorLog::new(
+                    tool.name.clone(),
+                    mode.clone(),
+                    resources,
+                ),
+                duration_ms,
+                fuel_consumed,
+            );
+            self.telemetry.record_failure(record);
+
+            Ok(ToolOutput {
+                success: false,
+                result: None,
+                error: Some(mode.describe()),
+                rollback_performed: false,
+                execution_time_ms: duration_ms,
+                fuel_consumed,
+                error_log: None,
+            })
+        } else {
+            let record =
+                ExecutionRecord::success(tool.name.clone(), duration_ms, fuel_consumed, resources);
+            self.telemetry.record_success(record);
+
+            Ok(ToolOutput {
+                success: true,
+                result: exec_result.return_value,
+                error: None,
+                rollback_performed: false,
+                execution_time_ms: duration_ms,
+                fuel_consumed,
+                error_log: None,
+            })
+        }
+    }
+
     async fn execute_tool_inner(
         &self,
         tool: ToolDefinition,
