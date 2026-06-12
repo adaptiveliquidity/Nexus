@@ -93,6 +93,10 @@ name = "nexus-agentd"
 path = "src/bin/nexus_agentd.rs"
 required-features = []
 
+[[example]]
+name = "wasi_capability_demo"
+path = "examples/wasi_capability_demo/host.rs"
+
 [[bench]]
 name = "nexus_validation"
 harness = false

@@ -1,0 +1,2 @@
+[target.wasm32-wasip1]
+rustflags = ["-C", "linker-plugin-lto=no", "-C", "strip=none"]
