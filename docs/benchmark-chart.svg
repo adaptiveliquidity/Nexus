@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 480" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #161b22; }
+      .title { fill: #e6edf3; }
+      .subtitle { fill: #8b949e; }
+      .label { fill: #c9d1d9; }
+      .value { fill: #e6edf3; }
+      .axis-line { stroke: #30363d; }
+      .axis-label { fill: #8b949e; }
+      .grid-line { stroke: #21262d; }
+      .bar-cold { fill: #3fb950; }
+      .bar-rollback { fill: #58a6ff; }
+      .bar-execute { fill: #d2a8ff; }
+      .bar-snapshot { fill: #f0883e; }
+      .legend-text { fill: #c9d1d9; }
+      .note { fill: #8b949e; }
+      .metric-card { fill: #161b22; stroke: #30363d; }
+      .metric-value { fill: #58a6ff; }
+      .metric-label { fill: #8b949e; }
+      .metric-unit { fill: #8b949e; }
+    }
+    @media (prefers-color-scheme: light) {
+      .bg { fill: #ffffff; }
+      .title { fill: #1f2328; }
+      .subtitle { fill: #656d76; }
+      .label { fill: #1f2328; }
+      .value { fill: #1f2328; }
+      .axis-line { stroke: #d0d7de; }
+      .axis-label { fill: #656d76; }
+      .grid-line { stroke: #eaeef2; }
+      .bar-cold { fill: #1a7f37; }
+      .bar-rollback { fill: #0969da; }
+      .bar-execute { fill: #8250df; }
+      .bar-snapshot { fill: #bf5700; }
+      .legend-text { fill: #1f2328; }
+      .note { fill: #656d76; }
+      .metric-card { fill: #f6f8fa; stroke: #d0d7de; }
+      .metric-value { fill: #0969da; }
+      .metric-label { fill: #656d76; }
+      .metric-unit { fill: #656d76; }
+    }
+  </style>
+
+  <rect class="bg" width="820" height="480" rx="12"/>
+
+  <!-- Title -->
+  <text x="410" y="32" text-anchor="middle" font-size="16" font-weight="600" class="title">Nexus benchmark results</text>
+  <text x="410" y="50" text-anchor="middle" font-size="11" class="subtitle">Criterion.rs on ubuntu-24.04 CI runners · lower is better</text>
+
+  <!-- Top metric cards -->
+  <rect class="metric-card" x="20" y="64" width="185" height="62" rx="8" stroke-width="1"/>
+  <text x="112" y="86" text-anchor="middle" font-size="10" class="metric-label">Cold start</text>
+  <text x="99" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">1.7</text>
+  <text x="123" y="112" text-anchor="start" font-size="12" class="metric-unit">µs</text>
+
+  <rect class="metric-card" x="215" y="64" width="185" height="62" rx="8" stroke-width="1"/>
+  <text x="307" y="86" text-anchor="middle" font-size="10" class="metric-label">Rollback (1 MiB)</text>
+  <text x="293" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">76</text>
+  <text x="314" y="112" text-anchor="start" font-size="12" class="metric-unit">µs</text>
+
+  <rect class="metric-card" x="410" y="64" width="185" height="62" rx="8" stroke-width="1"/>
+  <text x="502" y="86" text-anchor="middle" font-size="10" class="metric-label">Execute tool</text>
+  <text x="489" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">5.07</text>
+  <text x="516" y="112" text-anchor="start" font-size="12" class="metric-unit">ms</text>
+
+  <rect class="metric-card" x="605" y="64" width="195" height="62" rx="8" stroke-width="1"/>
+  <text x="702" y="86" text-anchor="middle" font-size="10" class="metric-label">Snapshot (1 MiB)</text>
+  <text x="689" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">2.54</text>
+  <text x="716" y="112" text-anchor="start" font-size="12" class="metric-unit">ms</text>
+
+  <!-- Grid lines -->
+  <line class="grid-line" x1="180" y1="150" x2="180" y2="430" stroke-width="0.5"/>
+  <line class="grid-line" x1="300" y1="150" x2="300" y2="430" stroke-width="0.5"/>
+  <line class="grid-line" x1="420" y1="150" x2="420" y2="430" stroke-width="0.5"/>
+  <line class="grid-line" x1="540" y1="150" x2="540" y2="430" stroke-width="0.5"/>
+  <line class="grid-line" x1="660" y1="150" x2="660" y2="430" stroke-width="0.5"/>
+  <line class="grid-line" x1="780" y1="150" x2="780" y2="430" stroke-width="0.5"/>
+
+  <!-- Axis labels -->
+  <text x="180" y="445" text-anchor="middle" font-size="10" class="axis-label">1 µs</text>
+  <text x="300" y="445" text-anchor="middle" font-size="10" class="axis-label">10 µs</text>
+  <text x="420" y="445" text-anchor="middle" font-size="10" class="axis-label">100 µs</text>
+  <text x="540" y="445" text-anchor="middle" font-size="10" class="axis-label">1 ms</text>
+  <text x="660" y="445" text-anchor="middle" font-size="10" class="axis-label">10 ms</text>
+  <text x="780" y="445" text-anchor="middle" font-size="10" class="axis-label">100 ms</text>
+
+  <!-- Axis line -->
+  <line class="axis-line" x1="180" y1="430" x2="780" y2="430" stroke-width="1"/>
+
+  <!-- Bars: log10(value_in_us) * 120 + 180 offset from left -->
+  <!-- Cold start: 1.7 µs → log10(1.7)=0.230 → w=28 -->
+  <text x="172" y="178" text-anchor="end" font-size="11" class="label">Cold start</text>
+  <rect class="bar-cold" x="180" y="164" width="28" height="24" rx="3"/>
+  <text x="214" y="181" text-anchor="start" font-size="10" font-weight="500" class="value">1.7 µs</text>
+
+  <!-- Rollback 1 MiB: 76 µs → log10(76)=1.881 → w=226 -->
+  <text x="172" y="218" text-anchor="end" font-size="11" class="label">Rollback 1 MiB</text>
+  <rect class="bar-rollback" x="180" y="204" width="226" height="24" rx="3"/>
+  <text x="412" y="221" text-anchor="start" font-size="10" font-weight="500" class="value">76 µs</text>
+
+  <!-- Rollback 10 MiB: 691 µs → log10(691)=2.839 → w=341 -->
+  <text x="172" y="258" text-anchor="end" font-size="11" class="label">Rollback 10 MiB</text>
+  <rect class="bar-rollback" x="180" y="244" width="341" height="24" rx="3"/>
+  <text x="527" y="261" text-anchor="start" font-size="10" font-weight="500" class="value">691 µs</text>
+
+  <!-- Execute tool: 5.07 ms → log10(5070)=3.705 → w=445 -->
+  <text x="172" y="298" text-anchor="end" font-size="11" class="label">Execute tool</text>
+  <rect class="bar-execute" x="180" y="284" width="445" height="24" rx="3"/>
+  <text x="631" y="301" text-anchor="start" font-size="10" font-weight="500" class="value">5.07 ms</text>
+
+  <!-- Snapshot 1 MiB: 2.54 ms → log10(2540)=3.405 → w=409 -->
+  <text x="172" y="338" text-anchor="end" font-size="11" class="label">Snapshot 1 MiB</text>
+  <rect class="bar-snapshot" x="180" y="324" width="409" height="24" rx="3"/>
+  <text x="595" y="341" text-anchor="start" font-size="10" font-weight="500" class="value">2.54 ms</text>
+
+  <!-- Rollback 100 MiB: 20.3 ms → log10(20270)=4.307 → w=517 -->
+  <text x="172" y="378" text-anchor="end" font-size="11" class="label">Rollback 100 MiB</text>
+  <rect class="bar-rollback" x="180" y="364" width="517" height="24" rx="3"/>
+  <text x="703" y="381" text-anchor="start" font-size="10" font-weight="500" class="value">20.3 ms</text>
+
+  <!-- Snapshot 100 MiB: 287 ms → log10(287000)=5.458 → w=575 (capped) -->
+  <text x="172" y="418" text-anchor="end" font-size="11" class="label">Snapshot 100 MiB</text>
+  <rect class="bar-snapshot" x="180" y="404" width="575" height="24" rx="3"/>
+  <text x="761" y="421" text-anchor="start" font-size="9" font-weight="500" class="value">287 ms</text>
+
+  <!-- Legend -->
+  <rect class="bar-cold" x="180" y="460" width="10" height="10" rx="2"/>
+  <text x="194" y="469" font-size="10" class="legend-text">Cold start</text>
+  <rect class="bar-rollback" x="280" y="460" width="10" height="10" rx="2"/>
+  <text x="294" y="469" font-size="10" class="legend-text">Rollback</text>
+  <rect class="bar-execute" x="370" y="460" width="10" height="10" rx="2"/>
+  <text x="384" y="469" font-size="10" class="legend-text">Execute</text>
+  <rect class="bar-snapshot" x="460" y="460" width="10" height="10" rx="2"/>
+  <text x="474" y="469" font-size="10" class="legend-text">Snapshot</text>
+  <text x="780" y="469" text-anchor="end" font-size="9" class="note">Log scale</text>
+</svg>

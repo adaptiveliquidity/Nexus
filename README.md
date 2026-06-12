@@ -10,31 +10,13 @@ Nexus provides microsecond-class cold starts, native snapshot/rollback, capabili
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 
-## Key Performance Metrics
+## Benchmark Results
 
-> **Live benchmarks:** [adaptive-liquidity.github.io/Nexus](https://adaptive-liquidity.github.io/Nexus/)
-> All numbers below are measured on GitHub-hosted runners (ubuntu-24.04) and published to [Bencher.dev](https://bencher.dev/perf/nexus-ai) + [CodSpeed.io](https://codspeed.io/Adaptive-Liquidity/Nexus). Artifacts are signed with Sigstore.
+<p align="center">
+  <img src="docs/benchmark-chart.svg" alt="Nexus benchmark results — log-scale horizontal bar chart showing cold start (1.7 µs), rollback 1–100 MiB (76 µs – 20.3 ms), execute tool (5.07 ms), and snapshot 1–100 MiB (2.54–287 ms)" width="820"/>
+</p>
 
-| Metric | Nexus (measured) | Category | Notes |
-|--------|-----------------|----------|-------|
-| Cold Start (sandbox init) | ~23 µs | benchmarked-primitive | `WasmSandbox::new` only; end-to-end first-call latency is higher |
-| Snapshot Creation (1 MiB) | ~2.92 ms | integrated-live | Pseudo-random (incompressible) memory; empty memory is ~56 µs |
-| Snapshot Creation (100 MiB) | ~290 ms | integrated-live | Scales with memory size and compressibility |
-| Rollback (1 MiB) | <1 ms | benchmarked-primitive | Decompress + integrity restore |
-| Rollback (10 MiB) | ~1.62 ms | benchmarked-primitive | |
-| Rollback (100 MiB) | ~53.6 ms | benchmarked-primitive | |
-| AI Telemetry | Default-on | integrated-live | Self-correction is opt-in via `with_self_correction` |
-
-<details>
-<summary>Retired claims (click to expand)</summary>
-
-The following claims appeared in earlier versions of this README and have been corrected:
-
-1. **"217x faster than CF Workers"** — compared sandbox struct init (23 µs) to full request latency (5 ms). Apples-to-oranges.
-2. **"56 µs snapshot creation"** — true only for empty/zero memory. Realistic workloads with 1 MiB incompressible memory measure ~2.92 ms.
-3. **"<1 ms rollback"** — true at 1 MiB, but 1.62 ms at 10 MiB and 53.6 ms at 100 MiB.
-4. **"10,000+ concurrent sandboxes"** — never measured by the shipped benchmark harness. Density benchmarking is planned as a separate effort.
-</details>
+> Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. Published to [Bencher.dev](https://bencher.dev/perf/nexus-ai) + [CodSpeed.io](https://codspeed.io/Adaptive-Liquidity/Nexus). [Live dashboard →](https://adaptive-liquidity.github.io/Nexus/)
 
 ## What Problem Does Nexus Solve?
 
