@@ -141,8 +141,8 @@ impl ExecutionResult {
 
 /// WASM Micro-Sandbox with fuel metering
 pub struct WasmSandbox {
-    engine: Arc<Engine>,
-    config: SandboxConfig,
+    pub(crate) engine: Arc<Engine>,
+    pub(crate) config: SandboxConfig,
 }
 
 /// Reply payload sent from the worker thread to the timeout-bounded receiver.
