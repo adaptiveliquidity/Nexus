@@ -16,11 +16,16 @@ from datetime import datetime, timezone
 
 
 BENCHMARKS = [
-    ("cold_start/sandbox_new", "Cold start", "bar-cold"),
+    ("cold_start/sandbox_new", "Cold start (sandbox)", "bar-cold"),
+    ("cold_start/hypervisor_new", "Cold start (hypervisor)", "bar-cold"),
     ("snapshot_rollback/size/1MiB", "Rollback 1 MiB", "bar-rollback"),
     ("snapshot_rollback/size/10MiB", "Rollback 10 MiB", "bar-rollback"),
     ("execute_tool/trivial_wasm_start", "Execute tool", "bar-execute"),
+    ("integrated_capability_checked/with_valid_token", "Capability-checked exec", "bar-integrated"),
+    ("integrated_precompiled/cached_precompiled", "Cached precompiled", "bar-integrated"),
+    ("integrated_full_stack/full_path", "Full-stack integrated", "bar-integrated"),
     ("snapshot_create/size/1MiB", "Snapshot 1 MiB", "bar-snapshot"),
+    ("execute_tool_real_memory/size/1MiB", "Execute real mem 1 MiB", "bar-execute"),
     ("snapshot_rollback/size/100MiB", "Rollback 100 MiB", "bar-rollback"),
     ("snapshot_create/size/100MiB", "Snapshot 100 MiB", "bar-snapshot"),
 ]
@@ -28,15 +33,15 @@ BENCHMARKS = [
 METRIC_CARDS = [
     ("cold_start/sandbox_new", "Cold start"),
     ("snapshot_rollback/size/1MiB", "Rollback (1 MiB)"),
-    ("execute_tool/trivial_wasm_start", "Execute tool"),
-    ("snapshot_create/size/1MiB", "Snapshot (1 MiB)"),
+    ("integrated_capability_checked/with_valid_token", "Cap-checked exec"),
+    ("integrated_full_stack/full_path", "Full-stack"),
 ]
 
 
 def parse_criterion_log(path):
     """Parse Criterion output, return {benchmark_name: median_us}."""
     results = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         text = f.read()
 
     pattern = re.compile(
@@ -64,16 +69,24 @@ def parse_criterion_log(path):
 
 
 def to_microseconds(value, unit):
-    unit = unit.lower().strip()
-    if unit in ("ns", "nanoseconds"):
+    import unicodedata
+    cleaned = ""
+    for ch in unit.strip():
+        name = unicodedata.name(ch, "")
+        if "MICRO" in name or "MU" in name:
+            cleaned += "u"
+        else:
+            cleaned += ch
+    normalized = cleaned.lower()
+    if normalized in ("ns", "nanoseconds"):
         return value / 1000.0
-    if unit in ("µs", "us", "microseconds"):
+    if normalized in ("us", "microseconds"):
         return value
-    if unit in ("ms", "milliseconds"):
+    if normalized in ("ms", "milliseconds"):
         return value * 1000.0
-    if unit in ("s", "seconds"):
+    if normalized in ("s", "seconds"):
         return value * 1_000_000.0
-    raise ValueError(f"Unknown time unit: {unit}")
+    raise ValueError(f"Unknown time unit: {unit!r}")
 
 
 def format_time(us):
@@ -91,7 +104,7 @@ def format_time(us):
     return f"{ms:.0f} ms"
 
 
-def log_width(us, scale=120):
+def log_width(us, scale=110):
     """Convert microseconds to pixel width on a log10 scale."""
     if us <= 0:
         return 1
@@ -118,7 +131,7 @@ def render_svg(results, date_str):
     chart_bottom = chart_top + chart_h
 
     cards_xml = []
-    card_positions = [(20, 185), (215, 185), (410, 185), (605, 195)]
+    card_positions = [(20, 195), (225, 195), (430, 195), (635, 195)]
     for i, (bench_key, card_label) in enumerate(METRIC_CARDS):
         if bench_key not in results:
             continue
@@ -143,12 +156,12 @@ def render_svg(results, date_str):
     grid_xml = []
     axis_labels_xml = []
     axis_labels = [
-        (180, "1 µs"),
-        (300, "10 µs"),
-        (420, "100 µs"),
-        (540, "1 ms"),
-        (660, "10 ms"),
-        (780, "100 ms"),
+        (210, "1 µs"),
+        (330, "10 µs"),
+        (450, "100 µs"),
+        (570, "1 ms"),
+        (690, "10 ms"),
+        (810, "100 ms"),
     ]
     for x, _ in axis_labels:
         grid_xml.append(
@@ -166,12 +179,12 @@ def render_svg(results, date_str):
         y = chart_top + i * (bar_h + bar_gap)
         w = log_width(us)
         fmt = format_time(us)
-        text_x = 180 + w + 6
-        font_sz = 10 if text_x + 40 < 790 else 9
+        text_x = 210 + w + 6
+        font_sz = 10 if text_x + 40 < 820 else 9
         bars_xml.append(
-            f'  <text x="172" y="{y + 18}" text-anchor="end" '
+            f'  <text x="202" y="{y + 18}" text-anchor="end" '
             f'font-size="11" class="label">{label}</text>\n'
-            f'  <rect class="{css_class}" x="180" y="{y + 4}" '
+            f'  <rect class="{css_class}" x="210" y="{y + 4}" '
             f'width="{w}" height="{bar_h}" rx="3"/>\n'
             f'  <text x="{text_x}" y="{y + 21}" text-anchor="start" '
             f'font-size="{font_sz}" font-weight="500" class="value">'
@@ -179,10 +192,11 @@ def render_svg(results, date_str):
         )
 
     legend_items = [
-        (180, "bar-cold", "Cold start"),
-        (280, "bar-rollback", "Rollback"),
-        (370, "bar-execute", "Execute"),
+        (210, "bar-cold", "Cold start"),
+        (300, "bar-rollback", "Rollback"),
+        (380, "bar-execute", "Execute"),
         (460, "bar-snapshot", "Snapshot"),
+        (540, "bar-integrated", "Integrated"),
     ]
     legend_xml = []
     for lx, lcls, ltxt in legend_items:
@@ -193,7 +207,7 @@ def render_svg(results, date_str):
             f'class="legend-text">{ltxt}</text>'
         )
     legend_xml.append(
-        f'  <text x="780" y="{legend_y + 9}" text-anchor="end" '
+        f'  <text x="830" y="{legend_y + 9}" text-anchor="end" '
         f'font-size="9" class="note">Log scale · {date_str}</text>'
     )
 
@@ -211,6 +225,7 @@ def render_svg(results, date_str):
       .bar-rollback { fill: #58a6ff; }
       .bar-execute { fill: #d2a8ff; }
       .bar-snapshot { fill: #f0883e; }
+      .bar-integrated { fill: #39d4e0; }
       .legend-text { fill: #c9d1d9; }
       .note { fill: #8b949e; }
       .metric-card { fill: #161b22; stroke: #30363d; }
@@ -231,6 +246,7 @@ def render_svg(results, date_str):
       .bar-rollback { fill: #0969da; }
       .bar-execute { fill: #8250df; }
       .bar-snapshot { fill: #bf5700; }
+      .bar-integrated { fill: #0e8a93; }
       .legend-text { fill: #1f2328; }
       .note { fill: #656d76; }
       .metric-card { fill: #f6f8fa; stroke: #d0d7de; }
@@ -241,16 +257,16 @@ def render_svg(results, date_str):
   </style>"""
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 {svg_h}" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 {svg_h}" '
         f'font-family="system-ui, -apple-system, \'Segoe UI\', sans-serif">',
         style,
         "",
-        f'  <rect class="bg" width="820" height="{svg_h}" rx="12"/>',
+        f'  <rect class="bg" width="850" height="{svg_h}" rx="12"/>',
         "",
         "  <!-- Title -->",
-        '  <text x="410" y="32" text-anchor="middle" font-size="16" '
+        '  <text x="425" y="32" text-anchor="middle" font-size="16" '
         'font-weight="600" class="title">Nexus benchmark results</text>',
-        '  <text x="410" y="50" text-anchor="middle" font-size="11" '
+        '  <text x="425" y="50" text-anchor="middle" font-size="11" '
         'class="subtitle">Criterion.rs on ubuntu-24.04 CI runners '
         '· lower is better</text>',
         "",
@@ -264,8 +280,8 @@ def render_svg(results, date_str):
         "\n".join(axis_labels_xml),
         "",
         "  <!-- Axis line -->",
-        f'  <line class="axis-line" x1="180" y1="{chart_bottom}" '
-        f'x2="780" y2="{chart_bottom}" stroke-width="1"/>',
+        f'  <line class="axis-line" x1="210" y1="{chart_bottom}" '
+        f'x2="810" y2="{chart_bottom}" stroke-width="1"/>',
         "",
         "  <!-- Bars -->",
         "\n".join(bars_xml),
@@ -302,7 +318,7 @@ def main():
     if len(sys.argv) >= 3:
         out_path = sys.argv[2]
 
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(svg)
     print(f"Wrote {out_path}", file=sys.stderr)
 

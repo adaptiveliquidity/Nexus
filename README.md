@@ -13,7 +13,7 @@ Nexus provides microsecond-class cold starts, native snapshot/rollback, capabili
 ## Benchmark Results
 
 <p align="center">
-  <img src="docs/benchmark-chart.svg" alt="Nexus benchmark results — log-scale horizontal bar chart showing cold start (1.7 µs), rollback 1–100 MiB (76 µs – 20.3 ms), execute tool (5.07 ms), and snapshot 1–100 MiB (2.54–287 ms)" width="820"/>
+  <img src="docs/benchmark-chart.svg" alt="Nexus benchmark results — log-scale horizontal bar chart showing cold start, rollback, execute, snapshot, and integrated benchmarks across 12 workloads" width="850"/>
 </p>
 
 > Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. Published to [Bencher.dev](https://bencher.dev/perf/nexus-ai) + [CodSpeed.io](https://codspeed.io/Adaptive-Liquidity/Nexus). [Live dashboard →](https://adaptive-liquidity.github.io/Nexus/)
