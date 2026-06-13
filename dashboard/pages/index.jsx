@@ -14,7 +14,7 @@ import {
 } from "recharts";
 
 const BENCHER_API =
-  "https://api.bencher.dev/v0/projects/nexus-ai/perf?branches=main&testbeds=ubuntu-24.04-github&benchmarks=cold_start%2Fsandbox_new&kind=latency&start_time=2024-01-01T00%3A00%3A00Z";
+  "https://api.bencher.dev/v0/projects/nexus-ai/perf?branches=6d1af57e-72a2-4097-a70e-899226e3d552&testbeds=ab344f8e-8eee-4988-a6aa-353dcfdcc6af&benchmarks=6e3fbe29-b6b9-4ae2-b52c-1695dfdc9f0e&measures=8ee69648-77ad-4739-b3b4-28e69d6e2744";
 
 const GREEN = "#9cff3b";
 const CYAN = "#00d8ff";

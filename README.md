@@ -159,7 +159,7 @@ nexus demo --demo all
 | P1 | Security review / audit | Planned |
 | P2 | Sandbox pool with warm instances | Planned |
 | P2 | Concurrent sandbox density benchmarking | Planned |
-| P2 | Live benchmark dashboard (fix GitHub Pages deploy) | Planned |
+| P2 | Live benchmark dashboard + auto-updating SVG | Shipped |
 | P3 | Distributed snapshot synchronization | Research |
 | P3 | WASM call-stack capture | Research |
 | P3 | Zero-knowledge capability attestation | Research |
