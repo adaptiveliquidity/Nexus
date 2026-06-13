@@ -81,9 +81,9 @@ jobs:
             | tee benchmark_evidence/criterion_raw.log
 
       # ── Push / schedule / dispatch: record baseline on the target branch ──
-      # Tracks both latency (upper boundary — slower is bad) and throughput
-      # (lower boundary — less throughput is bad) with Student's t-test at 99th
-      # percentile, 2–64 sample rolling window.
+      # Tracks latency (upper boundary — slower is bad) with Student's t-test
+      # at 99th percentile, 2–64 sample rolling window. The rust_criterion
+      # adapter only emits latency data; throughput thresholds are not applicable.
       - name: Upload to Bencher.dev (push)
         if: steps.config.outputs.bencher_configured == 'true' && github.event_name != 'pull_request'
         run: |
@@ -101,11 +101,6 @@ jobs:
             --threshold-min-sample-size 2 \
             --threshold-max-sample-size 64 \
             --threshold-upper-boundary 0.99 \
-            --threshold-measure throughput \
-            --threshold-test t_test \
-            --threshold-min-sample-size 2 \
-            --threshold-max-sample-size 64 \
-            --threshold-lower-boundary 0.99 \
             --file benchmark_evidence/criterion_raw.log
 
       - name: Track binary sizes in Bencher
