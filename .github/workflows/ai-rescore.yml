@@ -1,8 +1,7 @@
-# AI rescore — runs only on PRs that touch the recovery path or the
-# Phase 3 capture scenarios. Captures the post-PR ErrorLogs and asks an
-# external LLM to score them against the rubric defined in the Phase A
-# revalidation. The result is uploaded as a job artifact and (optionally)
-# posted as a PR comment.
+# AI rescore — runs on pushes to main that touch the recovery path or
+# Phase 3 capture scenarios. Captures the ErrorLogs and asks an external
+# LLM to score them against the rubric defined in the Phase A
+# revalidation. The result is uploaded as a job artifact.
 #
 # The actual scoring is done via a small Python helper so the workflow
 # can run in any CI environment that has $OPENAI_API_KEY or

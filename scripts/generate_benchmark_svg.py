@@ -104,11 +104,13 @@ def format_time(us):
     return f"{ms:.0f} ms"
 
 
+PLOT_WIDTH_PX = 600
+
 def log_width(us, scale=110):
     """Convert microseconds to pixel width on a log10 scale."""
     if us <= 0:
         return 1
-    return max(1, int(math.log10(us) * scale))
+    return min(PLOT_WIDTH_PX, max(1, int(math.log10(us) * scale)))
 
 
 def render_svg(results, date_str):
@@ -179,8 +181,8 @@ def render_svg(results, date_str):
         y = chart_top + i * (bar_h + bar_gap)
         w = log_width(us)
         fmt = format_time(us)
-        text_x = 210 + w + 6
-        font_sz = 10 if text_x + 40 < 820 else 9
+        text_x = min(810, 210 + w + 6)
+        font_sz = 10 if text_x + 40 < 830 else 9
         bars_xml.append(
             f'  <text x="202" y="{y + 18}" text-anchor="end" '
             f'font-size="11" class="label">{label}</text>\n'
