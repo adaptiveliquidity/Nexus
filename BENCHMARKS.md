@@ -30,7 +30,7 @@ The following claims appeared in earlier versions of this document and have been
 
 The benchmark pipeline uses two independent third-party services:
 
-1. **Bencher.dev** — receives wall-clock Criterion output (`--output-format bencher`), tracks regressions over time, comments on PRs with performance diffs
+1. **Bencher.dev** — receives native Criterion output via the `rust_criterion` adapter, tracks regressions over time, comments on PRs with performance diffs
 2. **CodSpeed.io** — receives instruction-count data via `codspeed-criterion-compat`, providing deterministic measurements immune to noisy-neighbor effects on shared CI runners
 
 ### Test Environment

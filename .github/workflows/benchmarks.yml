@@ -6,6 +6,10 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   schedule:
     - cron: "0 3 * * 0"
   workflow_dispatch:
@@ -76,28 +80,71 @@ jobs:
           cargo bench --bench nexus_validation \
             | tee benchmark_evidence/criterion_raw.log
 
-      # Upload results to Bencher.dev with a Student's t-test threshold.
-      # t-test adapts per-benchmark: each benchmark's own historical variance
-      # determines its boundary width. Settings:
-      #   - upper_boundary 0.99 = 99th percentile (alert only on strong signal)
-      #   - min_sample_size 2   = skip checks until 2+ data points exist
-      #   - max_sample_size 64  = rolling window for baseline calculation
-      # The GitHub Check posted by --github-actions shows pass/fail + details.
-      - name: Upload to Bencher.dev
-        if: steps.config.outputs.bencher_configured == 'true'
+      # ── Push / schedule / dispatch: record baseline on the target branch ──
+      # Tracks both latency (upper boundary — slower is bad) and throughput
+      # (lower boundary — less throughput is bad) with Student's t-test at 99th
+      # percentile, 2–64 sample rolling window.
+      - name: Upload to Bencher.dev (push)
+        if: steps.config.outputs.bencher_configured == 'true' && github.event_name != 'pull_request'
         run: |
           bencher run \
             --project "${{ vars.BENCHER_PROJECT }}" \
             --token "${{ secrets.BENCHER_API_TOKEN }}" \
             --branch "${{ github.ref_name }}" \
+            --hash "${{ github.sha }}" \
             --testbed "ubuntu-24.04-github" \
             --adapter rust_criterion \
             --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+            --err \
             --threshold-measure latency \
             --threshold-test t_test \
             --threshold-min-sample-size 2 \
             --threshold-max-sample-size 64 \
             --threshold-upper-boundary 0.99 \
+            --threshold-measure throughput \
+            --threshold-test t_test \
+            --threshold-min-sample-size 2 \
+            --threshold-max-sample-size 64 \
+            --threshold-lower-boundary 0.99 \
+            --file benchmark_evidence/criterion_raw.log
+
+      - name: Track binary sizes in Bencher
+        if: steps.config.outputs.bencher_configured == 'true' && github.event_name != 'pull_request'
+        run: |
+          cargo build --release --bin nexus --bin nexus-agentd 2>/dev/null
+          bencher run \
+            --project "${{ vars.BENCHER_PROJECT }}" \
+            --token "${{ secrets.BENCHER_API_TOKEN }}" \
+            --branch "${{ github.ref_name }}" \
+            --hash "${{ github.sha }}" \
+            --testbed "ubuntu-24.04-github" \
+            --threshold-measure file-size \
+            --threshold-test percentage \
+            --threshold-upper-boundary 0.10 \
+            --file-size target/release/nexus \
+            --file-size target/release/nexus-agentd \
+            --github-actions "${{ secrets.GITHUB_TOKEN }}"
+
+      # ── PR: compare against base branch, fail on regression ──
+      - name: Upload to Bencher.dev (PR)
+        if: steps.config.outputs.bencher_configured == 'true' && github.event_name == 'pull_request'
+        run: |
+          bencher run \
+            --project "${{ vars.BENCHER_PROJECT }}" \
+            --token "${{ secrets.BENCHER_API_TOKEN }}" \
+            --branch "${{ github.head_ref }}" \
+            --hash "${{ github.event.pull_request.head.sha }}" \
+            --start-point "${{ github.base_ref }}" \
+            --start-point-hash "${{ github.event.pull_request.base.sha }}" \
+            --start-point-clone-thresholds \
+            --start-point-reset \
+            --testbed "ubuntu-24.04-github" \
+            --adapter rust_criterion \
+            --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+            --ci-only-on-alert \
+            --ci-number "${{ github.event.number }}" \
+            --err \
+            --error-on-alert \
             --file benchmark_evidence/criterion_raw.log
 
       - uses: sigstore/cosign-installer@v3
@@ -118,43 +165,56 @@ jobs:
           retention-days: 90
 
   codspeed:
-    name: "Criterion → Codspeed.io"
+    name: "Criterion → CodSpeed.io (CPU simulation + memory)"
     runs-on: ubuntu-24.04
-    # Compilation dominates wall-clock time (~35 min cold without LTO, ~5 min
-    # cached); the actual cachegrind measurement takes <10 s total.
     timeout-minutes: 75
     if: ${{ vars.CODSPEED_ENABLED != 'false' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
-      - name: Check CodSpeed token presence
-        id: cs_config
-        run: |
-          if [ -n "${{ secrets.CODSPEED_TOKEN }}" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "⚠ CODSPEED_TOKEN secret not set — skipping CodSpeed run."
-            echo "  See SETUP.md step 2."
-          fi
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.cs_config.outputs.configured == 'true'
       - uses: Swatinem/rust-cache@v2
-        if: steps.cs_config.outputs.configured == 'true'
         with:
           shared-key: codspeed-${{ runner.os }}
       - name: Install cargo-codspeed (prebuilt)
-        if: steps.cs_config.outputs.configured == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-codspeed
-      - uses: CodSpeedHQ/action@v3
-        if: steps.cs_config.outputs.configured == 'true'
+      - uses: CodSpeedHQ/action@v4
         with:
+          mode: instrumentation,memory
           run: |
             cargo codspeed build --bench nexus_validation \
               --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory,bench-integrated
             cargo codspeed run --bench nexus_validation
-          token: ${{ secrets.CODSPEED_TOKEN }}
+
+  codspeed-walltime:
+    name: "Criterion → CodSpeed.io (bare-metal walltime)"
+    runs-on: codspeed-macro
+    timeout-minutes: 75
+    if: ${{ vars.CODSPEED_WALLTIME_ENABLED == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codspeed-walltime-${{ runner.os }}-${{ runner.arch }}
+      - name: Install cargo-codspeed (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - uses: CodSpeedHQ/action@v4
+        with:
+          mode: walltime
+          run: |
+            cargo codspeed build --bench nexus_validation \
+              --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory,bench-integrated
+            cargo codspeed run --bench nexus_validation
 
   update-readme-svg:
     name: Update benchmark SVG in README
@@ -188,16 +248,13 @@ jobs:
 
   publish-dashboard:
     name: Publish public dashboard
-    needs: [bencher, codspeed]
-    # Only deploy on main, and tolerate the codspeed job being skipped (which
-    # happens before SETUP.md is fully complete or on fork PRs). `always()` runs
-    # this regardless of upstream skip; the `result == 'success'` check on
-    # bencher ensures we still gate on the wall-clock pipeline working.
+    needs: [bencher, codspeed, codspeed-walltime]
     if: |
       always() &&
       github.ref == 'refs/heads/main' &&
       needs.bencher.result == 'success' &&
-      (needs.codspeed.result == 'success' || needs.codspeed.result == 'skipped')
+      (needs.codspeed.result == 'success' || needs.codspeed.result == 'skipped') &&
+      (needs.codspeed-walltime.result == 'success' || needs.codspeed-walltime.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       pages: write
