@@ -39,7 +39,7 @@ Nexus is purpose-built for AI agent execution with native support for the failur
 ```
 +--------------------------------------------------------------+
 |                      NexusHypervisor                         |
-|  execute_tool · execute_tool_wasi · execute_tool_with_tokens |
+|  execute_tool · execute_tool_wasi[_with_config] · with_tokens|
 +--------------------------------------------------------------+
      |                  |                  |              |
      v                  v                  v              v
@@ -114,10 +114,33 @@ let tool = ToolDefinition::new("reader".into(), wasm_bytes)
 let result = hypervisor.execute_tool_wasi(tool, input, &[token]).await?;
 ```
 
-Run the end-to-end example:
+Or use the `WasiToolConfig` builder for multi-mount WASI execution:
+
+```rust
+use nexus::{WasiToolConfig, WasiMount, WasiAccess};
+
+let config = WasiToolConfig::new()
+    .with_mount(WasiMount {
+        guest_path: "/input".into(),
+        host_path: "/data/input".into(),
+        access: WasiAccess::ReadOnly,
+    })
+    .with_mount(WasiMount {
+        guest_path: "/output".into(),
+        host_path: "/data/output".into(),
+        access: WasiAccess::ReadWrite,
+    });
+
+let result = hypervisor
+    .execute_tool_wasi_with_config(tool, input, &tokens, config)
+    .await?;
+```
+
+Run the end-to-end examples:
 
 ```bash
 cargo run --example wasi_file_read
+cargo run --example wasi_capability_demo
 ```
 
 ### CLI
@@ -140,15 +163,17 @@ nexus demo --demo all
 | Feature | Status | Description |
 |---------|--------|-------------|
 | Snap-rollback | Shipped | Linear memory + globals + tables captured; sub-ms rollback at 1 MiB |
-| WASI execution | Shipped | WASI Preview 1 via `execute_tool_wasi`; capability tokens gate pre-opens |
-| Capability enforcement | Shipped | Ed25519-signed tokens with attenuation chains (`attenuate()`) |
+| WASI execution | Shipped | WASI Preview 1 via `execute_tool_wasi` / `execute_tool_wasi_with_config`; capability tokens gate pre-opens |
+| WASI mount builder | Shipped | `WasiToolConfig` builder API with `with_mount()`, `validate()`, `required_capabilities()` |
+| Capability enforcement | Shipped | Ed25519-signed tokens with attenuation chains (`attenuate()`); authorization before filesystem side effects |
 | Speculative execution | Shipped | `fork_and_race` runs N sandbox branches, picks the winner |
-| Execution replay | Shipped | Deterministic checkpoint trace with time-travel cursor |
+| Execution replay | Shipped | Deterministic checkpoint trace with time-travel cursor (`TraceReplay`) |
 | Failure taxonomy | Shipped | 15+ typed `FailureMode` variants with `requires_rollback()` |
-| Adaptive fuel budgeting | Shipped | Per-tool fuel profiles adjust from execution history |
+| Adaptive fuel budgeting | Shipped | Per-tool fuel profiles adjust from execution history (`FuelBudgetPolicy`) |
 | Recovery policies | Shipped | Static + instinct-based + optional LLM-backed (`ai-recovery` feature) |
 | Module cache | Shipped | SHA-256-keyed `Arc<Module>` reuse avoids recompilation |
 | Daemon mode | Shipped | `nexus-agentd` with Unix socket, hypervisor pool (Unix only) |
+| Live benchmarks | Shipped | Auto-updating SVG chart + [dashboard](https://adaptive-liquidity.github.io/Nexus/) from CI on every main merge |
 
 ### Roadmap
 
@@ -159,7 +184,6 @@ nexus demo --demo all
 | P1 | Security review / audit | Planned |
 | P2 | Sandbox pool with warm instances | Planned |
 | P2 | Concurrent sandbox density benchmarking | Planned |
-| P2 | Live benchmark dashboard + auto-updating SVG | Shipped |
 | P3 | Distributed snapshot synchronization | Research |
 | P3 | WASM call-stack capture | Research |
 | P3 | Zero-knowledge capability attestation | Research |
@@ -207,7 +231,7 @@ Monitors three dimensions during execution:
 ## Security Model
 
 1. **Ed25519-signed tokens** — every capability token is cryptographically signed
-2. **Validation before execution** — `execute_tool_with_tokens` / `execute_tool_wasi` validate all required capabilities before the guest runs
+2. **Authorization before side effects** — capability tokens are validated before any filesystem operations (directory creation, path resolution)
 3. **WASM isolation** — each sandbox operates in complete memory isolation
 4. **Attenuation chains** — tokens can be narrowed and re-delegated, never widened
 5. **Denial on failure** — missing, expired, revoked, or incorrectly-signed tokens produce `CapabilityDenied`
@@ -248,8 +272,9 @@ nexus/
 │   │   └── validator/       # HealthValidator, ErrorLog
 │   ├── sandbox/
 │   │   ├── wasm_runtime.rs  # WasmSandbox (pure-compute path)
-│   │   ├── wasi.rs          # WASI execution + WasiSandboxConfig
-│   │   ├── fuel_meter.rs    # Adaptive fuel budgeting
+│   │   ├── wasi.rs          # WASI execution + WasiToolConfig builder
+│   │   ├── fuel_meter.rs    # Adaptive fuel metering
+│   │   ├── fuel_budget.rs   # FuelBudgetPolicy (per-tool fuel profiles)
 │   │   └── wasm_memory.rs
 │   ├── snapshot/
 │   │   ├── manager.rs       # SnapshotManager, restore_memory, globals/tables
@@ -267,12 +292,17 @@ nexus/
 │   ├── instinct/            # Self-correction (opt-in)
 │   └── error.rs
 ├── examples/
-│   ├── wasi_file_read.rs    # End-to-end WASI + capability demo
-│   ├── capture_error.rs     # Failure-mode capture
-│   └── instinct_ab.rs       # Instinct A/B testing
-├── tests/                   # 176+ integration tests
+│   ├── wasi_file_read.rs        # End-to-end WASI + capability demo
+│   ├── wasi_capability_demo/    # Multi-file WASI capability + denial demo
+│   ├── capture_error.rs         # Failure-mode capture
+│   └── instinct_ab.rs           # Instinct A/B testing
+├── tests/                       # 184+ integration tests
 ├── benches/
-│   └── nexus_validation.rs  # Primitive + integrated benchmarks
+│   └── nexus_validation.rs      # Primitive + integrated benchmarks
+├── scripts/
+│   ├── generate_benchmark_svg.py # Auto-generate docs/benchmark-chart.svg from Criterion
+│   └── ai_rescore.py            # LLM-scored recovery-path validation
+├── dashboard/                    # Next.js benchmark dashboard (GitHub Pages)
 ├── Cargo.toml
 ├── BENCHMARKS.md
 └── LICENSE
