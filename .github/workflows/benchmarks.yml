@@ -3,8 +3,6 @@ name: Benchmarks
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   schedule:
     - cron: "0 3 * * 0"
   workflow_dispatch:
@@ -147,6 +145,38 @@ jobs:
               --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory,bench-integrated
             cargo codspeed run --bench nexus_validation
           token: ${{ secrets.CODSPEED_TOKEN }}
+
+  update-readme-svg:
+    name: Update benchmark SVG in README
+    needs: [bencher]
+    if: github.ref == 'refs/heads/main' && needs.bencher.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: criterion-evidence-${{ github.sha }}
+          path: benchmark_evidence
+
+      - name: Generate SVG from Criterion results
+        run: python3 scripts/generate_benchmark_svg.py benchmark_evidence/criterion_raw.log
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/benchmark-chart.svg
+          if git diff --cached --quiet; then
+            echo "No changes to benchmark SVG"
+          else
+            git commit -m "docs: auto-update benchmark chart from CI [skip ci]"
+            git push
+          fi
 
   publish-dashboard:
     name: Publish public dashboard
