@@ -263,6 +263,46 @@ export default function Dashboard({ measured, cited, nexusDataSource, benchmarks
         </>
       )}
 
+      <h2>Measurement Instruments</h2>
+      <div className="instruments">
+        <div className="instrument-card">
+          <div className="instrument-icon">{"⏱"}</div>
+          <div className="instrument-label">Wall-Clock</div>
+          <div className="instrument-detail">Criterion.rs on GitHub runners</div>
+          <div className="instrument-service">Bencher.dev</div>
+        </div>
+        <div className="instrument-card">
+          <div className="instrument-icon">{"⚙"}</div>
+          <div className="instrument-label">CPU Simulation</div>
+          <div className="instrument-detail">Deterministic instruction count</div>
+          <div className="instrument-service">CodSpeed.io</div>
+        </div>
+        <div className="instrument-card">
+          <div className="instrument-icon">{"📊"}</div>
+          <div className="instrument-label">Memory</div>
+          <div className="instrument-detail">Heap allocation tracking</div>
+          <div className="instrument-service">CodSpeed.io</div>
+        </div>
+        <div className="instrument-card">
+          <div className="instrument-icon">{"⚡"}</div>
+          <div className="instrument-label">Walltime</div>
+          <div className="instrument-detail">Bare-metal ARM64 runners</div>
+          <div className="instrument-service">CodSpeed.io</div>
+        </div>
+        <div className="instrument-card">
+          <div className="instrument-icon">{"📦"}</div>
+          <div className="instrument-label">Binary Size</div>
+          <div className="instrument-detail">Release build tracking</div>
+          <div className="instrument-service">Bencher.dev</div>
+        </div>
+        <div className="instrument-card">
+          <div className="instrument-icon">{"🚫"}</div>
+          <div className="instrument-label">PR Gating</div>
+          <div className="instrument-detail">Regression blocks merge</div>
+          <div className="instrument-service">Bencher + CodSpeed</div>
+        </div>
+      </div>
+
       <h2>Verification Links</h2>
       <div className="links">
         <a
@@ -270,24 +310,24 @@ export default function Dashboard({ measured, cited, nexusDataSource, benchmarks
           target="_blank"
           rel="noopener noreferrer"
         >
-          Bencher.dev (wall-clock)
+          Bencher.dev (wall-clock + binary size)
         </a>
         <a
           href={nexusDataSource.codspeed_project_url}
           target="_blank"
           rel="noopener noreferrer"
         >
-          CodSpeed.io (instruction-count)
+          CodSpeed.io (CPU + memory + walltime)
         </a>
         <a
-          href="https://github.com/Adaptive-Liquidity/Nexus/actions/workflows/benchmarks.yml"
+          href="https://github.com/adaptiveliquidity/Nexus/actions/workflows/benchmarks.yml"
           target="_blank"
           rel="noopener noreferrer"
         >
           CI Workflow Runs
         </a>
         <a
-          href="https://github.com/Adaptive-Liquidity/Nexus"
+          href="https://github.com/adaptiveliquidity/Nexus"
           target="_blank"
           rel="noopener noreferrer"
         >
@@ -298,10 +338,13 @@ export default function Dashboard({ measured, cited, nexusDataSource, benchmarks
       <div className="footer">
         <p>
           All Nexus numbers are measured on GitHub-hosted runners (ubuntu-24.04)
-          and published automatically via CI. Competitor numbers are from cited
-          third-party sources — each entry links to its original source for
-          independent verification. Benchmark artifacts are signed with Sigstore
-          for cryptographic attestation.
+          and published automatically via CI. Wall-clock latency tracked by
+          Bencher.dev with Student&apos;s t-test regression detection (99th
+          percentile, 2{"–"}64 sample window). CPU simulation, heap memory,
+          and bare-metal walltime tracked by CodSpeed.io. Binary sizes monitored
+          on every push. PRs are gated &mdash; statistical regressions block
+          merge. Competitor numbers are from cited third-party sources. Benchmark
+          artifacts are signed with Sigstore for cryptographic attestation.
         </p>
         <p style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}>
           Reproduce locally:{" "}

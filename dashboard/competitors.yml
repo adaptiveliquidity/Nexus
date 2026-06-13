@@ -54,4 +54,4 @@ cited:
 nexus_data_source:
   bencher_project: "nexus-ai"
   bencher_api: "https://api.bencher.dev/v0/projects/nexus-ai/perf"
-  codspeed_project_url: "https://codspeed.io/Adaptive-Liquidity/Nexus"
+  codspeed_project_url: "https://codspeed.io/adaptiveliquidity/Nexus"

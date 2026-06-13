@@ -131,6 +131,52 @@ tr:hover td {
   font-style: italic;
 }
 
+.instruments {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.instrument-card {
+  background: #0a0f0a;
+  border: 1px solid #1a2a1a;
+  border-radius: 8px;
+  padding: 1.25rem 1rem;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+
+.instrument-card:hover {
+  border-color: var(--color-cyan);
+}
+
+.instrument-icon {
+  font-size: 1.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.instrument-label {
+  color: var(--color-green);
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 0.25rem;
+}
+
+.instrument-detail {
+  color: #888;
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.instrument-service {
+  color: var(--color-cyan);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 .links {
   display: flex;
   gap: 1.5rem;

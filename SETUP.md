@@ -4,7 +4,7 @@ One-time setup steps for the third-party verifiable benchmark pipeline. All serv
 
 ## 1. Bencher.dev
 
-1. Go to [bencher.dev](https://bencher.dev) and sign in with the `Adaptive-Liquidity` GitHub org
+1. Go to [bencher.dev](https://bencher.dev) and sign in with the `adaptiveliquidity` GitHub org
 2. Create a new project with slug `nexus-ai`
 3. Generate an API token
 4. In GitHub repo Settings > Secrets and variables > Actions:
@@ -23,7 +23,7 @@ One-time setup steps for the third-party verifiable benchmark pipeline. All serv
 ## 2. CodSpeed.io
 
 1. Go to [codspeed.io](https://codspeed.io) and sign in with GitHub
-2. Install the CodSpeed GitHub App on `Adaptive-Liquidity/Nexus`
+2. Install the CodSpeed GitHub App on `adaptiveliquidity/Nexus`
 3. Authentication is handled via OIDC (no token needed for public repos)
    - Legacy: if OIDC fails, add secret `CODSPEED_TOKEN` from the CodSpeed dashboard
 

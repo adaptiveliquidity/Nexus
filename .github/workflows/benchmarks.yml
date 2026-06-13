@@ -143,7 +143,6 @@ jobs:
             --github-actions "${{ secrets.GITHUB_TOKEN }}" \
             --ci-only-on-alert \
             --ci-number "${{ github.event.number }}" \
-            --err \
             --error-on-alert \
             --file benchmark_evidence/criterion_raw.log
 

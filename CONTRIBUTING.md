@@ -13,7 +13,7 @@ Thank you for your interest in contributing to Nexus. This document provides gui
 ### Clone and Build
 
 ```bash
-git clone https://github.com/Adaptive-Liquidity/Nexus.git
+git clone https://github.com/adaptiveliquidity/Nexus.git
 cd Nexus/nexus
 cargo build --release
 ```

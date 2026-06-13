@@ -4,7 +4,7 @@
 
 Nexus provides microsecond-class cold starts, native snapshot/rollback, capability-gated WASI execution, and opt-in AI telemetry for self-correcting agents.
 
-[![Benchmarks](https://img.shields.io/badge/benchmarks-live-brightgreen)](https://adaptive-liquidity.github.io/Nexus/)
+[![Benchmarks](https://img.shields.io/badge/benchmarks-live-brightgreen)](https://adaptiveliquidity.github.io/Nexus/)
 
 [![Crates.io](https://img.shields.io/crates/v/nexus-ai)](https://crates.io/crates/nexus-ai)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -16,7 +16,7 @@ Nexus provides microsecond-class cold starts, native snapshot/rollback, capabili
   <img src="docs/benchmark-chart.svg" alt="Nexus benchmark results — log-scale horizontal bar chart showing cold start, rollback, execute, snapshot, and integrated benchmarks across 12 workloads" width="850"/>
 </p>
 
-> Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. Published to [Bencher.dev](https://bencher.dev/perf/nexus-ai) + [CodSpeed.io](https://codspeed.io/Adaptive-Liquidity/Nexus). [Live dashboard →](https://adaptive-liquidity.github.io/Nexus/)
+> Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. Six instruments: wall-clock latency, throughput, binary size ([Bencher.dev](https://bencher.dev/perf/nexus-ai)), CPU simulation, heap memory, bare-metal walltime ([CodSpeed.io](https://codspeed.io/adaptiveliquidity/Nexus)). PRs gated on regression. [Live dashboard →](https://adaptiveliquidity.github.io/Nexus/)
 
 ## What Problem Does Nexus Solve?
 
@@ -67,7 +67,7 @@ Nexus is purpose-built for AI agent execution with native support for the failur
 ### Installation
 
 ```bash
-git clone https://github.com/Adaptive-Liquidity/Nexus.git
+git clone https://github.com/adaptiveliquidity/Nexus.git
 cd Nexus
 cargo build --release
 ```
@@ -173,7 +173,7 @@ nexus demo --demo all
 | Recovery policies | Shipped | Static + instinct-based + optional LLM-backed (`ai-recovery` feature) |
 | Module cache | Shipped | SHA-256-keyed `Arc<Module>` reuse avoids recompilation |
 | Daemon mode | Shipped | `nexus-agentd` with Unix socket, hypervisor pool (Unix only) |
-| Live benchmarks | Shipped | Auto-updating SVG chart + [dashboard](https://adaptive-liquidity.github.io/Nexus/) from CI on every main merge |
+| Live benchmarks | Shipped | 6-instrument pipeline (wall-clock, throughput, binary size, CPU sim, memory, walltime) with PR gating + auto-updating [dashboard](https://adaptiveliquidity.github.io/Nexus/) |
 
 ### Roadmap
 
@@ -238,7 +238,7 @@ Monitors three dimensions during execution:
 
 ## Benchmark Results
 
-> See the [live dashboard](https://adaptive-liquidity.github.io/Nexus/) for the latest numbers and head-to-head competitor comparison with cited sources.
+> See the [live dashboard](https://adaptiveliquidity.github.io/Nexus/) for the latest numbers and head-to-head competitor comparison with cited sources.
 
 ### Competitor Feature Matrix
 
