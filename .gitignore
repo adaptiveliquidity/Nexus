@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+examples/wasi_capability_demo/guest/target/
 **/*.rs.bk
 
 # IDE files

@@ -1,0 +1,12 @@
+[package]
+name = "csv-reporter-guest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "csv_reporter"
+path = "src/main.rs"
+
+[profile.release]
+strip = false
+opt-level = "s"

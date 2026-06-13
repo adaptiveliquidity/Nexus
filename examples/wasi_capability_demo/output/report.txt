@@ -1,0 +1,8 @@
+=== Order Summary Report ===
+Items processed: 5
+  Widget A: 10 x $29.99 = $299.90
+  Widget B: 5 x $49.99 = $249.95
+  Gadget X: 20 x $9.99 = $199.80
+  Gadget Y: 3 x $199.99 = $599.97
+  Widget C: 15 x $14.99 = $224.85
+Total revenue: $1574.47
