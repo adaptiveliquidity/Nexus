@@ -10,10 +10,10 @@
 //! - Recording integration ([`NexusHypervisor::execute_tool_traced`](crate::hypervisor::NexusHypervisor::execute_tool_traced))
 //!   captures a checkpoint from the execution's already-captured state (memory
 //!   hash + exported globals). It is **opt-in**.
-//! - **Mid-execution fuel-interval checkpoints** (N checkpoints within one run)
-//!   require pausing the guest, which the current synchronous sandbox cannot do
-//!   without an async rewrite — that is **roadmap**. The replay engine is
-//!   interval-agnostic and works with any number of checkpoints.
+//! - Fuel-interval checkpoint recording is provided by
+//!   [`NexusHypervisor::record_trace`](crate::hypervisor::NexusHypervisor::record_trace)
+//!   through bounded deterministic re-execution. A lower-cost single-pass
+//!   paused recorder remains roadmap.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,8 +24,7 @@ use crate::snapshot::GlobalSnapshot;
 /// Configuration for trace recording.
 #[derive(Debug, Clone)]
 pub struct TraceConfig {
-    /// Fuel between mid-execution checkpoints (roadmap; honored by the replay
-    /// engine, not yet by the synchronous recorder).
+    /// Fuel between bounded re-execution checkpoints.
     pub checkpoint_interval_fuel: u64,
     /// Hard cap on stored checkpoints per trace.
     pub max_checkpoints: usize,

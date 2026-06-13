@@ -139,6 +139,19 @@ impl ExecutionResult {
     }
 }
 
+/// State captured after running a module up to a fuel cap.
+#[derive(Debug, Clone)]
+pub struct StepCapture {
+    /// Fuel consumed by the bounded execution attempt.
+    pub fuel_consumed: u64,
+    /// True when the guest finished before exhausting `fuel_cap`.
+    pub completed: bool,
+    /// Post-execution linear memory exported as `"memory"`, if present.
+    pub memory: Option<Vec<u8>>,
+    /// Post-execution exported globals.
+    pub globals: Vec<crate::snapshot::GlobalSnapshot>,
+}
+
 /// WASM Micro-Sandbox with fuel metering
 pub struct WasmSandbox {
     pub(crate) engine: Arc<Engine>,
@@ -163,6 +176,17 @@ enum ExecReply {
         globals: Vec<crate::snapshot::GlobalSnapshot>,
         tables: Vec<crate::snapshot::TableSnapshot>,
     },
+}
+
+enum StepReply {
+    Captured {
+        fuel_consumed: u64,
+        completed: bool,
+        memory: Option<Vec<u8>>,
+        globals: Vec<crate::snapshot::GlobalSnapshot>,
+    },
+    Degenerate,
+    Failed(String),
 }
 
 impl WasmSandbox {
@@ -211,6 +235,129 @@ impl WasmSandbox {
         };
 
         self.execute_module(module, args)
+    }
+
+    /// Re-run a deterministic module up to `fuel_cap` and capture post-run state.
+    ///
+    /// This is a debugging primitive for fuel-indexed replay. It mirrors the
+    /// normal worker-thread execution path, but returns the memory/global state
+    /// observed at the cap. It does not mutate normal execution semantics.
+    pub fn execute_to_fuel(
+        &self,
+        wasm_bytes: &[u8],
+        args: &[Vec<u8>],
+        fuel_cap: u64,
+    ) -> Result<StepCapture> {
+        let module = Module::from_binary(&self.engine, wasm_bytes)
+            .map_err(|e| NexusError::WasmError(format!("compile failed: {e}")))?;
+
+        let time_limit = self.config.time_limit;
+        let engine = self.engine.clone();
+        let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
+        let (tx, rx) = std::sync::mpsc::channel::<StepReply>();
+
+        let handle = std::thread::spawn(move || {
+            let mut store = Store::new(&engine, WasmState);
+            if let Err(e) = store.set_fuel(fuel_cap) {
+                let _ = tx.send(StepReply::Failed(format!("set_fuel failed: {e}")));
+                return;
+            }
+
+            let linker = Linker::new(&engine);
+            let instance = match linker.instantiate(&mut store, &module) {
+                Ok(i) => i,
+                Err(_) => {
+                    let _ = tx.send(StepReply::Degenerate);
+                    return;
+                }
+            };
+
+            if !input_data.is_empty() {
+                if let Some(mem) = instance.get_memory(&mut store, "memory") {
+                    let header_size = 4;
+                    let needed = header_size + input_data.len();
+                    let data = mem.data_mut(&mut store);
+                    if needed <= data.len() {
+                        let len_bytes = (input_data.len() as u32).to_le_bytes();
+                        data[..4].copy_from_slice(&len_bytes);
+                        data[4..4 + input_data.len()].copy_from_slice(&input_data);
+                    }
+                }
+            }
+
+            let start_func = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
+                Ok(f) => f,
+                Err(_) => match instance.get_typed_func::<(), ()>(&mut store, "main") {
+                    Ok(f) => f,
+                    Err(_) => {
+                        let _ = tx.send(StepReply::Degenerate);
+                        return;
+                    }
+                },
+            };
+
+            let call_result = start_func.call(&mut store, ());
+            let completed = match &call_result {
+                Ok(_) => true,
+                Err(e) => !matches!(
+                    FailureMode::from_anyhow_error(e),
+                    Some(FailureMode::FuelExhausted { .. })
+                ),
+            };
+            let fuel_remaining = store.get_fuel().unwrap_or(0);
+            let fuel_consumed = fuel_cap.saturating_sub(fuel_remaining);
+            let memory = instance
+                .get_memory(&mut store, "memory")
+                .map(|m| m.data(&store).to_vec());
+            let globals = WasmSandbox::capture_globals(&instance, &mut store);
+
+            let _ = tx.send(StepReply::Captured {
+                fuel_consumed,
+                completed,
+                memory,
+                globals,
+            });
+        });
+
+        match rx.recv_timeout(time_limit) {
+            Ok(StepReply::Captured {
+                fuel_consumed,
+                completed,
+                memory,
+                globals,
+            }) => {
+                let _ = handle.join();
+                Ok(StepCapture {
+                    fuel_consumed,
+                    completed,
+                    memory,
+                    globals,
+                })
+            }
+            Ok(StepReply::Degenerate) => {
+                let _ = handle.join();
+                Ok(StepCapture {
+                    fuel_consumed: 0,
+                    completed: true,
+                    memory: None,
+                    globals: Vec::new(),
+                })
+            }
+            Ok(StepReply::Failed(message)) => {
+                let _ = handle.join();
+                Err(NexusError::WasmError(message))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                drop(handle);
+                Err(NexusError::Timeout(time_limit.as_millis() as u64))
+            }
+            Err(_) => {
+                let _ = handle.join();
+                Err(NexusError::WasmError(
+                    "worker thread disconnected before capturing step".to_string(),
+                ))
+            }
+        }
     }
 
     /// Execute a precompiled `Module`. Skips `Module::from_binary`,

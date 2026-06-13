@@ -40,8 +40,11 @@ fn main() -> anyhow::Result<()> {
         "demo-orchestrator",
         Duration::from_secs(60),
     )?;
-    println!("    Issued ReadFile token (id={}, chain_depth={})\n",
-        &token.id.to_string()[..8], token.chain_depth);
+    println!(
+        "    Issued ReadFile token (id={}, chain_depth={})\n",
+        &token.id.to_string()[..8],
+        token.chain_depth
+    );
 
     // --- Step 3: Define a WASI-aware tool ---
     // This module imports proc_exit from WASI preview 1 — it will only
@@ -62,8 +65,11 @@ fn main() -> anyhow::Result<()> {
 
     let tool = ToolDefinition::new("wasi_file_reader".into(), wasm)
         .with_capabilities(vec![Capability::ReadFile(tmp_path.clone())]);
-    println!("[3] Tool defined: '{}' (requires ReadFile on {})\n",
-        tool.name, tmp_path.display());
+    println!(
+        "[3] Tool defined: '{}' (requires ReadFile on {})\n",
+        tool.name,
+        tmp_path.display()
+    );
 
     // --- Step 4: Execute through the WASI path ---
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -71,9 +77,8 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     println!("[4] Executing with capability token...");
-    let output = rt.block_on(
-        hypervisor.execute_tool_wasi(tool, serde_json::json!({}), &[token])
-    )?;
+    let output =
+        rt.block_on(hypervisor.execute_tool_wasi(tool, serde_json::json!({}), &[token]))?;
 
     // --- Step 5: Report result ---
     println!("\n[5] Result");
@@ -87,13 +92,14 @@ fn main() -> anyhow::Result<()> {
 
     // --- Bonus: Show what happens WITHOUT a valid token ---
     println!("[bonus] Attempting execution without required token...");
-    let tool2 = ToolDefinition::new("denied_tool".into(), wat::parse_str(
-        r#"(module (memory (export "memory") 1) (func (export "_start")))"#,
-    )?)
+    let tool2 = ToolDefinition::new(
+        "denied_tool".into(),
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)?,
+    )
     .with_capabilities(vec![Capability::ReadFile(tmp_path)]);
 
     let denied = rt.block_on(
-        hypervisor.execute_tool_wasi(tool2, serde_json::json!({}), &[]) // no tokens
+        hypervisor.execute_tool_wasi(tool2, serde_json::json!({}), &[]), // no tokens
     );
     match denied {
         Err(e) => println!("    Correctly denied: {e}"),

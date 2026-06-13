@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
-use crate::sandbox::{FuelBudgetPolicy, FuelProfile, SandboxConfig, WasmSandbox};
+use crate::sandbox::{FuelBudgetPolicy, FuelProfile, SandboxConfig, WasiToolConfig, WasmSandbox};
 use crate::security::{Capability, CapabilityManager};
 use crate::snapshot::{
     ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
@@ -324,17 +324,105 @@ impl NexusHypervisor {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
         })?;
 
-        let wasi_config = crate::sandbox::WasiSandboxConfig::from_capabilities(
-            &tool.required_capabilities,
-        );
+        let wasi_config =
+            crate::sandbox::WasiSandboxConfig::from_capabilities(&tool.required_capabilities);
 
         self.health_validator.start_execution();
 
-        let exec_result = self
-            .sandbox
-            .read()
+        let exec_result = self.sandbox.read().unwrap().execute_wasi(
+            &tool.wasm_bytes,
+            &[input_bytes],
+            &wasi_config,
+        )?;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let fuel_consumed = exec_result.fuel_consumed;
+
+        self.fuel_policy
+            .write()
             .unwrap()
-            .execute_wasi(&tool.wasm_bytes, &[input_bytes], &wasi_config)?;
+            .record(&tool.name, fuel_consumed);
+
+        let resources = self.health_validator.current_resources();
+
+        if !exec_result.success {
+            let mode = exec_result
+                .failure_mode
+                .clone()
+                .unwrap_or_else(|| FailureMode::HostError("unknown WASI error".into()));
+
+            let record = ExecutionRecord::failure(
+                tool.name.clone(),
+                crate::hypervisor::validator::error_log::ErrorLog::new(
+                    tool.name.clone(),
+                    mode.clone(),
+                    resources,
+                ),
+                duration_ms,
+                fuel_consumed,
+            );
+            self.telemetry.record_failure(record);
+
+            Ok(ToolOutput {
+                success: false,
+                result: None,
+                error: Some(mode.describe()),
+                rollback_performed: false,
+                execution_time_ms: duration_ms,
+                fuel_consumed,
+                error_log: None,
+            })
+        } else {
+            let record =
+                ExecutionRecord::success(tool.name.clone(), duration_ms, fuel_consumed, resources);
+            self.telemetry.record_success(record);
+
+            Ok(ToolOutput {
+                success: true,
+                result: exec_result.return_value,
+                error: None,
+                rollback_performed: false,
+                execution_time_ms: duration_ms,
+                fuel_consumed,
+                error_log: None,
+            })
+        }
+    }
+
+    /// Execute a WASI tool with explicit host-to-guest mount aliases.
+    ///
+    /// Mounts are validated and converted into required capabilities before
+    /// the guest starts. This is the public path used by proof-grade WASI
+    /// demos and benchmark runners so filesystem access is always derived
+    /// from caller-held capability tokens rather than ad hoc preopens.
+    pub async fn execute_tool_wasi_with_config(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+        wasi_tool_config: WasiToolConfig,
+    ) -> Result<ToolOutput> {
+        let start = Instant::now();
+        let validated_config = wasi_tool_config.validate()?;
+
+        let mut required_capabilities = tool.required_capabilities.clone();
+        required_capabilities.extend(validated_config.required_capabilities.clone());
+        if !required_capabilities.is_empty() {
+            let manager = self.capability_manager.read().unwrap();
+            manager.authorize(caller_tokens, &required_capabilities)?;
+        }
+
+        let input_bytes = serde_json::to_vec(&input).map_err(|e| {
+            NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
+        })?;
+
+        self.health_validator.start_execution();
+
+        let exec_result = self.sandbox.read().unwrap().execute_wasi(
+            &tool.wasm_bytes,
+            &[input_bytes],
+            &validated_config.sandbox_config,
+        )?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let fuel_consumed = exec_result.fuel_consumed;
@@ -708,6 +796,54 @@ impl NexusHypervisor {
             );
         }
         Ok((output, trace))
+    }
+
+    /// Record fuel-indexed checkpoints by bounded deterministic re-execution.
+    ///
+    /// This is an opt-in debugging primitive. It re-runs the same module with
+    /// fuel caps of `interval`, `2 * interval`, ... until the guest completes
+    /// or `max_checkpoints` is reached, then returns the captured timeline.
+    ///
+    /// Anti-overclaim: this is O(N) re-execution over N checkpoints. A
+    /// single-pass paused execution recorder remains a roadmap optimization.
+    pub async fn record_trace(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        config: &crate::telemetry::TraceConfig,
+    ) -> Result<crate::telemetry::ExecutionTrace> {
+        let input_bytes = serde_json::to_vec(&input)
+            .map_err(|e| NexusError::SerializationError(format!("trace input: {e}")))?;
+        let mut trace = crate::telemetry::ExecutionTrace::new(tool.name.clone());
+        let interval = config.checkpoint_interval_fuel.max(1);
+        let sandbox = self.sandbox.read().unwrap();
+
+        for k in 1..=(config.max_checkpoints as u64) {
+            let cap = interval.saturating_mul(k);
+            let step = sandbox.execute_to_fuel(
+                &tool.wasm_bytes,
+                std::slice::from_ref(&input_bytes),
+                cap,
+            )?;
+            if let Some(mem) = &step.memory {
+                let memory_hash = if config.capture_memory {
+                    crate::telemetry::hash_memory(mem)
+                } else {
+                    String::new()
+                };
+                trace.push(
+                    step.fuel_consumed,
+                    memory_hash,
+                    step.globals.clone(),
+                    config.max_checkpoints,
+                );
+            }
+            if step.completed {
+                break;
+            }
+        }
+
+        Ok(trace)
     }
 
     /// Read-only access to the attached instinct store (Phase B).
