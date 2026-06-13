@@ -7,7 +7,7 @@
 > **[adaptiveliquidity.github.io/Nexus](https://adaptiveliquidity.github.io/Nexus/)**
 
 Numbers are measured on GitHub-hosted runners (ubuntu-24.04) and published automatically to:
-- [Bencher.dev](https://bencher.dev/perf/nexus-ai) — wall-clock latency, throughput, and binary size tracking with Student's t-test regression detection
+- [Bencher.dev](https://bencher.dev/perf/nexus-ai) — wall-clock latency and binary size tracking with Student's t-test regression detection
 - [CodSpeed.io](https://codspeed.io/adaptiveliquidity/Nexus) — deterministic CPU simulation (instruction count), heap memory tracking, and bare-metal walltime
 
 PRs are gated by both services — statistical regressions block merge. All benchmark artifacts are cryptographically signed with [Sigstore](https://www.sigstore.dev/) via GitHub OIDC for provenance attestation.
@@ -30,7 +30,7 @@ The following claims appeared in earlier versions of this document and have been
 
 The benchmark pipeline uses two independent third-party services across five CI jobs:
 
-1. **Bencher.dev** — receives native Criterion output via the `rust_criterion` adapter, tracks wall-clock latency (upper boundary) and throughput (lower boundary) with Student's t-test at 99th percentile. Also tracks release binary sizes (`nexus`, `nexus-agentd`) with percentage-based thresholds. PR branches clone thresholds from their base branch and fail on regression (`--error-on-alert`). Stale PR branches are auto-archived on close.
+1. **Bencher.dev** — receives native Criterion output via the `rust_criterion` adapter, tracks wall-clock latency (upper boundary) with Student's t-test at 99th percentile (2–64 sample window). Also tracks release binary sizes (`nexus`, `nexus-agentd`) with percentage-based thresholds (10% ceiling). PR branches clone thresholds from their base branch and fail on regression (`--error-on-alert`). Stale PR branches are auto-archived on close.
 2. **CodSpeed.io** — three measurement modes via `codspeed-criterion-compat` v4:
    - **CPU simulation** (cachegrind): deterministic instruction counts, immune to noisy-neighbor effects
    - **Memory**: heap allocation tracking alongside CPU simulation

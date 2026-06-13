@@ -13,7 +13,7 @@ One-time setup steps for the third-party verifiable benchmark pipeline. All serv
 
 ### What's configured
 
-- **Measures**: latency (ns, upper boundary) + throughput (bytes/s, lower boundary)
+- **Measures**: latency (ns, upper boundary) + file-size (bytes, 10% ceiling)
 - **Threshold**: Student's t-test at 99th percentile, 2-64 sample rolling window
 - **Testbed**: `ubuntu-24.04-github` (GitHub-hosted runner)
 - **PR gating**: PRs compare against base branch; CI fails on statistical regression (`--error-on-alert`)

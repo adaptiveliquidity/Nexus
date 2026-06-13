@@ -16,7 +16,7 @@ Nexus provides microsecond-class cold starts, native snapshot/rollback, capabili
   <img src="docs/benchmark-chart.svg" alt="Nexus benchmark results — log-scale horizontal bar chart showing cold start, rollback, execute, snapshot, and integrated benchmarks across 12 workloads" width="850"/>
 </p>
 
-> Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. Six instruments: wall-clock latency, throughput, binary size ([Bencher.dev](https://bencher.dev/perf/nexus-ai)), CPU simulation, heap memory, bare-metal walltime ([CodSpeed.io](https://codspeed.io/adaptiveliquidity/Nexus)). PRs gated on regression. [Live dashboard →](https://adaptiveliquidity.github.io/Nexus/)
+> Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. Five instruments: wall-clock latency, binary size ([Bencher.dev](https://bencher.dev/perf/nexus-ai)), CPU simulation, heap memory, bare-metal walltime ([CodSpeed.io](https://codspeed.io/adaptiveliquidity/Nexus)). PRs gated on regression. [Live dashboard →](https://adaptiveliquidity.github.io/Nexus/)
 
 ## What Problem Does Nexus Solve?
 
@@ -173,7 +173,7 @@ nexus demo --demo all
 | Recovery policies | Shipped | Static + instinct-based + optional LLM-backed (`ai-recovery` feature) |
 | Module cache | Shipped | SHA-256-keyed `Arc<Module>` reuse avoids recompilation |
 | Daemon mode | Shipped | `nexus-agentd` with Unix socket, hypervisor pool (Unix only) |
-| Live benchmarks | Shipped | 6-instrument pipeline (wall-clock, throughput, binary size, CPU sim, memory, walltime) with PR gating + auto-updating [dashboard](https://adaptiveliquidity.github.io/Nexus/) |
+| Live benchmarks | Shipped | 5-instrument pipeline (wall-clock, binary size, CPU sim, memory, walltime) with PR gating + auto-updating [dashboard](https://adaptiveliquidity.github.io/Nexus/) |
 
 ### Roadmap
 
