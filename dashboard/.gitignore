@@ -11,3 +11,6 @@ out/
 # Build cache
 .turbo/
 *.tsbuildinfo
+
+# CI-generated benchmark data (produced by scripts/criterion_to_json.py)
+benchmark-data.json

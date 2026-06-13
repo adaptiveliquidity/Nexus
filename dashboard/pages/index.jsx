@@ -1,4 +1,3 @@
-import { useState, useEffect } from "react";
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
@@ -13,44 +12,81 @@ import {
   Cell,
 } from "recharts";
 
-const BENCHER_API =
-  "https://api.bencher.dev/v0/projects/nexus-ai/perf?branches=6d1af57e-72a2-4097-a70e-899226e3d552&testbeds=ab344f8e-8eee-4988-a6aa-353dcfdcc6af&benchmarks=6e3fbe29-b6b9-4ae2-b52c-1695dfdc9f0e&measures=8ee69648-77ad-4739-b3b4-28e69d6e2744";
-
 const GREEN = "#9cff3b";
 const CYAN = "#00d8ff";
 const VOID = "#020404";
 
+const GROUP_LABELS = {
+  cold_start: "Cold Start",
+  snapshot_create: "Snapshot Create",
+  snapshot_rollback: "Snapshot Rollback",
+  execute_tool: "Execute Tool",
+  execute_tool_real_memory: "Execute Tool (Real Memory)",
+  integrated_capability_checked: "Integrated — Capability Check",
+  integrated_input_fed: "Integrated — Input Fed",
+  integrated_precompiled: "Integrated — Precompiled",
+  integrated_full_stack: "Integrated — Full Stack",
+};
+
+const BENCH_LABELS = {
+  "cold_start/sandbox_new": "Sandbox init",
+  "cold_start/hypervisor_new": "Hypervisor init",
+  "snapshot_create/size/1MiB": "1 MiB",
+  "snapshot_create/size/10MiB": "10 MiB",
+  "snapshot_create/size/100MiB": "100 MiB",
+  "snapshot_rollback/size/1MiB": "1 MiB",
+  "snapshot_rollback/size/10MiB": "10 MiB",
+  "snapshot_rollback/size/100MiB": "100 MiB",
+  "execute_tool/trivial_wasm_start": "Trivial WASM start",
+  "execute_tool_real_memory/size/1MiB": "1 MiB",
+  "execute_tool_real_memory/size/10MiB": "10 MiB",
+  "execute_tool_real_memory/size/100MiB": "100 MiB",
+  "integrated_capability_checked/with_valid_token": "Valid token",
+  "integrated_input_fed/json_input": "JSON input",
+  "integrated_precompiled/primitive_recompile": "Recompile",
+  "integrated_precompiled/cached_precompiled": "Cached",
+  "integrated_full_stack/full_path": "Full path",
+};
+
 function formatMs(ms) {
-  if (ms < 1) return `${(ms * 1000).toFixed(0)} µs`;
-  if (ms < 1000) return `${ms.toFixed(1)} ms`;
+  if (ms < 0.001) return `${(ms * 1_000_000).toFixed(0)} ns`;
+  if (ms < 1) return `${(ms * 1000).toFixed(1)} µs`;
+  if (ms < 1000) return `${ms.toFixed(2)} ms`;
   return `${(ms / 1000).toFixed(1)} s`;
 }
 
-export default function Dashboard({ measured, cited, nexusDataSource }) {
-  const [nexusLive, setNexusLive] = useState(null);
-  const [fetchError, setFetchError] = useState(null);
+function groupBenchmarks(benchmarks) {
+  const groups = {};
+  const ORDER = [
+    "cold_start",
+    "snapshot_create",
+    "snapshot_rollback",
+    "execute_tool",
+    "execute_tool_real_memory",
+  ];
+  for (const b of benchmarks) {
+    const g = b.group;
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(b);
+  }
+  const sorted = [];
+  for (const key of ORDER) {
+    if (groups[key]) {
+      sorted.push([key, groups[key]]);
+      delete groups[key];
+    }
+  }
+  for (const [key, items] of Object.entries(groups)) {
+    sorted.push([key, items]);
+  }
+  return sorted;
+}
 
-  useEffect(() => {
-    fetch(BENCHER_API)
-      .then((r) => {
-        if (!r.ok) throw new Error(`Bencher API ${r.status}`);
-        return r.json();
-      })
-      .then((data) => {
-        if (data && data.length > 0) {
-          const latest = data[data.length - 1];
-          if (latest.metric && latest.metric.value) {
-            setNexusLive({
-              cold_start_ms: latest.metric.value / 1_000_000,
-              timestamp: latest.start_time,
-            });
-          }
-        }
-      })
-      .catch((err) => setFetchError(err.message));
-  }, []);
-
-  const nexusColdStartMs = nexusLive ? nexusLive.cold_start_ms : 0.023;
+export default function Dashboard({ measured, cited, nexusDataSource, benchmarks }) {
+  const coldStart = benchmarks.find((b) => b.name === "cold_start/sandbox_new");
+  const snapshotCreate1 = benchmarks.find((b) => b.name === "snapshot_create/size/1MiB");
+  const rollback1 = benchmarks.find((b) => b.name === "snapshot_rollback/size/1MiB");
+  const nexusColdStartMs = coldStart ? coldStart.ms.median : 0.023;
 
   const allCompetitors = [...(cited || [])];
   const chartData = [
@@ -60,12 +96,19 @@ export default function Dashboard({ measured, cited, nexusDataSource }) {
       .map((c) => ({ name: c.name, ms: c.cold_start_ms, isNexus: false })),
   ].sort((a, b) => a.ms - b.ms);
 
+  const grouped = groupBenchmarks(benchmarks);
+  const hasBenchmarks = benchmarks.length > 0;
+
   return (
     <div className="container">
       <h1>Nexus Benchmark Dashboard</h1>
       <p className="subtitle">
         Third-party verified performance data.{" "}
-        <span className="badge badge-live">LIVE from Bencher.dev</span>{" "}
+        {hasBenchmarks ? (
+          <span className="badge badge-live">LIVE from CI</span>
+        ) : (
+          <span className="badge badge-cited">Awaiting CI data</span>
+        )}{" "}
         <span className="badge badge-cited">Competitor data cited</span>
       </p>
 
@@ -107,20 +150,9 @@ export default function Dashboard({ measured, cited, nexusDataSource }) {
             </Bar>
           </BarChart>
         </ResponsiveContainer>
-        {nexusLive && (
-          <p style={{ fontSize: "0.8rem", color: "#666", marginTop: "0.5rem" }}>
-            Nexus value from Bencher.dev (last updated:{" "}
-            {new Date(nexusLive.timestamp).toLocaleDateString()})
-          </p>
-        )}
-        {fetchError && (
-          <p style={{ fontSize: "0.8rem", color: "#aa4444", marginTop: "0.5rem" }}>
-            Could not fetch live data: {fetchError}. Showing default value.
-          </p>
-        )}
       </div>
 
-      <h2>Full Comparison Table</h2>
+      <h2>Competitor Comparison</h2>
       <table>
         <thead>
           <tr>
@@ -133,12 +165,12 @@ export default function Dashboard({ measured, cited, nexusDataSource }) {
         </thead>
         <tbody>
           <tr className="nexus-row">
-            <td>Nexus {nexusLive ? "(live)" : "(default)"}</td>
+            <td>Nexus {hasBenchmarks ? "(live)" : "(default)"}</td>
             <td>{formatMs(nexusColdStartMs)}</td>
-            <td>2.92 ms @ 1 MiB</td>
-            <td>&lt;1 ms @ 1 MiB</td>
+            <td>{snapshotCreate1 ? `${formatMs(snapshotCreate1.ms.median)} @ 1 MiB` : "—"}</td>
+            <td>{rollback1 ? `${formatMs(rollback1.ms.median)} @ 1 MiB` : "—"}</td>
             <td>
-              <span className="badge badge-live">Bencher.dev</span>
+              <span className="badge badge-live">CI</span>
             </td>
           </tr>
           {measured && measured.length > 0 && (
@@ -188,6 +220,43 @@ export default function Dashboard({ measured, cited, nexusDataSource }) {
           ))}
         </tbody>
       </table>
+
+      {hasBenchmarks && (
+        <>
+          <h2>Full Benchmark Suite</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Benchmark</th>
+                <th>Median</th>
+                <th>Range (low–high)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grouped.map(([group, items]) => (
+                <>
+                  <tr key={`header-${group}`} className="section-header">
+                    <td colSpan={3}>
+                      <span className="badge badge-live">
+                        {GROUP_LABELS[group] || group}
+                      </span>
+                    </td>
+                  </tr>
+                  {items.map((b) => (
+                    <tr key={b.name} className="nexus-row">
+                      <td>{BENCH_LABELS[b.name] || b.benchmark}</td>
+                      <td>{formatMs(b.ms.median)}</td>
+                      <td style={{ color: "#888", fontWeight: 400, fontSize: "0.9rem" }}>
+                        {formatMs(b.ms.low)} – {formatMs(b.ms.high)}
+                      </td>
+                    </tr>
+                  ))}
+                </>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
 
       <h2>Verification Links</h2>
       <div className="links">
@@ -243,11 +312,22 @@ export async function getStaticProps() {
   const fileContents = fs.readFileSync(filePath, "utf8");
   const data = yaml.load(fileContents);
 
+  let benchmarks = [];
+  const benchPath = path.join(process.cwd(), "benchmark-data.json");
+  try {
+    const benchContents = fs.readFileSync(benchPath, "utf8");
+    const benchData = JSON.parse(benchContents);
+    benchmarks = benchData.benchmarks || [];
+  } catch {
+    // benchmark-data.json is generated by CI; missing during local dev
+  }
+
   return {
     props: {
       measured: data.measured || [],
       cited: data.cited || [],
-      nexusDataSource: data.nexus_data_source || data.nexus_data_source,
+      nexusDataSource: data.nexus_data_source || {},
+      benchmarks,
     },
   };
 }
