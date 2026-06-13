@@ -15,7 +15,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "dashboard/**"
+      - "*.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "dashboard/**"
+      - "*.md"
 
 jobs:
   test:
