@@ -65,7 +65,7 @@ def build_prompt(index: list) -> str:
 def call_anthropic(prompt: str) -> tuple[str, str]:
     import anthropic
     client = anthropic.Anthropic()
-    model = os.environ.get("NEXUS_RESCORE_MODEL", "claude-3-5-sonnet-latest")
+    model = os.environ.get("NEXUS_RESCORE_MODEL", "claude-sonnet-4-5-20250514")
     resp = client.messages.create(
         model=model,
         max_tokens=4096,
