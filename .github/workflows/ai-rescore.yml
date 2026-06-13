@@ -11,7 +11,8 @@
 name: AI rescore
 
 on:
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - "src/hypervisor/**"
       - "src/instinct/**"

@@ -6,10 +6,9 @@
 #   3. bash validate.sh 0 3 (Phase 0 specs + Phase 3 capture w/ AI verdict gate).
 #   4. clippy -D warnings + cargo audit on the lib + bins.
 #
-# The "AI rescore on PRs that touch the recovery path" step is intentionally
-# a separate workflow (.github/workflows/ai-rescore.yml) because it costs
-# real LLM tokens. It runs only on PRs that change src/hypervisor/** or
-# src/instinct/**.
+# The "AI rescore" step is a separate workflow (.github/workflows/ai-rescore.yml)
+# that runs only on merge to main when recovery-path files change. It costs
+# real LLM tokens so it does not run on PRs.
 
 name: CI
 
