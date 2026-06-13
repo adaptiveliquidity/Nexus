@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
@@ -63,6 +64,10 @@ function groupBenchmarks(benchmarks) {
     "snapshot_rollback",
     "execute_tool",
     "execute_tool_real_memory",
+    "integrated_capability_checked",
+    "integrated_input_fed",
+    "integrated_precompiled",
+    "integrated_full_stack",
   ];
   for (const b of benchmarks) {
     const g = b.group;
@@ -234,8 +239,8 @@ export default function Dashboard({ measured, cited, nexusDataSource, benchmarks
             </thead>
             <tbody>
               {grouped.map(([group, items]) => (
-                <>
-                  <tr key={`header-${group}`} className="section-header">
+                <Fragment key={`group-${group}`}>
+                  <tr className="section-header">
                     <td colSpan={3}>
                       <span className="badge badge-live">
                         {GROUP_LABELS[group] || group}
@@ -251,7 +256,7 @@ export default function Dashboard({ measured, cited, nexusDataSource, benchmarks
                       </td>
                     </tr>
                   ))}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>

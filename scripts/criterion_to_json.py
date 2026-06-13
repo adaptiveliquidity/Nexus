@@ -9,16 +9,9 @@ BENCH_RE = re.compile(
     r"^(\S+)(?:[ \t]+|\s*\n\s+)time:\s+\[([^\]]+)\]",
     re.MULTILINE,
 )
-TIME_RE = re.compile(r"([\d.]+)\s+(ns|µs|µs|us|ms|s)")
+TIME_RE = re.compile(r"([\d.]+)\s+(ns|µs|us|ms|s)")
 
-UNIT_TO_NS = {"ns": 1, "µs": 1_000, "us": 1_000, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
-
-
-def parse_time(s: str) -> float | None:
-    m = TIME_RE.search(s)
-    if not m:
-        return None
-    return float(m.group(1)) * UNIT_TO_NS[m.group(2)]
+UNIT_TO_NS = {"ns": 1, "µs": 1_000, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
 
 
 def parse_criterion_log(text: str) -> list[dict]:
@@ -58,7 +51,8 @@ def main():
 
     results = parse_criterion_log(text)
     if not results:
-        print("WARNING: no benchmarks parsed", file=sys.stderr)
+        print("ERROR: no benchmarks parsed from input", file=sys.stderr)
+        sys.exit(1)
 
     output = sys.argv[2] if len(sys.argv) > 2 else "-"
     data = {"benchmarks": results, "count": len(results)}
