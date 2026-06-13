@@ -86,11 +86,26 @@ async fn missing_read_capability_rejects_mount() {
     let input = demo_dir().join("input");
     let output = tempfile::tempdir().unwrap();
 
+    let tokens_without_input_read = vec![
+        hv.issue_token(
+            Capability::ReadFile(output.path().canonicalize().unwrap()),
+            "test",
+            Duration::from_secs(60),
+        )
+        .unwrap(),
+        hv.issue_token(
+            Capability::WriteFile(output.path().canonicalize().unwrap()),
+            "test",
+            Duration::from_secs(60),
+        )
+        .unwrap(),
+    ];
+
     let result = hv
         .execute_tool_wasi_with_config(
             csv_tool(),
             serde_json::json!({}),
-            &[],
+            &tokens_without_input_read,
             tool_config(&input, output.path()),
         )
         .await;

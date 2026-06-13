@@ -92,6 +92,44 @@ impl WasiToolConfig {
         self
     }
 
+    /// Derive required capabilities without filesystem side effects.
+    ///
+    /// Used by the hypervisor to authorize before `validate()` touches the
+    /// filesystem (which creates missing mount directories).
+    pub fn required_capabilities(&self) -> Result<Vec<Capability>> {
+        let mut caps = Vec::with_capacity(self.mounts.len() * 2);
+        let mut guest_paths = HashSet::new();
+        let mut normalized_guests: Vec<String> = Vec::new();
+
+        for mount in &self.mounts {
+            let guest_path = normalize_guest_path(&mount.guest_path)?;
+            if !guest_paths.insert(guest_path.clone()) {
+                return Err(NexusError::ConfigError(format!(
+                    "duplicate WASI guest path: {guest_path}"
+                )));
+            }
+            for existing in &normalized_guests {
+                if guest_path_overlaps(existing, &guest_path) {
+                    return Err(NexusError::ConfigError(format!(
+                        "overlapping WASI guest paths: {existing} and {guest_path}"
+                    )));
+                }
+            }
+            normalized_guests.push(guest_path.clone());
+
+            let host_path = if mount.host_path.exists() {
+                std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone())
+            } else {
+                mount.host_path.clone()
+            };
+            caps.push(Capability::ReadFile(host_path.clone()));
+            if matches!(mount.access, WasiAccess::ReadWrite) {
+                caps.push(Capability::WriteFile(host_path));
+            }
+        }
+        Ok(caps)
+    }
+
     pub fn validate(&self) -> Result<ValidatedWasiToolConfig> {
         let mut preopens = Vec::with_capacity(self.mounts.len());
         let mut required_capabilities = Vec::with_capacity(self.mounts.len() * 2);

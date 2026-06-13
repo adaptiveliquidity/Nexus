@@ -403,14 +403,15 @@ impl NexusHypervisor {
         wasi_tool_config: WasiToolConfig,
     ) -> Result<ToolOutput> {
         let start = Instant::now();
-        let validated_config = wasi_tool_config.validate()?;
 
         let mut required_capabilities = tool.required_capabilities.clone();
-        required_capabilities.extend(validated_config.required_capabilities.clone());
+        required_capabilities.extend(wasi_tool_config.required_capabilities()?);
         if !required_capabilities.is_empty() {
             let manager = self.capability_manager.read().unwrap();
             manager.authorize(caller_tokens, &required_capabilities)?;
         }
+
+        let validated_config = wasi_tool_config.validate()?;
 
         let input_bytes = serde_json::to_vec(&input).map_err(|e| {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
@@ -803,6 +804,11 @@ impl NexusHypervisor {
     /// This is an opt-in debugging primitive. It re-runs the same module with
     /// fuel caps of `interval`, `2 * interval`, ... until the guest completes
     /// or `max_checkpoints` is reached, then returns the captured timeline.
+    ///
+    /// The sandbox read lock is held for the entire trace to guarantee the
+    /// engine configuration is stable across all re-executions. This is
+    /// acceptable because `record_trace` is an offline debugging primitive,
+    /// not a hot-path method.
     ///
     /// Anti-overclaim: this is O(N) re-execution over N checkpoints. A
     /// single-pass paused execution recorder remains a roadmap optimization.

@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use nexus::{
-    Capability, HypervisorConfig, NexusHypervisor, ToolDefinition, WasiAccess, WasiToolConfig,
+    Capability, HypervisorConfig, NexusError, NexusHypervisor, ToolDefinition, WasiAccess,
+    WasiToolConfig,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -112,8 +113,8 @@ fn main() -> anyhow::Result<()> {
             .with_mount(&output_dir, "/output", WasiAccess::ReadWrite),
     ));
     assert!(
-        denied.is_err(),
-        "Expected capability denial when executing without tokens"
+        matches!(denied, Err(NexusError::CapabilityDenied(_))),
+        "Expected CapabilityDenied, got {denied:?}"
     );
     println!("    rejected before execution: true");
 
