@@ -18,12 +18,12 @@ on:
     paths-ignore:
       - "docs/**"
       - "dashboard/**"
-      - "*.md"
+      - "**/*.md"
   pull_request:
     paths-ignore:
       - "docs/**"
       - "dashboard/**"
-      - "*.md"
+      - "**/*.md"
 
 jobs:
   test:
