@@ -188,7 +188,7 @@ jobs:
     name: "Criterion → CodSpeed.io (bare-metal walltime)"
     runs-on: codspeed-macro
     timeout-minutes: 75
-    if: ${{ vars.CODSPEED_WALLTIME_ENABLED == 'true' }}
+    if: ${{ vars.CODSPEED_WALLTIME_ENABLED == 'true' && github.event_name != 'pull_request' }}
     permissions:
       contents: read
       id-token: write
