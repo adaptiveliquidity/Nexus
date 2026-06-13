@@ -219,6 +219,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: criterion-evidence-${{ github.sha }}
+          path: benchmark_evidence
+      - name: Generate benchmark JSON for dashboard
+        run: python3 scripts/criterion_to_json.py benchmark_evidence/criterion_raw.log dashboard/benchmark-data.json
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
