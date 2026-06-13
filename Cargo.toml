@@ -80,7 +80,7 @@ ai-recovery = ["dep:reqwest", "dep:tokio-util"]
 
 [dev-dependencies]
 criterion = "0.5"
-codspeed-criterion-compat = "2.7"
+codspeed-criterion-compat = "4"
 tempfile = "3.14"
 proptest = "1.5"
 

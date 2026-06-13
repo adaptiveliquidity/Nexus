@@ -1,0 +1,20 @@
+name: Archive Bencher PR branch
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    if: vars.BENCHER_PROJECT != '' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: bencherdev/bencher@main
+      - run: |
+          bencher archive \
+            --project "${{ vars.BENCHER_PROJECT }}" \
+            --token "${{ secrets.BENCHER_API_TOKEN }}" \
+            --branch "${{ github.head_ref }}"
