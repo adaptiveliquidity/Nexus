@@ -42,7 +42,10 @@ fn main() {
     // Phase 3: Write report to the allowed output directory
     match fs::File::create("/output/report.txt") {
         Ok(mut f) => {
-            f.write_all(report.as_bytes()).unwrap();
+            if let Err(e) = f.write_all(report.as_bytes()) {
+                eprintln!("ERROR: failed to write /output/report.txt: {e}");
+                process::exit(2);
+            }
         }
         Err(e) => {
             eprintln!("ERROR: failed to write /output/report.txt: {e}");

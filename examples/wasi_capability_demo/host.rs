@@ -94,7 +94,10 @@ fn main() -> anyhow::Result<()> {
     };
     let denied = sandbox.execute_wasi(&wasm_bytes, &[], &empty_config)?;
     println!("    succeeded without pre-opens: {}", denied.success);
-    println!("    (expected: false — guest can't read input)\n");
+    assert!(
+        !denied.success,
+        "Expected execution to fail without pre-opens"
+    );
 
     println!("Done.");
     Ok(())
