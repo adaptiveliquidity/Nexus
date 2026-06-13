@@ -1,6 +1,6 @@
 //! Integration tests for WASI sandbox execution gated by capability tokens.
 
-use nexus::sandbox::{SandboxConfig, WasmSandbox, WasiSandboxConfig};
+use nexus::sandbox::{SandboxConfig, WasiSandboxConfig, WasmSandbox};
 use nexus::security::Capability;
 use std::path::PathBuf;
 
@@ -38,7 +38,9 @@ fn pure_compute_module() -> Vec<u8> {
 fn wasi_execution_with_empty_config() {
     let sb = sandbox();
     let config = WasiSandboxConfig::default();
-    let result = sb.execute_wasi(&pure_compute_module(), &[], &config).unwrap();
+    let result = sb
+        .execute_wasi(&pure_compute_module(), &[], &config)
+        .unwrap();
     assert!(result.success, "pure-compute module succeeds on WASI path");
 }
 

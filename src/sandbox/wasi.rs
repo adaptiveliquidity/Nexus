@@ -8,7 +8,8 @@
 //! unchanged — it keeps the empty `Linker` that makes deterministic replay
 //! sound. This module is the opt-in I/O path.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,7 +17,7 @@ use wasmtime::{Linker, Module, Store};
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
 
-use crate::error::Result;
+use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
 use crate::sandbox::wasm_runtime::{ExecutionResult, WasmSandbox};
 use crate::security::Capability;
@@ -29,6 +30,160 @@ pub struct PreOpen {
     pub writable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasiAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone)]
+pub struct WasiMount {
+    pub host_path: PathBuf,
+    pub guest_path: String,
+    pub access: WasiAccess,
+}
+
+impl WasiMount {
+    pub fn new(
+        host_path: impl Into<PathBuf>,
+        guest_path: impl Into<String>,
+        access: WasiAccess,
+    ) -> Self {
+        Self {
+            host_path: host_path.into(),
+            guest_path: guest_path.into(),
+            access,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WasiToolConfig {
+    pub mounts: Vec<WasiMount>,
+    pub inherit_stdout: bool,
+    pub inherit_stderr: bool,
+    pub env_vars: Vec<(String, String)>,
+    pub args: Vec<String>,
+}
+
+impl WasiToolConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_mount(
+        mut self,
+        host_path: impl Into<PathBuf>,
+        guest_path: impl Into<String>,
+        access: WasiAccess,
+    ) -> Self {
+        self.mounts
+            .push(WasiMount::new(host_path, guest_path, access));
+        self
+    }
+
+    pub fn inherit_stderr(mut self) -> Self {
+        self.inherit_stderr = true;
+        self
+    }
+
+    pub fn inherit_stdout(mut self) -> Self {
+        self.inherit_stdout = true;
+        self
+    }
+
+    /// Derive required capabilities without filesystem side effects.
+    ///
+    /// Used by the hypervisor to authorize before `validate()` touches the
+    /// filesystem (which creates missing mount directories).
+    pub fn required_capabilities(&self) -> Result<Vec<Capability>> {
+        let mut caps = Vec::with_capacity(self.mounts.len() * 2);
+        let mut guest_paths = HashSet::new();
+        let mut normalized_guests: Vec<String> = Vec::new();
+
+        for mount in &self.mounts {
+            let guest_path = normalize_guest_path(&mount.guest_path)?;
+            if !guest_paths.insert(guest_path.clone()) {
+                return Err(NexusError::ConfigError(format!(
+                    "duplicate WASI guest path: {guest_path}"
+                )));
+            }
+            for existing in &normalized_guests {
+                if guest_path_overlaps(existing, &guest_path) {
+                    return Err(NexusError::ConfigError(format!(
+                        "overlapping WASI guest paths: {existing} and {guest_path}"
+                    )));
+                }
+            }
+            normalized_guests.push(guest_path.clone());
+
+            let host_path = if mount.host_path.exists() {
+                std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone())
+            } else {
+                mount.host_path.clone()
+            };
+            caps.push(Capability::ReadFile(host_path.clone()));
+            if matches!(mount.access, WasiAccess::ReadWrite) {
+                caps.push(Capability::WriteFile(host_path));
+            }
+        }
+        Ok(caps)
+    }
+
+    pub fn validate(&self) -> Result<ValidatedWasiToolConfig> {
+        let mut preopens = Vec::with_capacity(self.mounts.len());
+        let mut required_capabilities = Vec::with_capacity(self.mounts.len() * 2);
+        let mut guest_paths = HashSet::new();
+        let mut normalized_guests: Vec<String> = Vec::new();
+
+        for mount in &self.mounts {
+            let guest_path = normalize_guest_path(&mount.guest_path)?;
+            if !guest_paths.insert(guest_path.clone()) {
+                return Err(NexusError::ConfigError(format!(
+                    "duplicate WASI guest path: {guest_path}"
+                )));
+            }
+            for existing in &normalized_guests {
+                if guest_path_overlaps(existing, &guest_path) {
+                    return Err(NexusError::ConfigError(format!(
+                        "overlapping WASI guest paths: {existing} and {guest_path}"
+                    )));
+                }
+            }
+            normalized_guests.push(guest_path.clone());
+
+            let host_path = canonicalize_mount_dir(&mount.host_path)?;
+            let writable = matches!(mount.access, WasiAccess::ReadWrite);
+            required_capabilities.push(Capability::ReadFile(host_path.clone()));
+            if writable {
+                required_capabilities.push(Capability::WriteFile(host_path.clone()));
+            }
+            preopens.push(PreOpen {
+                host_path,
+                guest_path,
+                writable,
+            });
+        }
+
+        Ok(ValidatedWasiToolConfig {
+            sandbox_config: WasiSandboxConfig {
+                preopens,
+                inherit_stdout: self.inherit_stdout,
+                inherit_stderr: self.inherit_stderr,
+                env_vars: self.env_vars.clone(),
+                args: self.args.clone(),
+            },
+            required_capabilities,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedWasiToolConfig {
+    pub sandbox_config: WasiSandboxConfig,
+    pub required_capabilities: Vec<Capability>,
+}
+
 /// WASI sandbox configuration built from capability tokens.
 #[derive(Debug, Clone, Default)]
 pub struct WasiSandboxConfig {
@@ -37,6 +192,91 @@ pub struct WasiSandboxConfig {
     pub inherit_stderr: bool,
     pub env_vars: Vec<(String, String)>,
     pub args: Vec<String>,
+}
+
+fn canonicalize_mount_dir(path: &Path) -> Result<PathBuf> {
+    if path.exists() && !path.is_dir() {
+        return Err(NexusError::ConfigError(format!(
+            "WASI mount host path is not a directory: {}",
+            path.display()
+        )));
+    }
+    if !path.exists() {
+        std::fs::create_dir_all(path).map_err(|e| {
+            NexusError::FilesystemError(format!(
+                "failed to create WASI mount directory {}: {e}",
+                path.display()
+            ))
+        })?;
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        NexusError::FilesystemError(format!(
+            "failed to canonicalize WASI mount directory {}: {e}",
+            path.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(NexusError::ConfigError(format!(
+            "WASI mount canonical host path is not a directory: {}",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn normalize_guest_path(path: &str) -> Result<String> {
+    if path.is_empty() || !path.starts_with('/') {
+        return Err(NexusError::ConfigError(format!(
+            "WASI guest path must be absolute: {path}"
+        )));
+    }
+    if path.as_bytes().contains(&0) || path.contains('\\') || path.contains("//") {
+        return Err(NexusError::ConfigError(format!(
+            "WASI guest path contains invalid characters: {path}"
+        )));
+    }
+
+    let raw = Path::new(path);
+    let mut parts = Vec::new();
+    for component in raw.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => {
+                let part = part.to_string_lossy();
+                if part.is_empty() || part == "." || part == ".." {
+                    return Err(NexusError::ConfigError(format!(
+                        "WASI guest path contains invalid component: {path}"
+                    )));
+                }
+                parts.push(part.to_string());
+            }
+            _ => {
+                return Err(NexusError::ConfigError(format!(
+                    "WASI guest path contains traversal or prefix component: {path}"
+                )));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Err(NexusError::ConfigError(
+            "WASI guest path cannot be root".to_string(),
+        ));
+    }
+
+    Ok(format!("/{}", parts.join("/")))
+}
+
+fn guest_path_overlaps(left: &str, right: &str) -> bool {
+    left == right
+        || right
+            .strip_prefix(left)
+            .map(|suffix| suffix.starts_with('/'))
+            .unwrap_or(false)
+        || left
+            .strip_prefix(right)
+            .map(|suffix| suffix.starts_with('/'))
+            .unwrap_or(false)
 }
 
 impl WasiSandboxConfig {
@@ -156,15 +396,21 @@ impl WasmSandbox {
             }
 
             for preopen in &wasi_config.preopens {
+                let dir_perms = if preopen.writable {
+                    wasmtime_wasi::DirPerms::all()
+                } else {
+                    wasmtime_wasi::DirPerms::READ
+                };
+                let file_perms = if preopen.writable {
+                    wasmtime_wasi::FilePerms::all()
+                } else {
+                    wasmtime_wasi::FilePerms::READ
+                };
                 if let Err(e) = ctx_builder.preopened_dir(
                     &preopen.host_path,
                     &preopen.guest_path,
-                    wasmtime_wasi::DirPerms::all(),
-                    if preopen.writable {
-                        wasmtime_wasi::FilePerms::all()
-                    } else {
-                        wasmtime_wasi::FilePerms::READ
-                    },
+                    dir_perms,
+                    file_perms,
                 ) {
                     let _ = tx.send(WasiReply::Failed {
                         mode: FailureMode::HostError(format!(
