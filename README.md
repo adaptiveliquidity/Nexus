@@ -149,7 +149,7 @@ cargo run --example wasi_capability_demo
 # Execute a WASM module (cold path)
 nexus execute --wasm tool.wasm
 
-# Hot path via long-lived daemon (Unix only)
+# Hot path via long-lived daemon (Unix socket / Windows named pipe)
 nexus run --wasm tool.wasm
 
 # Run demos
@@ -172,14 +172,14 @@ nexus demo --demo all
 | Adaptive fuel budgeting | Shipped | Per-tool fuel profiles adjust from execution history (`FuelBudgetPolicy`) |
 | Recovery policies | Shipped | Static + instinct-based + optional LLM-backed (`ai-recovery` feature) |
 | Module cache | Shipped | SHA-256-keyed `Arc<Module>` reuse avoids recompilation |
-| Daemon mode | Shipped | `nexus-agentd` with Unix socket, hypervisor pool (Unix only) |
+| Daemon mode | Shipped | `nexus-agentd` with Unix socket + Windows named pipes, hypervisor pool |
 | Live benchmarks | Shipped | 5-instrument pipeline (wall-clock, binary size, CPU sim, memory, walltime) with PR gating + auto-updating [dashboard](https://adaptiveliquidity.github.io/Nexus/) |
 
 ### Roadmap
 
 | Priority | Item | Status |
 |----------|------|--------|
-| P1 | Cross-platform daemon (named pipes on Windows) | Planned |
+| P1 | Cross-platform daemon (named pipes on Windows) | **Shipped** |
 | P1 | MCP server integration | Planned |
 | P1 | Security review / audit | Planned |
 | P2 | Sandbox pool with warm instances | Planned |
@@ -262,7 +262,7 @@ nexus/
 │   ├── main.rs              # CLI (execute, run, demo, benchmark, instinct)
 │   ├── lib.rs               # Public API re-exports
 │   ├── bin/
-│   │   └── nexus_agentd.rs  # Long-lived daemon (Unix socket)
+│   │   └── nexus_agentd.rs  # Long-lived daemon (Unix socket / Windows named pipe)
 │   ├── hypervisor/
 │   │   ├── mod.rs           # NexusHypervisor, execute_tool, execute_tool_wasi
 │   │   ├── failure_mode.rs  # 15+ typed FailureMode variants
