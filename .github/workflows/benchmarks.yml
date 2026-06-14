@@ -193,6 +193,12 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # Workaround: cargo-codspeed v4 walltime mode does not set cfg(codspeed)
+    # during build, so the benchmark compiles the plain Criterion path and the
+    # profiler cannot detect it. Force the flag so codspeed-criterion-compat is
+    # used and emits profiler-detectable benchmark events.
+    env:
+      RUSTFLAGS: "--cfg codspeed"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -202,12 +208,15 @@ jobs:
           tool: cargo-codspeed
       - name: Verify compat version
         run: cargo tree -p codspeed-criterion-compat
-      - uses: CodSpeedHQ/action@v4
+      - name: Build CodSpeed walltime benchmark
+        run: |
+          cargo codspeed build --measurement-mode walltime \
+            --bench nexus_validation --features bench-cold-start
+      - name: Run CodSpeed walltime benchmark
+        uses: CodSpeedHQ/action@v4
         with:
           mode: walltime
-          run: |
-            cargo codspeed build --measurement-mode walltime --bench nexus_validation --features bench-cold-start
-            cargo codspeed run --measurement-mode walltime --bench nexus_validation
+          run: cargo codspeed run --measurement-mode walltime --bench nexus_validation
 
   update-readme-svg:
     name: Update benchmark SVG in README
