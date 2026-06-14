@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Nexus AI Infrastructure Team"]
 description = "AI-Native WASM Snap-Rollback Sandbox for Agent Execution"
-license = "Apache-2.0"
-repository = "https://github.com/nexus-ai/nexus"
+license = "MIT"
+repository = "https://github.com/adaptiveliquidity/Nexus"
 
 [dependencies]
 # WebAssembly runtime

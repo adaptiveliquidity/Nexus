@@ -6,7 +6,6 @@ Nexus provides microsecond-class cold starts, native snapshot/rollback, capabili
 
 [![Benchmarks](https://img.shields.io/badge/benchmarks-live-brightgreen)](https://adaptiveliquidity.github.io/Nexus/)
 
-[![Crates.io](https://img.shields.io/crates/v/nexus-ai)](https://crates.io/crates/nexus-ai)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 
