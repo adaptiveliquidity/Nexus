@@ -178,7 +178,7 @@ jobs:
           tool: cargo-codspeed
       - uses: CodSpeedHQ/action@v4
         with:
-          mode: instrumentation,memory
+          mode: simulation,memory
           run: |
             cargo codspeed build --bench nexus_validation \
               --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory,bench-integrated
@@ -216,7 +216,7 @@ jobs:
         uses: CodSpeedHQ/action@v4
         with:
           mode: walltime
-          run: cargo codspeed run --measurement-mode walltime --bench nexus_validation
+          run: cargo codspeed run --measurement-mode walltime
 
   update-readme-svg:
     name: Update benchmark SVG in README
