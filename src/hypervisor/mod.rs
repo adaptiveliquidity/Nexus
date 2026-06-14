@@ -219,6 +219,10 @@ impl NexusHypervisor {
         self.sandbox.read().unwrap().engine().clone()
     }
 
+    pub fn snapshot_manager(&self) -> &Arc<SnapshotManager> {
+        &self.snapshot_manager
+    }
+
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();

@@ -58,6 +58,9 @@ wat = "1.0"
 base64 = "0.22"
 futures = "0.3"
 
+# MCP server (Model Context Protocol) for Claude Code integration.
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+
 # Optional, only with `ai-recovery` feature.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tokio-util = { version = "0.7", optional = true }
@@ -92,6 +95,10 @@ path = "src/main.rs"
 name = "nexus-agentd"
 path = "src/bin/nexus_agentd.rs"
 required-features = []
+
+[[bin]]
+name = "nexus-mcp"
+path = "src/bin/nexus_mcp.rs"
 
 [[example]]
 name = "wasi_capability_demo"
