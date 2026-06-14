@@ -188,27 +188,26 @@ jobs:
     name: "Criterion → CodSpeed.io (bare-metal walltime)"
     runs-on: codspeed-macro
     timeout-minutes: 75
-    if: ${{ vars.CODSPEED_WALLTIME_ENABLED == 'true' }}
+    continue-on-error: true
+    if: ${{ vars.CODSPEED_WALLTIME_ENABLED == 'true' && github.event_name != 'pull_request' }}
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: codspeed-walltime-${{ runner.os }}-${{ runner.arch }}
       - name: Install cargo-codspeed (prebuilt)
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-codspeed
+      - name: Verify compat version
+        run: cargo tree -p codspeed-criterion-compat
       - uses: CodSpeedHQ/action@v4
         with:
           mode: walltime
           run: |
-            cargo codspeed build --bench nexus_validation \
-              --features bench-cold-start,bench-snapshot-create,bench-snapshot-rollback,bench-execute-tool,bench-execute-real-memory,bench-integrated
-            cargo codspeed run --bench nexus_validation
+            cargo codspeed build --measurement-mode walltime --bench nexus_validation --features bench-cold-start
+            cargo codspeed run --measurement-mode walltime --bench nexus_validation
 
   update-readme-svg:
     name: Update benchmark SVG in README
@@ -219,6 +218,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SVG_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:
