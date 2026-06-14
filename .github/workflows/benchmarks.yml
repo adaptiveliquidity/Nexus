@@ -210,13 +210,13 @@ jobs:
         run: cargo tree -p codspeed-criterion-compat
       - name: Build CodSpeed walltime benchmark
         run: |
-          cargo codspeed build --measurement-mode walltime \
-            --bench nexus_validation --features bench-cold-start
+          cargo codspeed build --bench nexus_validation \
+            --features bench-cold-start
       - name: Run CodSpeed walltime benchmark
         uses: CodSpeedHQ/action@v4
         with:
           mode: walltime
-          run: cargo codspeed run --measurement-mode walltime
+          run: cargo codspeed run
 
   update-readme-svg:
     name: Update benchmark SVG in README
