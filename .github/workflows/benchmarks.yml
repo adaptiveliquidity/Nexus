@@ -219,6 +219,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SVG_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:
