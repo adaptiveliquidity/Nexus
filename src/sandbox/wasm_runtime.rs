@@ -208,6 +208,15 @@ impl WasmSandbox {
         })
     }
 
+    /// Build a sandbox from a pre-configured `Engine`.
+    ///
+    /// Used by [`crate::sandbox::pool::SandboxPool`] so cached modules are
+    /// compiled with — and executed on — the pool's pooling-allocator engine.
+    /// The engine must have `consume_fuel(true)` set, matching [`Self::new`].
+    pub fn from_engine(engine: Arc<Engine>, config: SandboxConfig) -> Self {
+        WasmSandbox { engine, config }
+    }
+
     /// Access the wasmtime `Engine` for use with `ModuleCache`.
     pub fn engine(&self) -> &Engine {
         &self.engine
@@ -423,7 +432,9 @@ impl WasmSandbox {
         tables
     }
 
-    fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
+    /// Execute a pre-compiled module. Public so [`crate::sandbox::pool`] can
+    /// run modules from its cache on the pooled engine.
+    pub fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
         let start = Instant::now();
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
