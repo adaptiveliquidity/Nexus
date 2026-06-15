@@ -73,6 +73,36 @@ async fn sixteen_concurrent_tasks_complete_without_deadlock() {
     assert_eq!(pool.available_permits(), 16, "all permits returned");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pooled_execution_does_not_starve_worker_threads() {
+    // execute_pooled offloads the blocking WASM run to spawn_blocking, so many
+    // concurrent pooled calls must all complete on a small (2-worker) runtime
+    // without deadlock or starvation. If the blocking run stalled a worker
+    // thread instead, this would be prone to timing out.
+    let cfg = PoolConfig {
+        max_concurrency: 8,
+        total_instances: 64,
+        ..Default::default()
+    };
+    let pool = Arc::new(SandboxPool::new(cfg).unwrap());
+    let wasm = Arc::new(counter_wasm());
+
+    let mut handles = Vec::new();
+    for _ in 0..32 {
+        let pool = pool.clone();
+        let wasm = wasm.clone();
+        handles.push(tokio::spawn(
+            async move { pool.execute_pooled(&wasm, &[]).await },
+        ));
+    }
+
+    for h in handles {
+        let result = h.await.unwrap().unwrap();
+        assert!(result.success);
+    }
+    assert_eq!(pool.available_permits(), 8, "all permits returned");
+}
+
 #[tokio::test]
 async fn max_concurrency_is_enforced() {
     // With a single permit, two simultaneous acquires must serialize: the

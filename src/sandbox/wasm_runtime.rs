@@ -152,7 +152,12 @@ pub struct StepCapture {
     pub globals: Vec<crate::snapshot::GlobalSnapshot>,
 }
 
-/// WASM Micro-Sandbox with fuel metering
+/// WASM Micro-Sandbox with fuel metering.
+///
+/// Cloning is cheap: `engine` is an `Arc` and `config` is a small value type.
+/// The pool clones a sandbox into a blocking task so pooled execution does not
+/// block a tokio worker thread.
+#[derive(Clone)]
 pub struct WasmSandbox {
     pub(crate) engine: Arc<Engine>,
     pub(crate) config: SandboxConfig,

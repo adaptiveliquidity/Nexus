@@ -176,18 +176,39 @@ impl SandboxPool {
     ///
     /// Builds a fresh `Store` + `Instance` for isolation; the pooling allocator
     /// reuses pre-mapped slots so this is cheap relative to a non-pooled engine.
+    ///
+    /// This is a **blocking** call: `WasmSandbox::execute_module` spawns a
+    /// worker thread and blocks on it up to the configured time limit. Async
+    /// callers should prefer [`Self::execute_pooled`], which offloads this to
+    /// tokio's blocking pool instead of stalling a runtime worker.
     pub fn execute(&self, permit: &PooledModulePermit, args: &[Vec<u8>]) -> Result<ExecutionResult> {
         self.sandbox.execute_module(permit.module.clone(), args)
     }
 
     /// Convenience: acquire a slot, run the module, release the slot.
+    ///
+    /// The synchronous, thread-blocking execution runs on `spawn_blocking` so
+    /// it does not monopolize a tokio worker thread — important under the high
+    /// concurrency the pool is built for. The permit is held inside the
+    /// blocking task and released when it returns.
     pub async fn execute_pooled(
         &self,
         wasm_bytes: &[u8],
         args: &[Vec<u8>],
     ) -> Result<ExecutionResult> {
         let permit = self.acquire(wasm_bytes).await?;
-        self.execute(&permit, args)
+        // Clone the cheap handles needed by the blocking closure. The sandbox
+        // is Arc<Engine> + small config; the module is an Arc. The permit moves
+        // in so the slot stays reserved for the whole execution.
+        let sandbox = self.sandbox.clone();
+        let module = permit.module.clone();
+        let args = args.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit; // released when the task completes
+            sandbox.execute_module(module, &args)
+        })
+        .await
+        .map_err(|e| NexusError::WasmError(format!("pooled execution task panicked: {e}")))?
     }
 
     /// Number of currently available execution slots.
