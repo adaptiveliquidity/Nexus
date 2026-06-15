@@ -86,6 +86,16 @@ async fn run(
         let _ = std::fs::remove_file(&socket);
     }
     let listener = UnixListener::bind(&socket)?;
+
+    // Restrict the socket to the owning user (0600). Without this, on a shared
+    // host any local user who can reach the socket path could submit Execute or
+    // Shutdown requests (the protocol has no per-request auth). Fail closed if
+    // we cannot secure it rather than serving on a world-accessible socket.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     info!(target: "nexus.agentd", "ready");
 
     // Watchdog channel so a Shutdown request can stop the accept loop.
