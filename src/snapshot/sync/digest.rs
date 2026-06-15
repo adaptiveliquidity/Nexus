@@ -33,7 +33,7 @@ pub const SNAPSHOT_DIGEST_SCHEMA_VERSION: u32 = 1;
 
 /// A 32-byte content-addressed snapshot digest (SHA-256 of the canonical
 /// preimage). The wire protocol keys snapshots by this value, not by UUID.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SnapshotDigest([u8; 32]);
 
 impl SnapshotDigest {
