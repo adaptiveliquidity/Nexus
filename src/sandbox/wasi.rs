@@ -374,6 +374,7 @@ impl WasmSandbox {
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
+        let max_memory_bytes = self.config.max_memory_pages as usize * 65536;
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
         let wasi_config = wasi_config.clone();
 
@@ -427,7 +428,8 @@ impl WasmSandbox {
             }
 
             let wasi_ctx = ctx_builder.build_p1();
-            let mut store = Store::new(&engine, wasi_ctx);
+            let mut store = Store::new(&engine, WasiState::new(wasi_ctx, max_memory_bytes));
+            store.limiter(|s| &mut s.limits);
 
             if let Err(e) = store.set_fuel(max_fuel) {
                 let _ = tx.send(WasiReply::Failed {
@@ -440,8 +442,8 @@ impl WasmSandbox {
                 return;
             }
 
-            let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
-            if let Err(e) = wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx) {
+            let mut linker: Linker<WasiState> = Linker::new(&engine);
+            if let Err(e) = wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s| &mut s.wasi) {
                 let _ = tx.send(WasiReply::Failed {
                     mode: FailureMode::HostError(format!("WASI linker: {e}")),
                     fuel_consumed: 0,
@@ -593,9 +595,28 @@ impl WasmSandbox {
     }
 }
 
+/// Per-store state for the WASI path: the WASI Preview 1 context plus a
+/// `StoreLimits` so `SandboxConfig::max_memory_pages` is enforced (matching the
+/// pure-compute path's `WasmState`).
+struct WasiState {
+    wasi: WasiP1Ctx,
+    limits: wasmtime::StoreLimits,
+}
+
+impl WasiState {
+    fn new(wasi: WasiP1Ctx, max_memory_bytes: usize) -> Self {
+        WasiState {
+            wasi,
+            limits: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(max_memory_bytes)
+                .build(),
+        }
+    }
+}
+
 fn capture_globals_wasi(
     instance: &wasmtime::Instance,
-    store: &mut Store<WasiP1Ctx>,
+    store: &mut Store<WasiState>,
 ) -> Vec<crate::snapshot::GlobalSnapshot> {
     let names: Vec<String> = instance
         .exports(&mut *store)
@@ -627,7 +648,7 @@ fn capture_globals_wasi(
 
 fn capture_tables_wasi(
     instance: &wasmtime::Instance,
-    store: &mut Store<WasiP1Ctx>,
+    store: &mut Store<WasiState>,
 ) -> Vec<crate::snapshot::TableSnapshot> {
     let names: Vec<String> = instance
         .exports(&mut *store)

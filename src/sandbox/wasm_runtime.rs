@@ -267,11 +267,13 @@ impl WasmSandbox {
 
         let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
+        let max_memory_bytes = self.config.max_memory_pages as usize * 65536;
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
         let (tx, rx) = std::sync::mpsc::channel::<StepReply>();
 
         let handle = std::thread::spawn(move || {
-            let mut store = Store::new(&engine, WasmState);
+            let mut store = Store::new(&engine, WasmState::new(max_memory_bytes));
+            store.limiter(|s| &mut s.limits);
             if let Err(e) = store.set_fuel(fuel_cap) {
                 let _ = tx.send(StepReply::Failed(format!("set_fuel failed: {e}")));
                 return;
@@ -444,12 +446,14 @@ impl WasmSandbox {
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
+        let max_memory_bytes = self.config.max_memory_pages as usize * 65536;
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
 
         let (tx, rx) = std::sync::mpsc::channel::<ExecReply>();
 
         let handle = std::thread::spawn(move || {
-            let mut store = Store::new(&engine, WasmState);
+            let mut store = Store::new(&engine, WasmState::new(max_memory_bytes));
+            store.limiter(|s| &mut s.limits);
 
             // With consume_fuel(true) in Config, set_fuel is required and
             // succeeds; failures here mean the engine config drifted.
@@ -613,5 +617,21 @@ impl WasmSandbox {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct WasmState;
+/// Per-store state for the pure-compute path. Carries a `StoreLimits` so the
+/// configured `SandboxConfig::max_memory_pages` ceiling is enforced by wasmtime
+/// (a guest that grows linear memory past the limit traps instead of being
+/// bounded only by the wasm32 4 GiB hard cap).
+pub struct WasmState {
+    limits: wasmtime::StoreLimits,
+}
+
+impl WasmState {
+    /// Build store state limiting linear memory to `max_memory_bytes`.
+    pub fn new(max_memory_bytes: usize) -> Self {
+        WasmState {
+            limits: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(max_memory_bytes)
+                .build(),
+        }
+    }
+}

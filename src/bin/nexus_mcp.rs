@@ -275,13 +275,16 @@ impl NexusMcpServer {
         let capability = parse_capability_from_str(&params.capability, params.path.as_deref())
             .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", params.capability))?;
 
-        let validity = Duration::from_secs(params.validity_secs.unwrap_or(3600));
+        // Security: reject the unrestricted `All` capability and clamp the
+        // caller-supplied validity to a bounded maximum (see SECURITY.md).
+        let (capability, validity_secs) = sanitize_token_request(capability, params.validity_secs)?;
+        let validity = Duration::from_secs(validity_secs);
         let token = self.hypervisor.issue_token(capability.clone(), "mcp_client", validity)?;
 
         Ok(TokenResponse {
             token_id: token.id.to_string(),
             capability: format!("{:?}", capability),
-            expires_in_secs: params.validity_secs.unwrap_or(3600),
+            expires_in_secs: validity_secs,
         })
     }
 
@@ -338,6 +341,29 @@ impl NexusMcpServer {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Maximum token validity an MCP client may request, in seconds (1 hour).
+/// Larger caller-supplied values are clamped to this. See SECURITY.md.
+const MAX_TOKEN_VALIDITY_SECS: u64 = 3600;
+
+/// Apply security limits to an MCP token request: reject the unrestricted
+/// `All` capability (MCP clients must request a specific capability), and clamp
+/// the requested validity to `MAX_TOKEN_VALIDITY_SECS`. Returns the (possibly
+/// adjusted) capability and the effective validity in seconds.
+fn sanitize_token_request(
+    capability: Capability,
+    requested_secs: Option<u64>,
+) -> Result<(Capability, u64)> {
+    if matches!(capability, Capability::All) {
+        return Err(anyhow::anyhow!(
+            "capability 'all' cannot be issued to MCP clients; request a specific capability"
+        ));
+    }
+    let secs = requested_secs
+        .unwrap_or(MAX_TOKEN_VALIDITY_SECS)
+        .min(MAX_TOKEN_VALIDITY_SECS);
+    Ok((capability, secs))
+}
+
 fn parse_capability(spec: &CapabilitySpec) -> Option<Capability> {
     parse_capability_from_str(&spec.r#type, spec.path.as_deref())
 }
@@ -382,4 +408,37 @@ async fn main() -> Result<()> {
 
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_all_capability_for_mcp_clients() {
+        let r = sanitize_token_request(Capability::All, Some(60));
+        assert!(r.is_err(), "MCP clients must not be able to mint Capability::All");
+    }
+
+    #[test]
+    fn clamps_excessive_validity() {
+        let (_, secs) =
+            sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), Some(u64::MAX))
+                .unwrap();
+        assert_eq!(secs, MAX_TOKEN_VALIDITY_SECS);
+    }
+
+    #[test]
+    fn preserves_reasonable_validity() {
+        let (_, secs) =
+            sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), Some(120)).unwrap();
+        assert_eq!(secs, 120);
+    }
+
+    #[test]
+    fn defaults_to_max_when_unset() {
+        let (_, secs) =
+            sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), None).unwrap();
+        assert_eq!(secs, MAX_TOKEN_VALIDITY_SECS);
+    }
 }
