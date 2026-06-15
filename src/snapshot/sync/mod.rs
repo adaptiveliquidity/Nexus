@@ -1,11 +1,11 @@
 //! Snapshot synchronization (RFC 0001).
 //!
-//! Phase 1 only: content-addressed snapshot digests. Transport, lineage heads,
-//! anti-replay, and restore authorization are deferred to later RFC-0001 PRs and
-//! are intentionally absent here.
+//! Content-addressed snapshot digesting, transport-agnostic copy protocol, and
+//! lineage-head bookkeeping from RFC 0001.
 
 pub mod digest;
 pub mod framed;
+pub mod lineage;
 pub mod protocol;
 pub mod transport;
 
@@ -14,5 +14,8 @@ pub use digest::{
     DIGEST_DOMAIN, SNAPSHOT_DIGEST_SCHEMA_VERSION,
 };
 pub use framed::{replicate_framed, FramedSyncTransport, SyncAuthConfig};
+pub use lineage::{
+    AgentId, HlcTimestamp, LineageFork, LineageHead, LineageStore, LineageUpdate, NodeId,
+};
 pub use protocol::{NackReason, SyncMessage, SyncNode};
 pub use transport::{replicate, InMemoryTransport, SyncTransport};
