@@ -4,6 +4,7 @@
 //! over stdio (newline-delimited JSON, per the MCP spec).
 
 use serde_json::{json, Value};
+use std::fs;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -101,7 +102,10 @@ async fn initialize_and_list_tools() {
 
     assert_eq!(resp["jsonrpc"], "2.0");
     assert_eq!(resp["id"], 1);
-    assert!(resp["result"].is_object(), "expected result object, got: {resp}");
+    assert!(
+        resp["result"].is_object(),
+        "expected result object, got: {resp}"
+    );
 
     let server_info = &resp["result"]["serverInfo"];
     assert!(server_info.is_object());
@@ -118,13 +122,12 @@ async fn initialize_and_list_tools() {
     let resp = client.request(2, "tools/list", json!({})).await;
     assert_eq!(resp["id"], 2);
 
-    let tools = resp["result"]["tools"].as_array().expect("tools should be an array");
+    let tools = resp["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
     assert_eq!(tools.len(), 6, "expected 6 tools, got: {:?}", tools);
 
-    let tool_names: Vec<&str> = tools
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tool_names.contains(&"nexus_execute"));
     assert!(tool_names.contains(&"nexus_execute_wasi"));
     assert!(tool_names.contains(&"nexus_snapshot_create"));
@@ -231,6 +234,64 @@ async fn issue_token_returns_token_info() {
         .expect("token_id should be a valid UUID");
     assert_eq!(parsed["expires_in_secs"], 300);
     assert!(parsed["capability"].as_str().unwrap().contains("ReadFile"));
+}
+
+#[tokio::test]
+async fn execute_wasi_grants_requested_read_file_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("wasi_grant_regression.wasm");
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start"))
+        )"#,
+    )
+    .unwrap();
+    fs::write(&wasm_path, wasm).unwrap();
+
+    let mut client = McpClient::spawn().await;
+
+    client
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1.0" }
+            }),
+        )
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))
+        .await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "capabilities": [
+                        { "type": "read_file", "path": tmp.path() }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(parsed["success"], true, "expected success, got: {parsed}");
+    assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
 }
 
 #[tokio::test]
