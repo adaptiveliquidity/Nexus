@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::health::{HealthStatus, ResourceSnapshot};
 use crate::hypervisor::failure_mode::FailureMode;
 use crate::hypervisor::recovery::RecoveryAction;
+use crate::telemetry::CapturedCallStack;
 
 /// Structured error log for AI feedback.
 ///
@@ -27,6 +28,11 @@ pub struct ErrorLog {
     /// Structured recovery suggestions from the active `RecoveryPolicy`.
     pub recovery_actions: Vec<RecoveryAction>,
     pub successful_patterns: Vec<String>,
+    /// Diagnostic-only WASM frames captured at trap/checkpoint sites.
+    ///
+    /// This is never rollback state and must not influence snapshot equality,
+    /// memory checksums, or content-addressed snapshot digests.
+    pub call_stack: Option<CapturedCallStack>,
     pub trigger_status: HealthStatus,
     pub resources: ResourceSnapshot,
 }
@@ -46,6 +52,7 @@ impl ErrorLog {
             failure_mode,
             recovery_actions: Vec::new(),
             successful_patterns: Vec::new(),
+            call_stack: None,
             trigger_status,
             resources,
         }
@@ -66,6 +73,11 @@ impl ErrorLog {
         self
     }
 
+    pub fn with_call_stack(mut self, call_stack: Option<CapturedCallStack>) -> Self {
+        self.call_stack = call_stack;
+        self
+    }
+
     pub fn to_llm_context(&self) -> String {
         let mut ctx = String::new();
 
@@ -73,6 +85,28 @@ impl ErrorLog {
         ctx.push_str(&format!("Type: {}\n", self.error_type));
         ctx.push_str(&format!("Operation: {}\n", self.operation));
         ctx.push_str(&format!("Description: {}\n\n", self.description));
+
+        if let Some(call_stack) = &self.call_stack {
+            if !call_stack.is_empty() {
+                ctx.push_str("## WASM Call Stack\n");
+                ctx.push_str(&format!("Captured at: {:?}\n", call_stack.captured_at));
+                for (i, frame) in call_stack.top_frames(8).enumerate() {
+                    let func = frame.func_name.as_deref().unwrap_or("<unknown>");
+                    let module = frame.module_name.as_deref().unwrap_or("<unknown>");
+                    let offset = frame
+                        .module_offset
+                        .map(|o| format!(" module_offset=0x{o:x}"))
+                        .unwrap_or_default();
+                    ctx.push_str(&format!(
+                        "{}. {module}!{func} func_index={}{}\n",
+                        i + 1,
+                        frame.func_index,
+                        offset
+                    ));
+                }
+                ctx.push('\n');
+            }
+        }
 
         ctx.push_str("## System State\n");
         ctx.push_str(&format!("CPU: {:.1}%\n", self.resources.cpu_usage));

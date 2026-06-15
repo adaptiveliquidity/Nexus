@@ -153,10 +153,8 @@ mod tests {
         let cache = ModuleCache::with_capacity(2);
         let eng = engine();
         let w1 = wat::parse_str(r#"(module (func (export "_start")))"#).unwrap();
-        let w2 =
-            wat::parse_str(r#"(module (func (export "_start") (nop)))"#).unwrap();
-        let w3 =
-            wat::parse_str(r#"(module (func (export "_start") (nop) (nop)))"#).unwrap();
+        let w2 = wat::parse_str(r#"(module (func (export "_start") (nop)))"#).unwrap();
+        let w3 = wat::parse_str(r#"(module (func (export "_start") (nop) (nop)))"#).unwrap();
 
         cache.get_or_compile(&eng, &w1).unwrap();
         cache.get_or_compile(&eng, &w2).unwrap();
@@ -176,10 +174,8 @@ mod tests {
         let cache = ModuleCache::with_capacity(2);
         let eng = engine();
         let w1 = wat::parse_str(r#"(module (func (export "_start")))"#).unwrap();
-        let w2 =
-            wat::parse_str(r#"(module (func (export "_start") (nop)))"#).unwrap();
-        let w3 =
-            wat::parse_str(r#"(module (func (export "_start") (nop) (nop)))"#).unwrap();
+        let w2 = wat::parse_str(r#"(module (func (export "_start") (nop)))"#).unwrap();
+        let w3 = wat::parse_str(r#"(module (func (export "_start") (nop) (nop)))"#).unwrap();
 
         cache.get_or_compile(&eng, &w1).unwrap();
         cache.get_or_compile(&eng, &w2).unwrap();

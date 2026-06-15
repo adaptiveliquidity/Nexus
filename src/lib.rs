@@ -32,7 +32,10 @@ pub use snapshot::{
     ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata, SnapshotStats,
     PAGE_SIZE,
 };
-pub use telemetry::{ExecutionRecord, LearnedPattern, TelemetrySink, TelemetryStats};
+pub use telemetry::{
+    CaptureSite, CapturedCallStack, ExecutionRecord, LearnedPattern, StackFrame, TelemetrySink,
+    TelemetryStats,
+};
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

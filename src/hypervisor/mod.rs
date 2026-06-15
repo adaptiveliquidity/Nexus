@@ -567,7 +567,8 @@ impl NexusHypervisor {
             // Opt-in warm pool: acquire a slot, run on the pooling-allocator
             // engine with a cached compiled module. Isolation is preserved —
             // each call still gets a fresh Store + Instance.
-            pool.execute_pooled(&tool.wasm_bytes, &[input_bytes]).await?
+            pool.execute_pooled(&tool.wasm_bytes, &[input_bytes])
+                .await?
         } else {
             self.sandbox
                 .read()
@@ -644,7 +645,8 @@ impl NexusHypervisor {
 
             let error_log = ErrorLog::new(tool.name.clone(), mode.clone(), resources.clone())
                 .with_recovery(recovery_actions)
-                .with_patterns(successful_patterns);
+                .with_patterns(successful_patterns)
+                .with_call_stack(exec_result.call_stack.clone());
 
             // Only roll back when the failure mode actually mutated state.
             // Load-time failures (InvalidModule / MissingEntrypoint) never

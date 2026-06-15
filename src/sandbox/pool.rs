@@ -143,9 +143,8 @@ impl SandboxPool {
         cfg.consume_fuel(true);
         cfg.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
-        Engine::new(&cfg).map_err(|e| {
-            NexusError::ConfigError(format!("failed to create pooled engine: {e}"))
-        })
+        Engine::new(&cfg)
+            .map_err(|e| NexusError::ConfigError(format!("failed to create pooled engine: {e}")))
     }
 
     /// Acquire an execution slot and the precompiled module for `wasm_bytes`.
@@ -181,7 +180,11 @@ impl SandboxPool {
     /// worker thread and blocks on it up to the configured time limit. Async
     /// callers should prefer [`Self::execute_pooled`], which offloads this to
     /// tokio's blocking pool instead of stalling a runtime worker.
-    pub fn execute(&self, permit: &PooledModulePermit, args: &[Vec<u8>]) -> Result<ExecutionResult> {
+    pub fn execute(
+        &self,
+        permit: &PooledModulePermit,
+        args: &[Vec<u8>],
+    ) -> Result<ExecutionResult> {
         self.sandbox.execute_module(permit.module.clone(), args)
     }
 
@@ -237,8 +240,7 @@ mod tests {
     use super::*;
 
     fn trivial_wasm() -> Vec<u8> {
-        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
-            .unwrap()
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#).unwrap()
     }
 
     #[tokio::test]
@@ -246,7 +248,11 @@ mod tests {
         let pool = SandboxPool::new(PoolConfig::default()).unwrap();
         let wasm = trivial_wasm();
         let result = pool.execute_pooled(&wasm, &[]).await.unwrap();
-        assert!(result.success, "execution should succeed: {:?}", result.error);
+        assert!(
+            result.success,
+            "execution should succeed: {:?}",
+            result.error
+        );
     }
 
     #[tokio::test]

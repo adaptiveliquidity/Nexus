@@ -61,9 +61,9 @@ async fn sixteen_concurrent_tasks_complete_without_deadlock() {
     for _ in 0..16 {
         let pool = pool.clone();
         let wasm = wasm.clone();
-        handles.push(tokio::spawn(
-            async move { pool.execute_pooled(&wasm, &[]).await },
-        ));
+        handles.push(tokio::spawn(async move {
+            pool.execute_pooled(&wasm, &[]).await
+        }));
     }
 
     for h in handles {
@@ -91,9 +91,9 @@ async fn pooled_execution_does_not_starve_worker_threads() {
     for _ in 0..32 {
         let pool = pool.clone();
         let wasm = wasm.clone();
-        handles.push(tokio::spawn(
-            async move { pool.execute_pooled(&wasm, &[]).await },
-        ));
+        handles.push(tokio::spawn(async move {
+            pool.execute_pooled(&wasm, &[]).await
+        }));
     }
 
     for h in handles {

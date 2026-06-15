@@ -104,14 +104,16 @@ fn main() -> anyhow::Result<()> {
     println!("    Exit code 0 confirms the guest handled the denial.\n");
 
     println!("[bonus] Executing without capability tokens...");
-    let denied = rt.block_on(hypervisor.execute_tool_wasi_with_config(
-        ToolDefinition::new("csv_reporter_no_tokens".to_string(), wasm_bytes),
-        serde_json::json!({}),
-        &[],
-        WasiToolConfig::new()
-            .with_mount(&input_dir, "/input", WasiAccess::ReadOnly)
-            .with_mount(&output_dir, "/output", WasiAccess::ReadWrite),
-    ));
+    let denied = rt.block_on(
+        hypervisor.execute_tool_wasi_with_config(
+            ToolDefinition::new("csv_reporter_no_tokens".to_string(), wasm_bytes),
+            serde_json::json!({}),
+            &[],
+            WasiToolConfig::new()
+                .with_mount(&input_dir, "/input", WasiAccess::ReadOnly)
+                .with_mount(&output_dir, "/output", WasiAccess::ReadWrite),
+        ),
+    );
     assert!(
         matches!(denied, Err(NexusError::CapabilityDenied(_))),
         "Expected CapabilityDenied, got {denied:?}"
