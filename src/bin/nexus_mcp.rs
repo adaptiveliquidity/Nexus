@@ -3,7 +3,7 @@
 //! Transport: stdio (for Claude Code / mcp.json integration).
 //! Start with: `nexus-mcp` (no arguments needed).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -105,6 +105,7 @@ pub struct BranchSpec {
 #[derive(Clone)]
 pub struct NexusMcpServer {
     hypervisor: Arc<NexusHypervisor>,
+    wasm_module_dirs: Arc<Vec<PathBuf>>,
 }
 
 #[tool_router(server_handler)]
@@ -240,8 +241,16 @@ struct ForkAndRaceResponse {
 }
 
 impl NexusMcpServer {
+    fn new(hypervisor: Arc<NexusHypervisor>) -> Result<Self> {
+        Ok(Self {
+            hypervisor,
+            wasm_module_dirs: Arc::new(allowed_wasm_module_dirs()?),
+        })
+    }
+
     async fn do_execute(&self, params: ExecuteParams) -> Result<ToolOutputResponse> {
-        let wasm_bytes = tokio::fs::read(&params.wasm_path).await.map_err(|e| {
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
         })?;
 
@@ -256,7 +265,8 @@ impl NexusMcpServer {
     }
 
     async fn do_execute_wasi(&self, params: ExecuteWasiParams) -> Result<ToolOutputResponse> {
-        let wasm_bytes = tokio::fs::read(&params.wasm_path).await.map_err(|e| {
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
         })?;
 
@@ -344,7 +354,8 @@ impl NexusMcpServer {
     }
 
     async fn do_fork_and_race(&self, params: ForkAndRaceParams) -> Result<ForkAndRaceResponse> {
-        let wasm_bytes = tokio::fs::read(&params.wasm_path).await.map_err(|e| {
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
         })?;
 
@@ -395,13 +406,73 @@ impl NexusMcpServer {
             winner_output: result.winner.output.map(ToolOutputResponse::from),
         })
     }
+
+    fn resolve_wasm_path(&self, wasm_path: impl AsRef<Path>) -> Result<PathBuf> {
+        resolve_wasm_path(wasm_path.as_ref(), self.wasm_module_dirs.as_slice())
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
+
 /// Maximum token validity an MCP client may request, in seconds (1 hour).
 /// Larger caller-supplied values are clamped to this. See SECURITY.md.
 const MAX_TOKEN_VALIDITY_SECS: u64 = 3600;
+
+fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {
+    let raw_dirs: Vec<PathBuf> = match std::env::var_os(NEXUS_MCP_MODULE_DIR_ENV) {
+        Some(value) => std::env::split_paths(&value).collect(),
+        None => vec![std::env::current_dir()?],
+    };
+
+    if raw_dirs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "{NEXUS_MCP_MODULE_DIR_ENV} must contain at least one module directory"
+        ));
+    }
+
+    raw_dirs
+        .into_iter()
+        .map(|dir| {
+            let canonical = std::fs::canonicalize(&dir)
+                .map_err(|e| anyhow::anyhow!("invalid MCP module dir '{}': {e}", dir.display()))?;
+            if !canonical.is_dir() {
+                anyhow::bail!(
+                    "invalid MCP module dir '{}': resolved path is not a directory",
+                    dir.display()
+                );
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
+fn resolve_wasm_path(wasm_path: &Path, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
+    let canonical = std::fs::canonicalize(wasm_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to canonicalize wasm file '{}': {e}",
+            wasm_path.display()
+        )
+    })?;
+
+    if !canonical.is_file() {
+        anyhow::bail!(
+            "wasm path '{}' resolved to non-file '{}'",
+            wasm_path.display(),
+            canonical.display()
+        );
+    }
+
+    if allowed_dirs.iter().any(|dir| canonical.starts_with(dir)) {
+        return Ok(canonical);
+    }
+
+    anyhow::bail!(
+        "wasm path '{}' is outside allowed MCP module directories",
+        wasm_path.display()
+    )
+}
 
 /// Apply security limits to an MCP token request: reject the unrestricted
 /// `All` capability (MCP clients must request a specific capability), and clamp
@@ -458,7 +529,7 @@ async fn main() -> Result<()> {
     let config = HypervisorConfig::default();
     let hypervisor = Arc::new(NexusHypervisor::new(config)?);
 
-    let server = NexusMcpServer { hypervisor };
+    let server = NexusMcpServer::new(hypervisor)?;
 
     let service = server.serve(stdio()).await.inspect_err(|e| {
         tracing::error!("MCP server error: {:?}", e);
@@ -502,5 +573,62 @@ mod tests {
         let (_, secs) =
             sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), None).unwrap();
         assert_eq!(secs, MAX_TOKEN_VALIDITY_SECS);
+    }
+
+    #[test]
+    fn rejects_wasm_path_outside_allowed_module_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let wasm_path = outside.join("tool.wasm");
+        std::fs::write(&wasm_path, b"\0asm").unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_wasm_path(&wasm_path, &allowed_dirs).unwrap_err();
+
+        assert!(
+            err.to_string().contains("outside allowed MCP module"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_wasm_path_inside_allowed_module_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let wasm_path = allowed.join("tool.wasm");
+        std::fs::write(&wasm_path, b"\0asm").unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let resolved = resolve_wasm_path(&wasm_path, &allowed_dirs).unwrap();
+
+        assert_eq!(resolved, std::fs::canonicalize(wasm_path).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_wasm_path_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_wasm = outside.join("tool.wasm");
+        let linked_wasm = allowed.join("linked.wasm");
+        std::fs::write(&outside_wasm, b"\0asm").unwrap();
+        symlink(&outside_wasm, &linked_wasm).unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_wasm_path(&linked_wasm, &allowed_dirs).unwrap_err();
+
+        assert!(
+            err.to_string().contains("outside allowed MCP module"),
+            "unexpected error: {err}"
+        );
     }
 }
