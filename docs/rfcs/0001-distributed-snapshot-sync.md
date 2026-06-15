@@ -76,21 +76,124 @@ and *how to reconcile* concurrent rollbacks on different nodes.
 ## 4. Data model on the wire
 
 Snapshots are content-addressed by a **digest** derived from the existing
-`memory_checksum` plus a hash of the remaining fields:
-
-```text
-snapshot_digest = SHA-256(
-    memory_checksum_bytes
-    || canonical_cbor(execution_state)
-    || canonical_cbor(fs_changes)
-    || canonical_cbor(metadata)
-)
-```
+`memory_checksum` (the SHA-256 over *decompressed* memory) plus a canonical
+encoding of the structured fields. See §4.1 for the exact, byte-reproducible
+construction. The digest deliberately **excludes** `compressed_size` and the
+compressed bytes — content identity must be invariant to the compression level,
+so two nodes compressing the same memory at different zstd levels still agree on
+the digest.
 
 Rationale: `memory` is large and already hashed via `memory_checksum`; we avoid
-re-hashing megabytes by reusing it and only hashing the small structured tail.
-Canonical CBOR (deterministic map ordering) makes the digest reproducible across
-nodes and language versions.
+re-hashing megabytes by reusing the 32-byte hash and canonically encoding only
+the small structured tail.
+
+### 4.1 Canonical snapshot digest (normative)
+
+The digest is implemented in `src/snapshot/sync/digest.rs` and is **Phase 1 of
+this RFC — the only part approved for implementation today.** It is defined over
+an explicit, hand-rolled, length-prefixed byte encoding (no CBOR/bincode) so that
+determinism is fully under our control and pinnable with test vectors.
+
+**Primitive encoding rules** (all integers little-endian):
+
+| Type | Encoding |
+|------|----------|
+| `u8` | 1 byte |
+| `u32` | 4 bytes LE |
+| `u64` / `usize` | 8 bytes LE |
+| `i32` | 4 bytes LE (two's complement) |
+| `i64` | 8 bytes LE (two's complement) |
+| `f32` | `f32::to_le_bytes` (4 bytes, IEEE-754 bit pattern) |
+| `f64` | `f64::to_le_bytes` (8 bytes, IEEE-754 bit pattern) |
+| `bool` | 1 byte: `0x00` false, `0x01` true |
+| `len_prefixed(b)` | `u32_le(b.len())` then `b` |
+| `string` | `len_prefixed(utf8_bytes)` |
+| `bytes` | `len_prefixed(raw_bytes)` |
+| `vec<T>` | `u32_le(count)` then each element in **stored order** (never sorted) |
+| `option<T>` | `0x00` for `None`; `0x01` then `T` for `Some` |
+
+**Composite encodings (field order is fixed and normative):**
+
+```text
+GlobalValue =
+    I32(x): 0x00 || i32_le(x)
+    I64(x): 0x01 || i64_le(x)
+    F32(x): 0x02 || f32_le(x)
+    F64(x): 0x03 || f64_le(x)
+
+GlobalSnapshot = string(name) || GlobalValue(value) || bool(mutable)
+TableSnapshot  = string(name) || u32_le(size)
+
+ExecutionState =
+    vec<GlobalSnapshot>(captured_globals) ||
+    vec<TableSnapshot>(captured_tables)
+
+FileChange     = string(path) || bytes(content) || option<bytes>(old_content)
+FilesystemDiff =
+    vec<FileChange>(created)  ||
+    vec<FileChange>(modified) ||
+    vec<string>(deleted)      ||
+    vec<string>(dirs_created) ||
+    vec<string>(dirs_deleted)
+
+SnapshotMetadata =
+    string(operation_name) ||
+    string(input_hash)     ||
+    u64_le(creation_time_us) ||
+    u32_le(memory_pages)   ||
+    vec<string>(preconditions)
+```
+
+**Tail and digest:**
+
+```text
+tail = len_prefixed(ExecutionState) ||
+       len_prefixed(FilesystemDiff) ||
+       len_prefixed(SnapshotMetadata)
+
+DOMAIN = b"NEXUS-SNAPSHOT-DIGEST-v1"   // 24 raw ASCII bytes, NO length prefix
+SCHEMA_VERSION : u32 = 1
+
+preimage = DOMAIN
+        || u32_le(SCHEMA_VERSION)
+        || len_prefixed(raw_memory_hash_32)   // raw 32 bytes (not hex), len-prefixed
+        || u64_le(original_size)
+        || tail
+
+snapshot_digest = SHA-256(preimage)           // [u8; 32]
+```
+
+`raw_memory_hash_32` is the 32 raw bytes obtained by hex-decoding
+`Snapshot.memory_checksum` (64 lowercase hex chars). A malformed checksum is a
+hard error, not a silent zero.
+
+**Pinned test vectors** live in `tests/snapshot_sync_digest.rs`. Two classes are
+maintained:
+1. *Encoding vectors* — exact `tail` bytes for the empty snapshot and a small
+   known snapshot, hand-derived from the rules above (independent of the SHA
+   step), so the encoder is verifiable against this spec.
+2. *Digest vectors* — the SHA-256 hex for ≥2 fixed snapshots, captured once and
+   locked as regression guards. Current pinned values (schema v1):
+   - **Vector 1** (memory `b"hello"`, empty fs/exec, metadata `op`/`inputhash`):
+     `259c7eb36029008ad0cd3743be7ce14208b73e2b31a7d50533da962840b549ac`
+   - **Vector 2** (rich: 2 globals, 1 table, all fs buckets, 2 preconditions;
+     memory `b"world-memory"`):
+     `4ddd38e543576f15e7d699d4a52046bdbc9165b46df762289880bc1a8921732c`
+
+   See `tests/snapshot_sync_digest.rs::vector_1`/`vector_2` for exact construction.
+
+Any change to the encoding is a **breaking digest change** and MUST bump
+`SCHEMA_VERSION` and the `DOMAIN` suffix together, with new vectors.
+
+### 4.2 Object identity: digest vs UUID
+
+`Snapshot.id` is a random `Uuid` (`SnapshotManager` assigns it locally). It is
+**not** content identity: two nodes that independently hold byte-identical content
+would assign different UUIDs.
+
+Normative rule: **the wire protocol keys snapshots by `snapshot_digest`.** The
+UUID is preserved as local/logical metadata only and is **not** part of the
+digest preimage (neither is `Snapshot.timestamp`).
 
 Wire frame reuses the daemon's existing length-prefixed framing
 (`src/daemon` — `[u32 BE length][payload]`), extended with a small typed envelope:
@@ -142,11 +245,34 @@ last-writer-wins:
 This mirrors how `requires_rollback()` already keeps rollback decisions explicit
 rather than automatic.
 
+### 5.1 Lineage graph and fork detection (design — not in Phase 1)
+
+A scalar Lamport/HLC timestamp can *order* events but cannot *prove* causal
+ancestry; using it alone would misclassify divergent heads. Fork detection
+therefore needs an explicit parent-linked DAG, with HLC used only for ordering /
+tie-breaking:
+
+```text
+LineageHead {
+    agent_id:      AgentId,
+    head_digest:   SnapshotDigest,
+    parent_digest: Option<SnapshotDigest>,  // None for the root
+    hlc:           HlcTimestamp,
+    node_id:       NodeId,
+    update_id:     Uuid,
+}
+```
+
+Fork detection: given two heads for the same `agent_id`, follow `parent_digest`
+links; if neither head is reachable from the other, it is a **fork** and is
+surfaced (never auto-merged). HLC orders updates and breaks ties for display; the
+parent links are what establish ancestry.
+
 ## 6. Transport options
 
 | Option | Pros | Cons | Verdict |
 |--------|------|------|---------|
-| gRPC streaming (tonic) | Mature, backpressure, TLS/mTLS built in, bidi streams fit Advertise/Want | New heavy dep tree; HTTP/2 overhead for LAN | **Recommended for v1** |
+| gRPC streaming (tonic) | Mature, backpressure, TLS/mTLS built in, bidi streams fit Advertise/Want | New heavy dep tree; HTTP/2 overhead for LAN | Phase 3 (networked profile) |
 | QUIC (quinn) | Lower latency, multiplexed, great for WAN/lossy links | Younger ecosystem; more to get right | Future / WAN profile |
 | Custom binary over the existing daemon framing | Reuses `[u32 BE len][payload]`; zero new deps; consistent with `nexus-agentd` | We re-implement auth, flow control, retries | Good for a minimal embedded mode |
 
@@ -184,6 +310,43 @@ pre-shared node key with an HMAC over each frame.
   must re-run the *same* capability authorization the original execution required
   (`metadata.preconditions`) — never replay filesystem effects unconditionally.
   This is the cross-cutting tie-in to the capability model (and RFC 0003).
+
+### 8.1 Restore authorization (design — not in Phase 1)
+
+**v1 does not auto-apply replicated `fs_changes`.** Memory + `execution_state`
+may be restored; `fs_changes` is replicated as metadata only until an explicit
+restore-authorization path exists. Before any replicated `fs_changes` is applied,
+the restorer MUST:
+
+- normalize each path; reject absolute paths (unless explicitly allowed) and any
+  `..` traversal; reject symlink escape; enforce a mount root;
+- re-validate the originating capability (`metadata.preconditions`) — never replay
+  filesystem effects unconditionally;
+- dry-run the full operation set, then apply atomically or roll back partial
+  writes.
+
+The lesson from CRIU is that restoring *external side effects* is the hard part;
+Nexus keeps that surface closed until it is explicitly designed.
+
+### 8.2 Anti-replay (design — not in Phase 1)
+
+Per-frame HMAC alone does not stop replay of a captured-but-valid frame. The
+daemon-framing transport binds each frame to a session and a monotonic sequence:
+
+```text
+frame_mac = HMAC(node_key,
+    proto_version || session_id || seq || nonce || kind || SHA-256(body))
+```
+
+Receivers reject duplicate or out-of-order `seq` per `session_id`. `session_id`
+is fresh per connection; `seq` is monotonic; `nonce` adds freshness.
+
+### 8.3 Versioning (design)
+
+Distinct version axes, each checked on receipt with a clean Nack on mismatch:
+`proto_version` (wire envelope), `snapshot_schema_version` (snapshot fields/enums;
+also bound into the digest per §4.1), `codec_version` (encoding format),
+`capability_schema_version`, and a `compression` descriptor (algorithm + level).
 
 ## 9. Phased implementation plan
 
