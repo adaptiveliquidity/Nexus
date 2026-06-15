@@ -76,6 +76,9 @@ bench-snapshot-rollback = []
 bench-execute-tool = []
 bench-execute-real-memory = []
 bench-integrated = []
+# Concurrent sandbox density benchmark (pooled vs non-pooled). Heavy and
+# noisy by design — run manually or on a nightly schedule, not on every PR.
+bench-density = []
 # Optional LLM-backed recovery suggester (Phase B). Off by default so
 # `cargo build` does not pull in HTTP / TLS / token-secret handling for
 # users who only want the static + instinct policies.
@@ -107,6 +110,14 @@ path = "examples/wasi_capability_demo/host.rs"
 [[bench]]
 name = "nexus_validation"
 harness = false
+
+# Density benchmark: custom harness (own percentile + RSS measurement,
+# JSON sidecar output). Gated behind bench-density so it never runs in the
+# default `cargo bench` / PR CI surface.
+[[bench]]
+name = "density_validation"
+harness = false
+required-features = ["bench-density"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codspeed)'] }

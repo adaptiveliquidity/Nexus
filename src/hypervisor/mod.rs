@@ -24,7 +24,10 @@ use std::time::{Duration, Instant};
 use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
-use crate::sandbox::{FuelBudgetPolicy, FuelProfile, SandboxConfig, WasiToolConfig, WasmSandbox};
+use crate::sandbox::{
+    FuelBudgetPolicy, FuelProfile, PoolConfig, SandboxConfig, SandboxPool, WasiToolConfig,
+    WasmSandbox,
+};
 use crate::security::{Capability, CapabilityManager};
 use crate::snapshot::{
     ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
@@ -88,6 +91,11 @@ pub struct HypervisorConfig {
     pub sandbox_config: SandboxConfig,
     pub max_retries: u32,
     pub retry_delay: Duration,
+    /// Opt-in warm sandbox pool. When `Some`, `execute_tool` runs the WASM on
+    /// a pooling-allocator engine with a shared compiled-module cache. When
+    /// `None` (default), the original per-call `WasmSandbox` path is used —
+    /// behavior is unchanged.
+    pub pool_config: Option<PoolConfig>,
 }
 
 impl Default for HypervisorConfig {
@@ -100,6 +108,7 @@ impl Default for HypervisorConfig {
             sandbox_config: SandboxConfig::default(),
             max_retries: 3,
             retry_delay: Duration::from_millis(100),
+            pool_config: None,
         }
     }
 }
@@ -131,6 +140,9 @@ pub struct NexusHypervisor {
     last_rollback_memory: RwLock<Option<Vec<u8>>>,
     /// Execution state (globals/tables) from the most recent rollback.
     last_rollback_execution_state: RwLock<Option<ExecutionState>>,
+    /// Opt-in warm sandbox pool. Built from `config.pool_config` when set.
+    /// `None` preserves the original per-call execution path.
+    pool: Option<Arc<SandboxPool>>,
 }
 
 impl NexusHypervisor {
@@ -172,6 +184,13 @@ impl NexusHypervisor {
 
         let fuel_policy = FuelBudgetPolicy::new(sandbox_config.max_fuel);
 
+        // Opt-in warm pool. Built once at construction so the pooling-allocator
+        // engine and its module cache live for the hypervisor's lifetime.
+        let pool = match &config.pool_config {
+            Some(pc) => Some(Arc::new(SandboxPool::new(pc.clone())?)),
+            None => None,
+        };
+
         Ok(NexusHypervisor {
             config,
             sandbox: RwLock::new(sandbox),
@@ -185,6 +204,7 @@ impl NexusHypervisor {
             fuel_policy: RwLock::new(fuel_policy),
             last_rollback_memory: RwLock::new(None),
             last_rollback_execution_state: RwLock::new(None),
+            pool,
         })
     }
 
@@ -212,6 +232,17 @@ impl NexusHypervisor {
     /// Returns true when self-correction is active (instinct store attached).
     pub fn self_correction_enabled(&self) -> bool {
         self.instinct_store.is_some()
+    }
+
+    /// Returns true when the opt-in warm sandbox pool is active.
+    pub fn pool_enabled(&self) -> bool {
+        self.pool.is_some()
+    }
+
+    /// Access the warm sandbox pool, if configured. Used by benchmarks and
+    /// callers that want pool stats (cache hits, available permits).
+    pub fn pool(&self) -> Option<&Arc<SandboxPool>> {
+        self.pool.as_ref()
     }
 
     /// Access the sandbox's wasmtime `Engine` for use with `ModuleCache`.
@@ -505,7 +536,10 @@ impl NexusHypervisor {
         // Adaptive fuel budget: override per-invocation max_fuel with
         // the policy's recommendation for this tool.
         let tool_budget = self.fuel_policy.read().unwrap().budget_for(&tool.name);
-        {
+        // The adaptive per-tool fuel budget is applied to the default
+        // per-call sandbox. The pool path uses its own fixed sandbox config,
+        // so this swap is skipped when the pool is active.
+        if self.pool.is_none() {
             let mut sandbox = self.sandbox.write().unwrap();
             // Temporarily swap the sandbox to one configured with the
             // per-tool budget. We rebuild only when the budget differs
@@ -529,6 +563,11 @@ impl NexusHypervisor {
                 .read()
                 .unwrap()
                 .execute_precompiled(module, &[input_bytes])?
+        } else if let Some(pool) = &self.pool {
+            // Opt-in warm pool: acquire a slot, run on the pooling-allocator
+            // engine with a cached compiled module. Isolation is preserved —
+            // each call still gets a fresh Store + Instance.
+            pool.execute_pooled(&tool.wasm_bytes, &[input_bytes]).await?
         } else {
             self.sandbox
                 .read()

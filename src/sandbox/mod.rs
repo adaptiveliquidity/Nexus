@@ -4,12 +4,16 @@
 
 pub mod fuel_budget;
 pub mod fuel_meter;
+pub mod module_cache;
+pub mod pool;
 pub mod wasi;
 pub mod wasm_memory;
 pub mod wasm_runtime;
 
 pub use fuel_budget::{FuelBudgetPolicy, FuelProfile};
 pub use fuel_meter::{presets, FuelMeter, FuelStats};
+pub use module_cache::ModuleCache;
+pub use pool::{PoolConfig, PooledModulePermit, SandboxPool};
 pub use wasi::{
     PreOpen, ValidatedWasiToolConfig, WasiAccess, WasiMount, WasiSandboxConfig, WasiToolConfig,
 };

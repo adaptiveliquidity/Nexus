@@ -21,9 +21,10 @@ pub use hypervisor::{
 };
 pub use instinct::{Instinct, InstinctPolicy, InstinctStats, InstinctStore};
 pub use sandbox::{
-    ExecutionResult, FuelBudgetPolicy, FuelMeter, FuelProfile, FuelStats, MemoryStats, PreOpen,
-    SandboxConfig, StepCapture, WasiAccess, WasiMount, WasiSandboxConfig, WasiToolConfig,
-    WasmExecutionSnapshot, WasmMemoryState, WasmSandbox,
+    ExecutionResult, FuelBudgetPolicy, FuelMeter, FuelProfile, FuelStats, MemoryStats, ModuleCache,
+    PoolConfig, PooledModulePermit, PreOpen, SandboxConfig, SandboxPool, StepCapture, WasiAccess,
+    WasiMount, WasiSandboxConfig, WasiToolConfig, WasmExecutionSnapshot, WasmMemoryState,
+    WasmSandbox,
 };
 pub use security::{Capability, CapabilityManager, CapabilityToken};
 pub use snapshot::{

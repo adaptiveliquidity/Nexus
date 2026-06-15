@@ -152,7 +152,12 @@ pub struct StepCapture {
     pub globals: Vec<crate::snapshot::GlobalSnapshot>,
 }
 
-/// WASM Micro-Sandbox with fuel metering
+/// WASM Micro-Sandbox with fuel metering.
+///
+/// Cloning is cheap: `engine` is an `Arc` and `config` is a small value type.
+/// The pool clones a sandbox into a blocking task so pooled execution does not
+/// block a tokio worker thread.
+#[derive(Clone)]
 pub struct WasmSandbox {
     pub(crate) engine: Arc<Engine>,
     pub(crate) config: SandboxConfig,
@@ -206,6 +211,15 @@ impl WasmSandbox {
             engine: Arc::new(engine),
             config,
         })
+    }
+
+    /// Build a sandbox from a pre-configured `Engine`.
+    ///
+    /// Used by [`crate::sandbox::pool::SandboxPool`] so cached modules are
+    /// compiled with — and executed on — the pool's pooling-allocator engine.
+    /// The engine must have `consume_fuel(true)` set, matching [`Self::new`].
+    pub fn from_engine(engine: Arc<Engine>, config: SandboxConfig) -> Self {
+        WasmSandbox { engine, config }
     }
 
     /// Access the wasmtime `Engine` for use with `ModuleCache`.
@@ -423,7 +437,9 @@ impl WasmSandbox {
         tables
     }
 
-    fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
+    /// Execute a pre-compiled module. Public so [`crate::sandbox::pool`] can
+    /// run modules from its cache on the pooled engine.
+    pub fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
         let start = Instant::now();
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
