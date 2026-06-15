@@ -133,8 +133,6 @@ async fn run(
     pool: Arc<HypervisorPool>,
     module_cache: Arc<ModuleCache>,
 ) -> anyhow::Result<()> {
-    use tokio::net::windows::named_pipe::ServerOptions;
-
     let pipe_name = socket
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("pipe path is not valid UTF-8"))?;
@@ -143,9 +141,7 @@ async fn run(
 
     // Create the first pipe instance before logging "ready" so clients can
     // connect immediately after the message appears.
-    let mut server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(pipe_name)?;
+    let mut server = create_restricted_named_pipe_server(pipe_name, true)?;
 
     info!(target: "nexus.agentd", "ready");
 
@@ -164,7 +160,7 @@ async fn run(
                 // Hand the connected pipe to a task and create a fresh
                 // instance for the next client.
                 let connected = server;
-                server = ServerOptions::new().create(pipe_name)?;
+                server = create_restricted_named_pipe_server(pipe_name, false)?;
 
                 let pool = pool.clone();
                 let mc = module_cache.clone();
@@ -177,6 +173,135 @@ async fn run(
                 });
             }
         }
+    }
+}
+
+#[cfg(windows)]
+fn create_restricted_named_pipe_server(
+    pipe_name: &str,
+    first_pipe_instance: bool,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let mut options = ServerOptions::new();
+    if first_pipe_instance {
+        options.first_pipe_instance(true);
+    }
+
+    let mut security = RestrictedPipeSecurity::new()?;
+    // The descriptor is consumed by CreateNamedPipeW during this call; the
+    // wrapper keeps SECURITY_ATTRIBUTES valid for the syscall.
+    unsafe { options.create_with_security_attributes_raw(pipe_name, security.as_mut_ptr()) }
+}
+
+#[cfg(windows)]
+struct RestrictedPipeSecurity {
+    descriptor: *mut std::ffi::c_void,
+    attrs: SecurityAttributes,
+}
+
+#[cfg(windows)]
+impl RestrictedPipeSecurity {
+    fn new() -> std::io::Result<Self> {
+        let descriptor = security_descriptor_from_sddl(RESTRICTED_PIPE_SDDL)?;
+        Ok(Self {
+            descriptor,
+            attrs: SecurityAttributes {
+                n_length: std::mem::size_of::<SecurityAttributes>() as u32,
+                lp_security_descriptor: descriptor,
+                b_inherit_handle: 0,
+            },
+        })
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut std::ffi::c_void {
+        (&mut self.attrs as *mut SecurityAttributes).cast()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RestrictedPipeSecurity {
+    fn drop(&mut self) {
+        if !self.descriptor.is_null() {
+            unsafe {
+                let _ = LocalFree(self.descriptor);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct SecurityAttributes {
+    n_length: u32,
+    lp_security_descriptor: *mut std::ffi::c_void,
+    b_inherit_handle: i32,
+}
+
+#[cfg(windows)]
+// Protected DACL: explicitly deny network logons and grant the object owner.
+// Other SIDs, including Everyone, receive no allow ACE.
+const RESTRICTED_PIPE_SDDL: &str = "D:P(D;;GA;;;NU)(A;;GA;;;OW)";
+
+#[cfg(windows)]
+fn security_descriptor_from_sddl(sddl: &str) -> std::io::Result<*mut std::ffi::c_void> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(sddl)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor = std::ptr::null_mut();
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(descriptor)
+}
+
+#[cfg(windows)]
+const SDDL_REVISION_1: u32 = 1;
+
+#[cfg(windows)]
+#[link(name = "advapi32")]
+extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string_security_descriptor: *const u16,
+        string_sd_revision: u32,
+        security_descriptor: *mut *mut std::ffi::c_void,
+        security_descriptor_size: *mut u32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn LocalFree(mem: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+#[cfg(all(test, windows))]
+mod windows_pipe_acl_tests {
+    use super::*;
+
+    #[test]
+    fn restricted_pipe_security_descriptor_is_buildable() {
+        let security = RestrictedPipeSecurity::new().unwrap();
+        assert!(!security.descriptor.is_null());
+        assert_eq!(security.attrs.b_inherit_handle, 0);
+    }
+
+    #[test]
+    fn restricted_pipe_sddl_denies_network_and_allows_owner_only() {
+        assert!(RESTRICTED_PIPE_SDDL.contains("(D;;GA;;;NU)"));
+        assert!(RESTRICTED_PIPE_SDDL.contains("(A;;GA;;;OW)"));
+        assert!(!RESTRICTED_PIPE_SDDL.contains(";;;WD)"));
     }
 }
 
@@ -283,4 +408,3 @@ fn num_logical_cpus() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
 }
-

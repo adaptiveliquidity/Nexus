@@ -92,10 +92,8 @@ impl WasiToolConfig {
         self
     }
 
-    /// Derive required capabilities without filesystem side effects.
-    ///
-    /// Used by the hypervisor to authorize before `validate()` touches the
-    /// filesystem (which creates missing mount directories).
+    /// Derive required capabilities using the same canonical host paths as
+    /// `validate()`.
     pub fn required_capabilities(&self) -> Result<Vec<Capability>> {
         let mut caps = Vec::with_capacity(self.mounts.len() * 2);
         let mut guest_paths = HashSet::new();
@@ -117,11 +115,7 @@ impl WasiToolConfig {
             }
             normalized_guests.push(guest_path.clone());
 
-            let host_path = if mount.host_path.exists() {
-                std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone())
-            } else {
-                mount.host_path.clone()
-            };
+            let host_path = canonicalize_mount_dir(&mount.host_path)?;
             caps.push(Capability::ReadFile(host_path.clone()));
             if matches!(mount.access, WasiAccess::ReadWrite) {
                 caps.push(Capability::WriteFile(host_path));
@@ -664,4 +658,39 @@ fn capture_tables_wasi(
         }
     }
     tables
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn required_capabilities_and_validate_use_same_canonical_host_path() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        let target = outside.join("target");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&target, allowed.join("link")).unwrap();
+
+        let raw_mount = allowed.join("link").join("..");
+        let expected = std::fs::canonicalize(&outside).unwrap();
+        let config = WasiToolConfig::new().with_mount(&raw_mount, "/data", WasiAccess::ReadWrite);
+
+        let required = config.required_capabilities().unwrap();
+        let validated = config.validate().unwrap();
+
+        assert_eq!(validated.sandbox_config.preopens[0].host_path, expected);
+        assert_eq!(required, validated.required_capabilities);
+        assert!(required.contains(&Capability::ReadFile(expected.clone())));
+        assert!(required.contains(&Capability::WriteFile(expected)));
+        assert!(
+            !required.contains(&Capability::ReadFile(raw_mount)),
+            "raw symlink traversal path must not be authorized"
+        );
+    }
 }

@@ -30,6 +30,10 @@ struct McpClient {
 
 impl McpClient {
     async fn spawn() -> Self {
+        Self::spawn_with_module_dir(None).await
+    }
+
+    async fn spawn_with_module_dir(module_dir: Option<&std::path::Path>) -> Self {
         let bin = cargo_bin();
         assert!(
             bin.exists(),
@@ -37,13 +41,17 @@ impl McpClient {
             bin
         );
 
-        let mut child = Command::new(&bin)
+        let mut command = Command::new(&bin);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("failed to spawn nexus-mcp");
+            .kill_on_drop(true);
+        if let Some(module_dir) = module_dir {
+            command.env("NEXUS_MCP_MODULE_DIR", module_dir);
+        }
+
+        let mut child = command.spawn().expect("failed to spawn nexus-mcp");
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -249,7 +257,7 @@ async fn execute_wasi_grants_requested_read_file_capability() {
     .unwrap();
     fs::write(&wasm_path, wasm).unwrap();
 
-    let mut client = McpClient::spawn().await;
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
 
     client
         .request(
