@@ -5,6 +5,7 @@
 pub mod compression;
 pub mod differential;
 pub mod manager;
+pub mod sync;
 
 pub use compression::{
     compress, compress_snapshot_memory, decompress, decompress_snapshot_memory, CompressedData,
@@ -18,3 +19,4 @@ pub use manager::{
     FilesystemDiff, GlobalSnapshot, GlobalValue, RevertOperation, RollbackResult, Snapshot,
     SnapshotManager, SnapshotMetadata, SnapshotRingBuffer, SnapshotStats, TableSnapshot,
 };
+pub use sync::{digest_of, verify_snapshot_digest, SnapshotDigest};
