@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use rmcp::{handler::server::wrapper::Parameters, schemars, tool, tool_router, ServiceExt, transport::stdio};
+use rmcp::{
+    handler::server::wrapper::Parameters, schemars, tool, tool_router, transport::stdio, ServiceExt,
+};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{self, EnvFilter};
 use uuid::Uuid;
@@ -40,13 +42,17 @@ pub struct ExecuteWasiParams {
     pub entry: Option<String>,
     #[schemars(description = "JSON input to pass to the WASM module")]
     pub input: Option<serde_json::Value>,
-    #[schemars(description = "Capabilities to grant: array of {type, path?} objects. Types: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all")]
+    #[schemars(
+        description = "Capabilities to grant: array of {type, path?} objects. Types: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+    )]
     pub capabilities: Option<Vec<CapabilitySpec>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CapabilitySpec {
-    #[schemars(description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all")]
+    #[schemars(
+        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+    )]
     pub r#type: String,
     #[schemars(description = "Path or URL pattern for the capability (not needed for 'all')")]
     pub path: Option<String>,
@@ -66,7 +72,9 @@ pub struct SnapshotRollbackParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IssueTokenParams {
-    #[schemars(description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all")]
+    #[schemars(
+        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+    )]
     pub capability: String,
     #[schemars(description = "Path or URL pattern for the capability")]
     pub path: Option<String>,
@@ -101,50 +109,79 @@ pub struct NexusMcpServer {
 
 #[tool_router(server_handler)]
 impl NexusMcpServer {
-    #[tool(description = "Execute a WASM tool in the Nexus sandbox. Loads the .wasm file, runs it with optional JSON input, and returns structured output including success/failure, result bytes, execution time, and fuel consumed.")]
+    #[tool(
+        description = "Execute a WASM tool in the Nexus sandbox. Loads the .wasm file, runs it with optional JSON input, and returns structured output including success/failure, result bytes, execution time, and fuel consumed."
+    )]
     async fn nexus_execute(&self, Parameters(params): Parameters<ExecuteParams>) -> String {
         match self.do_execute(params).await {
-            Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+            Ok(output) => serde_json::to_string_pretty(&output)
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
             Err(e) => format!("{{\"error\": \"{e}\"}}"),
         }
     }
 
-    #[tool(description = "Execute a WASM tool with WASI support (filesystem, env, stdio access). Grants specified capabilities for the duration of execution.")]
-    async fn nexus_execute_wasi(&self, Parameters(params): Parameters<ExecuteWasiParams>) -> String {
+    #[tool(
+        description = "Execute a WASM tool with WASI support (filesystem, env, stdio access). Grants specified capabilities for the duration of execution."
+    )]
+    async fn nexus_execute_wasi(
+        &self,
+        Parameters(params): Parameters<ExecuteWasiParams>,
+    ) -> String {
         match self.do_execute_wasi(params).await {
-            Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+            Ok(output) => serde_json::to_string_pretty(&output)
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
             Err(e) => format!("{{\"error\": \"{e}\"}}"),
         }
     }
 
-    #[tool(description = "Create a snapshot of the current hypervisor state. Returns the snapshot UUID which can be used for rollback.")]
-    async fn nexus_snapshot_create(&self, Parameters(params): Parameters<SnapshotCreateParams>) -> String {
+    #[tool(
+        description = "Create a snapshot of the current hypervisor state. Returns the snapshot UUID which can be used for rollback."
+    )]
+    async fn nexus_snapshot_create(
+        &self,
+        Parameters(params): Parameters<SnapshotCreateParams>,
+    ) -> String {
         match self.do_snapshot_create(params) {
             Ok(id) => format!("{{\"snapshot_id\": \"{id}\", \"success\": true}}"),
             Err(e) => format!("{{\"error\": \"{e}\"}}"),
         }
     }
 
-    #[tool(description = "Roll back to a previous snapshot, restoring memory, execution state, and filesystem to that point in time.")]
-    async fn nexus_snapshot_rollback(&self, Parameters(params): Parameters<SnapshotRollbackParams>) -> String {
+    #[tool(
+        description = "Roll back to a previous snapshot, restoring memory, execution state, and filesystem to that point in time."
+    )]
+    async fn nexus_snapshot_rollback(
+        &self,
+        Parameters(params): Parameters<SnapshotRollbackParams>,
+    ) -> String {
         match self.do_snapshot_rollback(params) {
-            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+            Ok(info) => serde_json::to_string_pretty(&info)
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
             Err(e) => format!("{{\"error\": \"{e}\"}}"),
         }
     }
 
-    #[tool(description = "Issue a capability token that can be passed to execute_wasi calls. Tokens are time-limited and scoped to a specific capability.")]
+    #[tool(
+        description = "Issue a capability token that can be passed to execute_wasi calls. Tokens are time-limited and scoped to a specific capability."
+    )]
     async fn nexus_issue_token(&self, Parameters(params): Parameters<IssueTokenParams>) -> String {
         match self.do_issue_token(params) {
-            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+            Ok(info) => serde_json::to_string_pretty(&info)
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
             Err(e) => format!("{{\"error\": \"{e}\"}}"),
         }
     }
 
-    #[tool(description = "Fork execution into multiple branches and race them concurrently. Returns the first successful branch's output. Useful for speculative recovery and parallel exploration.")]
-    async fn nexus_fork_and_race(&self, Parameters(params): Parameters<ForkAndRaceParams>) -> String {
+    #[tool(
+        description = "Fork execution into multiple branches and race them concurrently. Returns the first successful branch's output. Useful for speculative recovery and parallel exploration."
+    )]
+    async fn nexus_fork_and_race(
+        &self,
+        Parameters(params): Parameters<ForkAndRaceParams>,
+    ) -> String {
         match self.do_fork_and_race(params).await {
-            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+            Ok(info) => serde_json::to_string_pretty(&info)
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
             Err(e) => format!("{{\"error\": \"{e}\"}}"),
         }
     }
@@ -167,8 +204,9 @@ impl From<ToolOutput> for ToolOutputResponse {
         ToolOutputResponse {
             success: o.success,
             result: o.result.map(|b| {
-                String::from_utf8(b.clone())
-                    .unwrap_or_else(|_| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b))
+                String::from_utf8(b.clone()).unwrap_or_else(|_| {
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b)
+                })
             }),
             error: o.error,
             execution_time_ms: o.execution_time_ms,
@@ -203,8 +241,9 @@ struct ForkAndRaceResponse {
 
 impl NexusMcpServer {
     async fn do_execute(&self, params: ExecuteParams) -> Result<ToolOutputResponse> {
-        let wasm_bytes = tokio::fs::read(&params.wasm_path).await
-            .map_err(|e| anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e))?;
+        let wasm_bytes = tokio::fs::read(&params.wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
 
         let mut tool = ToolDefinition::new("mcp_tool".to_string(), wasm_bytes);
         if let Some(entry) = params.entry {
@@ -217,23 +256,37 @@ impl NexusMcpServer {
     }
 
     async fn do_execute_wasi(&self, params: ExecuteWasiParams) -> Result<ToolOutputResponse> {
-        let wasm_bytes = tokio::fs::read(&params.wasm_path).await
-            .map_err(|e| anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e))?;
+        let wasm_bytes = tokio::fs::read(&params.wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
 
         let mut tool = ToolDefinition::new("mcp_tool_wasi".to_string(), wasm_bytes);
         if let Some(entry) = params.entry {
             tool = tool.with_entry(&entry);
         }
 
-        let caps: Vec<Capability> = params.capabilities
+        let caps: Vec<Capability> = params
+            .capabilities
             .unwrap_or_default()
             .into_iter()
             .filter_map(|spec| parse_capability(&spec))
             .collect();
+        let mut caller_tokens = Vec::with_capacity(caps.len());
+        for capability in &caps {
+            let (capability, validity_secs) = sanitize_token_request(capability.clone(), None)?;
+            let validity = Duration::from_secs(validity_secs);
+            caller_tokens.push(
+                self.hypervisor
+                    .issue_token(capability, "mcp_client", validity)?,
+            );
+        }
         tool = tool.with_capabilities(caps);
 
         let input = params.input.unwrap_or(serde_json::json!({}));
-        let output = self.hypervisor.execute_tool_wasi(tool, input, &[]).await?;
+        let output = self
+            .hypervisor
+            .execute_tool_wasi(tool, input, &caller_tokens)
+            .await?;
         Ok(ToolOutputResponse::from(output))
     }
 
@@ -279,7 +332,9 @@ impl NexusMcpServer {
         // caller-supplied validity to a bounded maximum (see SECURITY.md).
         let (capability, validity_secs) = sanitize_token_request(capability, params.validity_secs)?;
         let validity = Duration::from_secs(validity_secs);
-        let token = self.hypervisor.issue_token(capability.clone(), "mcp_client", validity)?;
+        let token = self
+            .hypervisor
+            .issue_token(capability.clone(), "mcp_client", validity)?;
 
         Ok(TokenResponse {
             token_id: token.id.to_string(),
@@ -289,12 +344,14 @@ impl NexusMcpServer {
     }
 
     async fn do_fork_and_race(&self, params: ForkAndRaceParams) -> Result<ForkAndRaceResponse> {
-        let wasm_bytes = tokio::fs::read(&params.wasm_path).await
-            .map_err(|e| anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e))?;
+        let wasm_bytes = tokio::fs::read(&params.wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
 
         let base_snapshot_id = Uuid::new_v4();
 
-        let branches: Vec<SpeculativeBranch> = params.branches
+        let branches: Vec<SpeculativeBranch> = params
+            .branches
             .into_iter()
             .map(|spec| {
                 let mut tool = ToolDefinition::new("fork_branch".to_string(), wasm_bytes.clone());
@@ -327,7 +384,8 @@ impl NexusMcpServer {
                 let input = serde_json::json!({});
                 hyp.execute_tool(branch.tool, input).await
             }
-        }).await?;
+        })
+        .await?;
 
         Ok(ForkAndRaceResponse {
             winner_branch_id: result.winner.branch_id.to_string(),
@@ -417,7 +475,10 @@ mod tests {
     #[test]
     fn rejects_all_capability_for_mcp_clients() {
         let r = sanitize_token_request(Capability::All, Some(60));
-        assert!(r.is_err(), "MCP clients must not be able to mint Capability::All");
+        assert!(
+            r.is_err(),
+            "MCP clients must not be able to mint Capability::All"
+        );
     }
 
     #[test]
@@ -431,7 +492,8 @@ mod tests {
     #[test]
     fn preserves_reasonable_validity() {
         let (_, secs) =
-            sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), Some(120)).unwrap();
+            sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), Some(120))
+                .unwrap();
         assert_eq!(secs, 120);
     }
 
