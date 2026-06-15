@@ -5,6 +5,7 @@
 //! are intentionally absent here.
 
 pub mod digest;
+pub mod framed;
 pub mod protocol;
 pub mod transport;
 
@@ -12,5 +13,6 @@ pub use digest::{
     canonical_encode_snapshot_tail, digest_of, verify_snapshot_digest, SnapshotDigest,
     DIGEST_DOMAIN, SNAPSHOT_DIGEST_SCHEMA_VERSION,
 };
+pub use framed::{replicate_framed, FramedSyncTransport, SyncAuthConfig};
 pub use protocol::{NackReason, SyncMessage, SyncNode};
 pub use transport::{replicate, InMemoryTransport, SyncTransport};

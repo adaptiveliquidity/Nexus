@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Hard cap on a single frame's payload size. Refusing a frame larger
 /// than this prevents allocating multi-GB buffers from a malicious peer.
-const DEFAULT_MAX_PAYLOAD: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 
 pub async fn read_frame<R: AsyncReadExt + Unpin, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
     read_frame_with_limit(r, DEFAULT_MAX_PAYLOAD).await
@@ -23,6 +23,20 @@ pub async fn read_frame_with_limit<R: AsyncReadExt + Unpin, T: DeserializeOwned>
     r: &mut R,
     max_payload: usize,
 ) -> io::Result<T> {
+    let buf = read_raw_frame_with_limit(r, max_payload).await?;
+    serde_json::from_slice(&buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON: {e}")))
+}
+
+/// Read one raw length-prefixed payload.
+///
+/// This preserves the daemon's `[u32 BE length][payload bytes]` framing
+/// without deserializing the payload. Authenticated protocols must use this
+/// helper so they can verify MACs before parsing untrusted body bytes.
+pub async fn read_raw_frame_with_limit<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+    max_payload: usize,
+) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -34,8 +48,7 @@ pub async fn read_frame_with_limit<R: AsyncReadExt + Unpin, T: DeserializeOwned>
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
-    serde_json::from_slice(&buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON: {e}")))
+    Ok(buf)
 }
 
 pub async fn write_frame<W: AsyncWriteExt + Unpin, T: Serialize>(
@@ -44,10 +57,16 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin, T: Serialize>(
 ) -> io::Result<()> {
     let body = serde_json::to_vec(msg)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {e}")))?;
+    write_raw_frame(w, &body).await
+}
+
+/// Write one raw payload using the daemon's `[u32 BE length][payload bytes]`
+/// framing.
+pub async fn write_raw_frame<W: AsyncWriteExt + Unpin>(w: &mut W, body: &[u8]) -> io::Result<()> {
     let len = u32::try_from(body.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "payload exceeds u32 max"))?;
     w.write_all(&len.to_be_bytes()).await?;
-    w.write_all(&body).await?;
+    w.write_all(body).await?;
     w.flush().await?;
     Ok(())
 }

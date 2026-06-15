@@ -47,6 +47,7 @@ sysinfo = "0.32"
 
 # SHA for content hashing
 sha2 = "0.10"
+hmac = "0.12"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
