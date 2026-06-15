@@ -10,7 +10,9 @@ use std::sync::RwLock;
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthStatus, ResourceSnapshot};
 
+pub mod call_stack;
 pub mod trace;
+pub use call_stack::{CaptureSite, CapturedCallStack, StackFrame};
 pub use trace::{hash_memory, Checkpoint, ExecutionTrace, TraceConfig, TraceReplay};
 
 /// An execution record for history

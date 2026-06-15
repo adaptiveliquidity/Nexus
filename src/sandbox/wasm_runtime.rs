@@ -9,6 +9,7 @@ use wasmtime::{Config, Engine, Linker, Module, Store};
 
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
+use crate::telemetry::{CaptureSite, CapturedCallStack};
 
 /// Configuration for the WASM sandbox
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +71,11 @@ pub struct ExecutionResult {
     pub post_call_globals: Option<Vec<crate::snapshot::GlobalSnapshot>>,
     /// Post-call exported tables (captured after entrypoint returns)
     pub post_call_tables: Option<Vec<crate::snapshot::TableSnapshot>>,
+    /// Diagnostic-only WASM call stack captured at a trap/failure site.
+    ///
+    /// This is never serialized into [`crate::snapshot::ExecutionState`] and
+    /// must not affect memory checksums or snapshot digests.
+    pub call_stack: Option<CapturedCallStack>,
 }
 
 impl ExecutionResult {
@@ -86,11 +92,17 @@ impl ExecutionResult {
             syscall_count: 0,
             post_call_globals: None,
             post_call_tables: None,
+            call_stack: None,
         }
     }
 
     pub fn with_pre_call_memory(mut self, mem: Option<Vec<u8>>) -> Self {
         self.pre_call_memory = mem;
+        self
+    }
+
+    pub fn with_call_stack(mut self, call_stack: Option<CapturedCallStack>) -> Self {
+        self.call_stack = call_stack;
         self
     }
 
@@ -119,6 +131,7 @@ impl ExecutionResult {
             syscall_count: 0,
             post_call_globals: None,
             post_call_tables: None,
+            call_stack: None,
         }
     }
 
@@ -135,6 +148,7 @@ impl ExecutionResult {
             syscall_count: 0,
             post_call_globals: None,
             post_call_tables: None,
+            call_stack: None,
         }
     }
 }
@@ -180,6 +194,7 @@ enum ExecReply {
         pre_call_memory: Option<Vec<u8>>,
         globals: Vec<crate::snapshot::GlobalSnapshot>,
         tables: Vec<crate::snapshot::TableSnapshot>,
+        call_stack: Option<CapturedCallStack>,
     },
 }
 
@@ -464,6 +479,7 @@ impl WasmSandbox {
                     pre_call_memory: None,
                     globals: Vec::new(),
                     tables: Vec::new(),
+                    call_stack: None,
                 });
                 return;
             }
@@ -479,6 +495,7 @@ impl WasmSandbox {
                         pre_call_memory: None,
                         globals: Vec::new(),
                         tables: Vec::new(),
+                        call_stack: None,
                     });
                     return;
                 }
@@ -521,6 +538,7 @@ impl WasmSandbox {
                             pre_call_memory,
                             globals: Vec::new(),
                             tables: Vec::new(),
+                            call_stack: None,
                         });
                         return;
                     }
@@ -545,6 +563,16 @@ impl WasmSandbox {
                     });
                 }
                 Err(e) => {
+                    // RFC 0002 Option A: capture diagnostic frames only when
+                    // execution has already failed. Wasmtime 45 does not expose
+                    // locals, operand-stack values, or a restore/resume API, so
+                    // this metadata must never become snapshot state. Function
+                    // names and offsets depend on current wasmtime config and
+                    // module debug/name/address-map data; do not force-enable
+                    // expensive debug info globally here.
+                    let call_stack = e
+                        .downcast_ref::<wasmtime::WasmBacktrace>()
+                        .map(|bt| CapturedCallStack::from_wasm_backtrace(bt, CaptureSite::Trap));
                     let mode = FailureMode::from_anyhow_error(&e)
                         .unwrap_or_else(|| FailureMode::HostError(format!("wasm error: {e:#}")));
                     let mode = match mode {
@@ -559,6 +587,7 @@ impl WasmSandbox {
                         pre_call_memory,
                         globals,
                         tables,
+                        call_stack,
                     });
                 }
             }
@@ -587,12 +616,14 @@ impl WasmSandbox {
                 pre_call_memory,
                 globals,
                 tables,
+                call_stack,
             }) => {
                 let _ = handle.join();
                 Ok(
                     ExecutionResult::failure_from_mode(mode, fuel_consumed, duration_ms)
                         .with_pre_call_memory(pre_call_memory)
-                        .with_post_call_state(globals, tables),
+                        .with_post_call_state(globals, tables)
+                        .with_call_stack(call_stack),
                 )
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
