@@ -1,0 +1,119 @@
+{
+  "benchmark": "sandbox_density",
+  "note": "Custom-harness density measurement. No pooled-vs-nonpooled claim is implied; read the numbers directly.",
+  "measured_on": {
+    "date": "2026-06-16",
+    "command": "cargo bench --bench density_validation --features bench-density",
+    "os": "Linux System42 5.15.167.4-microsoft-standard-WSL2 #1 SMP Tue Nov 5 00:21:55 UTC 2024 x86_64 GNU/Linux",
+    "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "logical_cpus": 16,
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "cargo": "cargo 1.96.0 (30a34c682 2026-05-25)"
+  },
+  "scenarios": [
+    {
+      "backend": "non_pooled",
+      "failures": 0,
+      "n": 10,
+      "p50_ms": 11.973888500000001,
+      "p95_ms": 12.388718699999998,
+      "p99_ms": 12.39416694,
+      "peak_rss_mb": 26.4765625,
+      "rss_per_sandbox_kb": 2711.2,
+      "successes": 10,
+      "throughput_ops_s": 755.195119385398,
+      "total_ms": 13.241611
+    },
+    {
+      "backend": "pooled",
+      "failures": 0,
+      "n": 10,
+      "p50_ms": 6.8975504999999995,
+      "p95_ms": 7.666643349999999,
+      "p99_ms": 7.68726307,
+      "peak_rss_mb": 31.3359375,
+      "rss_per_sandbox_kb": 3208.8,
+      "successes": 10,
+      "throughput_ops_s": 1132.4639709418805,
+      "total_ms": 8.830302999999999
+    },
+    {
+      "backend": "non_pooled",
+      "failures": 0,
+      "n": 100,
+      "p50_ms": 6.6755405,
+      "p95_ms": 12.1246248,
+      "p99_ms": 12.468174720000002,
+      "peak_rss_mb": 42.62109375,
+      "rss_per_sandbox_kb": 436.44,
+      "successes": 100,
+      "throughput_ops_s": 2084.4537272117095,
+      "total_ms": 47.9742
+    },
+    {
+      "backend": "pooled",
+      "failures": 0,
+      "n": 100,
+      "p50_ms": 26.109481000000002,
+      "p95_ms": 43.7309463,
+      "p99_ms": 46.93358389000001,
+      "peak_rss_mb": 54.4921875,
+      "rss_per_sandbox_kb": 558.0,
+      "successes": 100,
+      "throughput_ops_s": 1752.557340433948,
+      "total_ms": 57.059474
+    },
+    {
+      "backend": "non_pooled",
+      "failures": 0,
+      "n": 500,
+      "p50_ms": 6.512308,
+      "p95_ms": 11.297589149999997,
+      "p99_ms": 13.067394569999998,
+      "peak_rss_mb": 59.0625,
+      "rss_per_sandbox_kb": 120.96,
+      "successes": 500,
+      "throughput_ops_s": 2339.79846791681,
+      "total_ms": 213.69361800000001
+    },
+    {
+      "backend": "pooled",
+      "failures": 0,
+      "n": 500,
+      "p50_ms": 134.8930295,
+      "p95_ms": 179.27343644999993,
+      "p99_ms": 197.64352110999997,
+      "peak_rss_mb": 86.13671875,
+      "rss_per_sandbox_kb": 176.408,
+      "successes": 500,
+      "throughput_ops_s": 2185.517399695176,
+      "total_ms": 228.778778
+    },
+    {
+      "backend": "non_pooled",
+      "failures": 0,
+      "n": 1000,
+      "p50_ms": 6.274632499999999,
+      "p95_ms": 10.910270650000001,
+      "p99_ms": 12.987714259999997,
+      "peak_rss_mb": 87.171875,
+      "rss_per_sandbox_kb": 89.264,
+      "successes": 1000,
+      "throughput_ops_s": 2432.7063551680244,
+      "total_ms": 411.06482
+    },
+    {
+      "backend": "pooled",
+      "failures": 0,
+      "n": 1000,
+      "p50_ms": 189.46866649999998,
+      "p95_ms": 261.9611819,
+      "p99_ms": 286.11227346,
+      "peak_rss_mb": 117.34765625,
+      "rss_per_sandbox_kb": 120.164,
+      "successes": 1000,
+      "throughput_ops_s": 2473.915884415701,
+      "total_ms": 404.217462
+    }
+  ]
+}
