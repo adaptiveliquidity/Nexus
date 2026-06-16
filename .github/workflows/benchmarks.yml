@@ -31,11 +31,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: bench-${{ runner.os }}
-      - uses: bencherdev/bencher@7d9903445cb8a2320c2318c3c79463fcab1da36c
+      - uses: bencherdev/bencher@ec56bb69a7f34096002ca3384d10e2f6676b063e # v0.6.7
 
       - name: Record runner provenance
         run: |
@@ -123,25 +125,34 @@ jobs:
       # ── PR: compare against base branch, fail on regression ──
       - name: Upload to Bencher.dev (PR)
         if: steps.config.outputs.bencher_configured == 'true' && github.event_name == 'pull_request'
+        env:
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+          BENCHER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.number }}
         run: |
           bencher run \
-            --project "${{ vars.BENCHER_PROJECT }}" \
-            --token "${{ secrets.BENCHER_API_TOKEN }}" \
-            --branch "${{ github.head_ref }}" \
-            --hash "${{ github.event.pull_request.head.sha }}" \
-            --start-point "${{ github.base_ref }}" \
-            --start-point-hash "${{ github.event.pull_request.base.sha }}" \
+            --project "$BENCHER_PROJECT" \
+            --token "$BENCHER_API_TOKEN" \
+            --branch "$HEAD_REF" \
+            --hash "$HEAD_SHA" \
+            --start-point "$BASE_REF" \
+            --start-point-hash "$BASE_SHA" \
             --start-point-clone-thresholds \
             --start-point-reset \
             --testbed "ubuntu-24.04-github" \
             --adapter rust_criterion \
-            --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+            --github-actions "$BENCHER_GITHUB_TOKEN" \
             --ci-only-on-alert \
-            --ci-number "${{ github.event.number }}" \
+            --ci-number "$PR_NUMBER" \
             --error-on-alert \
             --file benchmark_evidence/criterion_raw.log
 
-      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # pinned SHA
       - name: Sign artifacts with Sigstore
         continue-on-error: true
         run: |
@@ -168,15 +179,17 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: codspeed-${{ runner.os }}
       - name: Install cargo-codspeed (prebuilt)
-        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.81.11
         with:
           tool: cargo-codspeed
-      - uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534
+      - uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534 # pinned SHA
         with:
           mode: simulation,memory
           run: |
@@ -201,9 +214,11 @@ jobs:
       RUSTFLAGS: "--cfg codspeed"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
       - name: Install cargo-codspeed (prebuilt)
-        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.81.11
         with:
           tool: cargo-codspeed
       - name: Verify compat version
@@ -213,7 +228,7 @@ jobs:
           cargo codspeed build --bench nexus_validation \
             --features bench-cold-start
       - name: Run CodSpeed walltime benchmark
-        uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534
+        uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534 # pinned SHA
         with:
           mode: walltime
           run: cargo codspeed run

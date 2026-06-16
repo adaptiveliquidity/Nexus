@@ -12,9 +12,13 @@ jobs:
     if: vars.BENCHER_PROJECT != '' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     steps:
-      - uses: bencherdev/bencher@main
-      - run: |
+      - uses: bencherdev/bencher@ec56bb69a7f34096002ca3384d10e2f6676b063e # v0.6.7
+      - env:
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
           bencher archive \
-            --project "${{ vars.BENCHER_PROJECT }}" \
-            --token "${{ secrets.BENCHER_API_TOKEN }}" \
-            --branch "${{ github.head_ref }}"
+            --project "$BENCHER_PROJECT" \
+            --token "$BENCHER_API_TOKEN" \
+            --branch "$HEAD_REF"
