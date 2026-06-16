@@ -7,7 +7,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{NexusError, Result};
@@ -36,6 +36,16 @@ pub enum Capability {
 }
 
 impl Capability {
+    fn path_contains(parent: &Path, requested: &Path) -> bool {
+        let parent = normalize_lexical_path(parent);
+        let requested = normalize_lexical_path(requested);
+        parent == requested || requested.starts_with(parent)
+    }
+
+    fn path_eq(left: &Path, right: &Path) -> bool {
+        normalize_lexical_path(left) == normalize_lexical_path(right)
+    }
+
     /// Check if this capability allows access to the requested capability
     pub fn allows(&self, requested: &Capability) -> bool {
         match (self, requested) {
@@ -46,17 +56,17 @@ impl Capability {
             (Capability::None, _) => false,
 
             // Exact match for ReadFile
-            (Capability::ReadFile(p1), Capability::ReadFile(p2)) => p1 == p2 || p2.starts_with(p1),
+            (Capability::ReadFile(p1), Capability::ReadFile(p2)) => Self::path_contains(p1, p2),
 
             // Write implies read
-            (Capability::WriteFile(p1), Capability::ReadFile(p2)) => p2.starts_with(p1),
+            (Capability::WriteFile(p1), Capability::ReadFile(p2)) => Self::path_contains(p1, p2),
 
             // Exact match for WriteFile
-            (Capability::WriteFile(p1), Capability::WriteFile(p2)) => p1 == p2,
+            (Capability::WriteFile(p1), Capability::WriteFile(p2)) => Self::path_eq(p1, p2),
 
             // Exact match for ListDirectory with subdir support
             (Capability::ListDirectory(p1), Capability::ListDirectory(p2)) => {
-                p1 == p2 || p2.starts_with(p1)
+                Self::path_contains(p1, p2)
             }
 
             // Exact match for HTTP capabilities
@@ -99,6 +109,45 @@ impl Capability {
             Capability::None => "none".to_string(),
         }
     }
+}
+
+/// Normalize a path lexically without consulting the filesystem.
+///
+/// This resolves `.` and `..` components for capability containment checks and
+/// WASI preopen derivation while preserving non-existent paths and avoiding
+/// symlink resolution.
+pub(crate) fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    let mut normal_depth = 0usize;
+    let mut rooted = false;
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                normalized.push(prefix.as_os_str());
+                rooted = true;
+            }
+            Component::RootDir => {
+                normalized.push(component.as_os_str());
+                rooted = true;
+            }
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                normalized.push(part);
+                normal_depth += 1;
+            }
+            Component::ParentDir => {
+                if normal_depth > 0 {
+                    normalized.pop();
+                    normal_depth -= 1;
+                } else if !rooted {
+                    normalized.push("..");
+                }
+            }
+        }
+    }
+
+    normalized
 }
 
 /// A signed capability token with expiration
@@ -499,6 +548,22 @@ mod tests {
         let child = Capability::ReadFile(PathBuf::from("/home"));
         let parent = Capability::ReadFile(PathBuf::from("/home/user"));
         assert!(!child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_rejects_lexical_parent_escape() {
+        let parent = Capability::ReadFile(PathBuf::from("/safe"));
+        let child = Capability::ReadFile(PathBuf::from("/safe/../outside"));
+        assert!(!child.is_subset_of(&parent));
+        assert!(!parent.allows(&child));
+    }
+
+    #[test]
+    fn lexical_normalization_keeps_valid_child_subset() {
+        let parent = Capability::ReadFile(PathBuf::from("/safe/./data"));
+        let child = Capability::ReadFile(PathBuf::from("/safe/data/nested/.."));
+        assert!(child.is_subset_of(&parent));
+        assert!(parent.allows(&child));
     }
 
     #[test]

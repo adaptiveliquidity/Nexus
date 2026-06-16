@@ -20,6 +20,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
 use crate::sandbox::wasm_runtime::{ExecutionResult, WasmSandbox};
+use crate::security::capability::normalize_lexical_path;
 use crate::security::Capability;
 
 /// Pre-open entry derived from a validated capability token.
@@ -283,7 +284,8 @@ impl WasiSandboxConfig {
         for cap in capabilities {
             match cap {
                 Capability::ReadFile(path) | Capability::ListDirectory(path) => {
-                    if !config.preopens.iter().any(|p| &p.host_path == path) {
+                    let path = normalize_lexical_path(path);
+                    if !config.preopens.iter().any(|p| p.host_path == path) {
                         config.preopens.push(PreOpen {
                             host_path: path.clone(),
                             guest_path: path.to_string_lossy().to_string(),
@@ -292,8 +294,8 @@ impl WasiSandboxConfig {
                     }
                 }
                 Capability::WriteFile(path) => {
-                    if let Some(existing) =
-                        config.preopens.iter_mut().find(|p| &p.host_path == path)
+                    let path = normalize_lexical_path(path);
+                    if let Some(existing) = config.preopens.iter_mut().find(|p| p.host_path == path)
                     {
                         existing.writable = true;
                     } else {
@@ -663,6 +665,48 @@ fn capture_tables_wasi(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_capabilities_normalizes_lexical_parent_segments() {
+        let caps = vec![Capability::ReadFile(PathBuf::from("/safe/../outside"))];
+        let config = WasiSandboxConfig::from_capabilities(&caps);
+
+        assert_eq!(config.preopens.len(), 1);
+        assert_eq!(config.preopens[0].host_path, PathBuf::from("/outside"));
+        assert_eq!(config.preopens[0].guest_path, "/outside");
+    }
+
+    #[test]
+    fn from_capabilities_dedupes_after_lexical_normalization() {
+        let caps = vec![
+            Capability::ReadFile(PathBuf::from("/safe/./data")),
+            Capability::WriteFile(PathBuf::from("/safe/data/nested/..")),
+        ];
+        let config = WasiSandboxConfig::from_capabilities(&caps);
+
+        assert_eq!(config.preopens.len(), 1);
+        assert_eq!(config.preopens[0].host_path, PathBuf::from("/safe/data"));
+        assert!(config.preopens[0].writable);
+    }
+
+    #[ignore = "C4 ADR: pending design approval"]
+    #[test]
+    fn required_capabilities_must_not_create_host_directories_before_authorization() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mount = tmp.path().join("not-yet-authorized");
+        let config = WasiToolConfig::new().with_mount(&mount, "/data", WasiAccess::ReadWrite);
+
+        let result = config.required_capabilities();
+
+        assert!(
+            result.is_ok(),
+            "deriving requirements should remain fallible"
+        );
+        assert!(
+            !mount.exists(),
+            "required_capabilities must not create host directories before token authorization"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
