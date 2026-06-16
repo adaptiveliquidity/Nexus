@@ -503,6 +503,11 @@ impl SnapshotManager {
         self.stats.read().unwrap().clone()
     }
 
+    /// Number of differential snapshots currently retained in memory.
+    pub fn diff_snapshot_count(&self) -> usize {
+        self.diff_buffer.read().unwrap().len()
+    }
+
     /// Create a differential snapshot against a base full snapshot.
     ///
     /// If the resulting diff's generation would exceed `max_diff_depth`, the
