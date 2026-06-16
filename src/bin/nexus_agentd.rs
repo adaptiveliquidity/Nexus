@@ -11,7 +11,7 @@
 //!   nexus-agentd --pool 8                # custom pool size
 //!   nexus-agentd --socket /tmp/foo.sock  # custom socket path (or \\.\pipe\name on Windows)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -26,7 +26,10 @@ use nexus::daemon::{default_socket_path, DaemonRequest, DaemonResponse};
 use nexus::{HypervisorConfig, ToolDefinition};
 
 const AUTH_TOKEN_ENV: &str = "NEXUS_AGENTD_AUTH_TOKEN";
+const MODULE_DIR_ENV: &str = "NEXUS_AGENTD_MODULE_DIR";
 const UNAUTHORIZED_MESSAGE: &str = "Unauthorized: daemon request authentication failed";
+const WASM_PATH_REJECTED_MESSAGE: &str =
+    "wasm_path rejected: configure an allowed module directory";
 
 type AuthToken = Option<Arc<str>>;
 
@@ -390,11 +393,11 @@ async fn serve(
         } => {
             let bytes = match (wasm_bytes, wasm_path) {
                 (Some(b), _) => b,
-                (None, Some(p)) => match std::fs::read(&p) {
+                (None, Some(p)) => match read_allowlisted_wasm_path(&p) {
                     Ok(b) => b,
                     Err(e) => {
                         return DaemonResponse::Error {
-                            message: format!("read {}: {e}", p.display()),
+                            message: e.to_string(),
                         }
                     }
                 },
@@ -459,6 +462,57 @@ fn unauthorized_response(req: &DaemonRequest, auth_token: Option<&str>) -> Optio
     }
 }
 
+fn read_allowlisted_wasm_path(wasm_path: &Path) -> anyhow::Result<Vec<u8>> {
+    let resolved = resolve_agentd_wasm_path(wasm_path)?;
+    std::fs::read(resolved).map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))
+}
+
+fn allowed_agentd_module_dirs() -> anyhow::Result<Vec<PathBuf>> {
+    let raw_dirs: Vec<PathBuf> = match std::env::var_os(MODULE_DIR_ENV) {
+        Some(value) => std::env::split_paths(&value).collect(),
+        None => return Err(anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE)),
+    };
+
+    if raw_dirs.is_empty() {
+        return Err(anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE));
+    }
+
+    raw_dirs
+        .into_iter()
+        .map(|dir| {
+            let canonical = std::fs::canonicalize(&dir)
+                .map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))?;
+            if !canonical.is_dir() {
+                anyhow::bail!(WASM_PATH_REJECTED_MESSAGE);
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
+fn resolve_agentd_wasm_path(wasm_path: &Path) -> anyhow::Result<PathBuf> {
+    let allowed_dirs = allowed_agentd_module_dirs()?;
+    resolve_agentd_wasm_path_with_dirs(wasm_path, &allowed_dirs)
+}
+
+fn resolve_agentd_wasm_path_with_dirs(
+    wasm_path: &Path,
+    allowed_dirs: &[PathBuf],
+) -> anyhow::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(wasm_path)
+        .map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))?;
+
+    if !canonical.is_file() {
+        anyhow::bail!(WASM_PATH_REJECTED_MESSAGE);
+    }
+
+    if allowed_dirs.iter().any(|dir| canonical.starts_with(dir)) {
+        return Ok(canonical);
+    }
+
+    anyhow::bail!(WASM_PATH_REJECTED_MESSAGE)
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = a.len() ^ b.len();
     for i in 0..a.len().max(b.len()) {
@@ -519,5 +573,73 @@ mod auth_tests {
         let resp = unauthorized_response(&req, None);
 
         assert!(resp.is_none());
+    }
+
+    #[test]
+    fn rejects_wasm_path_outside_allowed_module_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let wasm_path = outside.join("tool.wasm");
+        std::fs::write(&wasm_path, b"\0asm").unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_agentd_wasm_path_with_dirs(&wasm_path, &allowed_dirs).unwrap_err();
+
+        assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
+    }
+
+    #[test]
+    fn accepts_wasm_path_inside_allowed_module_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let wasm_path = allowed.join("tool.wasm");
+        std::fs::write(&wasm_path, b"\0asm").unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let resolved = resolve_agentd_wasm_path_with_dirs(&wasm_path, &allowed_dirs).unwrap();
+
+        assert_eq!(resolved, std::fs::canonicalize(wasm_path).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_wasm_path_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_wasm = outside.join("tool.wasm");
+        let linked_wasm = allowed.join("linked.wasm");
+        std::fs::write(&outside_wasm, b"\0asm").unwrap();
+        symlink(&outside_wasm, &linked_wasm).unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_agentd_wasm_path_with_dirs(&linked_wasm, &allowed_dirs).unwrap_err();
+
+        assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
+    }
+
+    #[test]
+    fn rejects_wasm_path_parent_traversal_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_wasm = outside.join("tool.wasm");
+        std::fs::write(&outside_wasm, b"\0asm").unwrap();
+        let traversal = allowed.join("..").join("outside").join("tool.wasm");
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_agentd_wasm_path_with_dirs(&traversal, &allowed_dirs).unwrap_err();
+
+        assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
     }
 }
