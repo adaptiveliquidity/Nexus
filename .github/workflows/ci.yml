@@ -25,6 +25,9 @@ on:
       - "dashboard/**"
       - "**/*.md"
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: cargo test + validate phases 0/3
@@ -42,10 +45,12 @@ jobs:
         run: |
           curl -fsSL -o /tmp/hf.tgz \
             "https://github.com/sharkdp/hyperfine/releases/download/v1.18.0/hyperfine-v1.18.0-x86_64-unknown-linux-musl.tar.gz"
+          echo "ef3855ad6a1bf97055a90dc3dfc5d4a48494cb80344027db932a96341d415193  /tmp/hf.tgz" | sha256sum -c -
           tar -xzf /tmp/hf.tgz -C /tmp
           sudo install -m 0755 /tmp/hyperfine-v1.18.0-x86_64-unknown-linux-musl/hyperfine /usr/local/bin/
           curl -fsSL -o /tmp/wabt.tgz \
             "https://github.com/WebAssembly/wabt/releases/download/1.0.36/wabt-1.0.36-ubuntu-20.04.tar.gz"
+          echo "4aa0929db06c2376cc76f6d9e920dbde2ea6f1fd55bbaed6cd65167e9e39ecd3  /tmp/wabt.tgz" | sha256sum -c -
           tar -xzf /tmp/wabt.tgz -C /tmp
           sudo install -m 0755 /tmp/wabt-1.0.36/bin/wat2wasm /usr/local/bin/
 

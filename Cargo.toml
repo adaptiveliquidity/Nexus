@@ -9,8 +9,8 @@ repository = "https://github.com/adaptiveliquidity/Nexus"
 
 [dependencies]
 # WebAssembly runtime
-wasmtime = { version = "45.0", features = ["cranelift", "async", "component-model"] }
-wasmtime-wasi = { version = "45.0", features = ["p1"] }
+wasmtime = { version = "45.0.2", features = ["cranelift", "async", "component-model"] }
+wasmtime-wasi = { version = "45.0.2", features = ["p1"] }
 
 # Async runtime
 tokio = { version = "1.44", features = ["full"] }
