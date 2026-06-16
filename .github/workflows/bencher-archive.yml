@@ -36,7 +36,12 @@ jobs:
           BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
           HEAD_REF: ${{ github.head_ref }}
         run: |
-          bencher archive \
+          if bencher archive \
             --project "$BENCHER_PROJECT" \
             --token "$BENCHER_API_TOKEN" \
-            --branch "$HEAD_REF"
+            --branch "$HEAD_REF"; then
+            echo "Bencher branch archived: $HEAD_REF"
+          else
+            status=$?
+            echo "Bencher archive skipped for '$HEAD_REF' with exit code $status; the branch may not exist in Bencher."
+          fi
