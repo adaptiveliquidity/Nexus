@@ -35,7 +35,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: bench-${{ runner.os }}
-      - uses: bencherdev/bencher@main
+      - uses: bencherdev/bencher@7d9903445cb8a2320c2318c3c79463fcab1da36c
 
       - name: Record runner provenance
         run: |
@@ -141,7 +141,7 @@ jobs:
             --error-on-alert \
             --file benchmark_evidence/criterion_raw.log
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
       - name: Sign artifacts with Sigstore
         continue-on-error: true
         run: |
@@ -173,10 +173,10 @@ jobs:
         with:
           shared-key: codspeed-${{ runner.os }}
       - name: Install cargo-codspeed (prebuilt)
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595
         with:
           tool: cargo-codspeed
-      - uses: CodSpeedHQ/action@v4
+      - uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534
         with:
           mode: simulation,memory
           run: |
@@ -203,7 +203,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-codspeed (prebuilt)
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595
         with:
           tool: cargo-codspeed
       - name: Verify compat version
@@ -213,7 +213,7 @@ jobs:
           cargo codspeed build --bench nexus_validation \
             --features bench-cold-start
       - name: Run CodSpeed walltime benchmark
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534
         with:
           mode: walltime
           run: cargo codspeed run
@@ -224,6 +224,8 @@ jobs:
     if: github.ref == 'refs/heads/main' && needs.bencher.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
+      # Required only for the generated benchmark SVG commit below. The job is
+      # already limited to refs/heads/main after a successful benchmark upload.
       contents: write
     steps:
       - uses: actions/checkout@v4
