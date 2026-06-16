@@ -16,6 +16,9 @@
 //!   * Windows: `\\.\pipe\nexus-agentd`
 //!     Override with `NEXUS_AGENTD_SOCKET=<path>` for either platform.
 //!
+//! Optional per-request authentication uses `NEXUS_AGENTD_AUTH_TOKEN`;
+//! replay protection and transport encryption remain future work.
+//!
 //! Concurrency model
 //! -----------------
 //! Each accepted connection gets its own tokio task. Tasks share an
@@ -61,9 +64,20 @@ pub enum DaemonRequest {
         entry: String,
         #[serde(default)]
         input: serde_json::Value,
+        /// Optional bearer token checked by `nexus-agentd` when
+        /// `NEXUS_AGENTD_AUTH_TOKEN` is configured. This authenticates the
+        /// request value only; replay protection remains future work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_token: Option<String>,
     },
     /// Graceful shutdown. Server replies `Pong` then exits.
-    Shutdown,
+    Shutdown {
+        /// Optional bearer token checked by `nexus-agentd` when
+        /// `NEXUS_AGENTD_AUTH_TOKEN` is configured. This authenticates the
+        /// request value only; replay protection remains future work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_token: Option<String>,
+    },
 }
 
 fn default_entry() -> String {
