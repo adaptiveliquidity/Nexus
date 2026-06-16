@@ -25,6 +25,11 @@ use nexus::daemon::protocol::{read_frame, write_frame};
 use nexus::daemon::{default_socket_path, DaemonRequest, DaemonResponse};
 use nexus::{HypervisorConfig, ToolDefinition};
 
+const AUTH_TOKEN_ENV: &str = "NEXUS_AGENTD_AUTH_TOKEN";
+const UNAUTHORIZED_MESSAGE: &str = "Unauthorized: daemon request authentication failed";
+
+type AuthToken = Option<Arc<str>>;
+
 #[derive(Parser, Debug)]
 #[command(name = "nexus-agentd", version, about = "Nexus daemon (Phase C)")]
 struct Cli {
@@ -69,8 +74,19 @@ async fn main() -> anyhow::Result<()> {
     cfg.sandbox_config.time_limit = std::time::Duration::from_millis(cli.timeout_ms);
     let pool = HypervisorPool::new(pool_size, cfg)?;
     let module_cache = Arc::new(ModuleCache::new());
+    let auth_token = configured_auth_token()?;
 
-    run(socket_path, pool, module_cache).await
+    run(socket_path, pool, module_cache, auth_token).await
+}
+
+fn configured_auth_token() -> anyhow::Result<AuthToken> {
+    match std::env::var(AUTH_TOKEN_ENV) {
+        Ok(token) => Ok(Some(Arc::from(token))),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{AUTH_TOKEN_ENV} must be valid Unicode")
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -78,6 +94,7 @@ async fn run(
     socket: PathBuf,
     pool: Arc<HypervisorPool>,
     module_cache: Arc<ModuleCache>,
+    auth_token: AuthToken,
 ) -> anyhow::Result<()> {
     use tokio::net::UnixListener;
 
@@ -88,9 +105,10 @@ async fn run(
     let listener = UnixListener::bind(&socket)?;
 
     // Restrict the socket to the owning user (0600). Without this, on a shared
-    // host any local user who can reach the socket path could submit Execute or
-    // Shutdown requests (the protocol has no per-request auth). Fail closed if
-    // we cannot secure it rather than serving on a world-accessible socket.
+    // host any local user who can reach the socket path could submit Ping
+    // requests. Execute and Shutdown additionally require the optional
+    // per-request auth token when configured. Fail closed if we cannot secure
+    // the socket rather than serving on a world-accessible path.
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
@@ -116,9 +134,10 @@ async fn run(
                 let pool = pool.clone();
                 let mc = module_cache.clone();
                 let stx = shutdown_tx.clone();
+                let auth_token = auth_token.clone();
                 tokio::spawn(async move {
                     let (rd, wr) = stream.into_split();
-                    if let Err(e) = handle_connection(rd, wr, pool, mc, stx).await {
+                    if let Err(e) = handle_connection(rd, wr, pool, mc, stx, auth_token).await {
                         error!("conn: {e}");
                     }
                 });
@@ -132,6 +151,7 @@ async fn run(
     socket: PathBuf,
     pool: Arc<HypervisorPool>,
     module_cache: Arc<ModuleCache>,
+    auth_token: AuthToken,
 ) -> anyhow::Result<()> {
     let pipe_name = socket
         .to_str()
@@ -165,9 +185,10 @@ async fn run(
                 let pool = pool.clone();
                 let mc = module_cache.clone();
                 let stx = shutdown_tx.clone();
+                let auth_token = auth_token.clone();
                 tokio::spawn(async move {
                     let (rd, wr) = tokio::io::split(connected);
-                    if let Err(e) = handle_connection(rd, wr, pool, mc, stx).await {
+                    if let Err(e) = handle_connection(rd, wr, pool, mc, stx, auth_token).await {
                         error!("conn: {e}");
                     }
                 });
@@ -311,6 +332,7 @@ async fn handle_connection<R, W>(
     pool: Arc<HypervisorPool>,
     module_cache: Arc<ModuleCache>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    auth_token: AuthToken,
 ) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -325,7 +347,14 @@ where
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        let resp = serve(req, &pool, &module_cache, &shutdown_tx).await;
+        let resp = serve(
+            req,
+            &pool,
+            &module_cache,
+            &shutdown_tx,
+            auth_token.as_deref(),
+        )
+        .await;
         write_frame(&mut wr, &resp).await?;
     }
 }
@@ -335,12 +364,17 @@ async fn serve(
     pool: &Arc<HypervisorPool>,
     module_cache: &Arc<ModuleCache>,
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
+    auth_token: Option<&str>,
 ) -> DaemonResponse {
+    if let Some(resp) = unauthorized_response(&req, auth_token) {
+        return resp;
+    }
+
     match req {
         DaemonRequest::Ping => DaemonResponse::Pong {
             version: env!("CARGO_PKG_VERSION").into(),
         },
-        DaemonRequest::Shutdown => {
+        DaemonRequest::Shutdown { .. } => {
             let _ = shutdown_tx.send(true);
             DaemonResponse::Pong {
                 version: env!("CARGO_PKG_VERSION").into(),
@@ -352,6 +386,7 @@ async fn serve(
             wasm_path,
             entry,
             input,
+            ..
         } => {
             let bytes = match (wasm_bytes, wasm_path) {
                 (Some(b), _) => b,
@@ -403,8 +438,86 @@ async fn serve(
     }
 }
 
+fn unauthorized_response(req: &DaemonRequest, auth_token: Option<&str>) -> Option<DaemonResponse> {
+    let configured = auth_token?;
+    let supplied = match req {
+        DaemonRequest::Ping => return None,
+        DaemonRequest::Execute { auth_token, .. } | DaemonRequest::Shutdown { auth_token } => {
+            auth_token.as_deref()
+        }
+    };
+
+    if supplied
+        .map(|token| constant_time_eq(token.as_bytes(), configured.as_bytes()))
+        .unwrap_or(false)
+    {
+        None
+    } else {
+        Some(DaemonResponse::Error {
+            message: UNAUTHORIZED_MESSAGE.into(),
+        })
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let a_byte = a.get(i).copied().unwrap_or(0);
+        let b_byte = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(a_byte ^ b_byte);
+    }
+    diff == 0
+}
+
 fn num_logical_cpus() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    fn shutdown_request(auth_token: Option<String>) -> DaemonRequest {
+        DaemonRequest::Shutdown { auth_token }
+    }
+
+    #[test]
+    fn configured_auth_rejects_execute_without_token() {
+        let req: DaemonRequest =
+            serde_json::from_str(r#"{"type":"Execute","name":"tool","wasm_bytes":"","input":{}}"#)
+                .unwrap();
+        let resp = unauthorized_response(&req, Some("secret"));
+
+        assert!(matches!(
+            resp,
+            Some(DaemonResponse::Error { message }) if message == UNAUTHORIZED_MESSAGE
+        ));
+    }
+
+    #[test]
+    fn configured_auth_rejects_shutdown_with_wrong_token() {
+        let resp = unauthorized_response(&shutdown_request(Some("wrong".into())), Some("secret"));
+
+        assert!(matches!(
+            resp,
+            Some(DaemonResponse::Error { message }) if message == UNAUTHORIZED_MESSAGE
+        ));
+    }
+
+    #[test]
+    fn configured_auth_accepts_shutdown_with_correct_token() {
+        let resp = unauthorized_response(&shutdown_request(Some("secret".into())), Some("secret"));
+
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn unconfigured_auth_accepts_tokenless_shutdown() {
+        let req: DaemonRequest = serde_json::from_str(r#"{"type":"Shutdown"}"#).unwrap();
+        let resp = unauthorized_response(&req, None);
+
+        assert!(resp.is_none());
+    }
 }

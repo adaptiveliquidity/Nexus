@@ -251,6 +251,7 @@ fn run_via_daemon(
             wasm_path: None,
             entry,
             input: serde_json::json!({}),
+            auth_token: std::env::var("NEXUS_AGENTD_AUTH_TOKEN").ok(),
         };
         write_frame(&mut wr, &req).await?;
         let resp: DaemonResponse = read_frame(&mut rd).await?;
