@@ -302,6 +302,64 @@ async fn execute_wasi_grants_requested_read_file_capability() {
     assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
 }
 
+#[ignore = "C4 ADR: pending design approval"]
+#[tokio::test]
+async fn execute_wasi_rejects_caller_chosen_capability_without_parent_token_or_allowlist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("wasi_self_grant_expected_rejection.wasm");
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start"))
+        )"#,
+    )
+    .unwrap();
+    fs::write(&wasm_path, wasm).unwrap();
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+
+    client
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1.0" }
+            }),
+        )
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))
+        .await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "capabilities": [
+                        { "type": "read_file", "path": tmp.path() }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    assert!(
+        resp.get("error").is_some(),
+        "execute_wasi must reject self-granted caller-chosen capabilities without a parent token or allowlist; got: {resp}"
+    );
+}
+
 #[tokio::test]
 async fn execute_with_missing_wasm_returns_error() {
     let mut client = McpClient::spawn().await;
