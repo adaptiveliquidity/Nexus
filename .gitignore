@@ -49,3 +49,8 @@ Thumbs.db
 .cursor/
 /AGENTS.md
 /PRPs/
+# Fuzzing build/run artifacts (fuzz/ is a separate workspace; Cargo.toml/Cargo.lock/fuzz_targets stay tracked)
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/crashes/
