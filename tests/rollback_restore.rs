@@ -7,7 +7,7 @@
 use nexus::snapshot::{
     restore_memory, ExecutionState, FilesystemDiff, SnapshotManager, SnapshotMetadata,
 };
-use nexus::{HypervisorConfig, NexusHypervisor, ToolDefinition};
+use nexus::{HypervisorConfig, NexusHypervisor, SnapshotStrategy, ToolDefinition};
 use wasmtime::{Config, Engine, Instance, Linker, Module, Store};
 
 fn make_engine() -> Engine {
@@ -166,4 +166,83 @@ async fn successful_execution_does_not_set_rollback_memory() {
         hv.last_rollback_memory().is_none(),
         "successful execution should not store rollback memory"
     );
+}
+
+#[tokio::test]
+async fn default_hypervisor_uses_full_snapshots_for_rollback() {
+    let hv = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start") unreachable)
+        )"#,
+    )
+    .unwrap();
+
+    let tool = ToolDefinition::new("default_full_snapshot".into(), wasm);
+    let output = hv.execute_tool(tool, serde_json::json!({})).await.unwrap();
+
+    assert!(!output.success);
+    assert!(output.rollback_performed);
+    assert_eq!(hv.snapshot_strategy(), SnapshotStrategy::Full);
+    assert_eq!(
+        hv.snapshot_manager().diff_snapshot_count(),
+        0,
+        "default strategy should not create differential snapshots"
+    );
+    assert_eq!(hv.get_snapshot_stats().total_snapshots, 1);
+    assert_eq!(hv.get_snapshot_stats().total_rollbacks, 1);
+}
+
+#[tokio::test]
+async fn differential_strategy_rolls_back_via_diff_snapshot() {
+    let config = HypervisorConfig {
+        snapshot_strategy: SnapshotStrategy::Differential,
+        ..HypervisorConfig::default()
+    };
+    let hv = NexusHypervisor::new(config).unwrap();
+
+    let seed_wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (data (i32.const 0) "base")
+            (func (export "_start"))
+        )"#,
+    )
+    .unwrap();
+    let seed = ToolDefinition::new("diff_seed".into(), seed_wasm);
+    let seed_output = hv.execute_tool(seed, serde_json::json!({})).await.unwrap();
+    assert!(seed_output.success);
+    assert_eq!(hv.get_snapshot_stats().total_snapshots, 1);
+
+    let trap_wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (data (i32.const 0) "diff")
+            (func (export "_start") unreachable)
+        )"#,
+    )
+    .unwrap();
+    let tool = ToolDefinition::new("diff_trap".into(), trap_wasm);
+    let output = hv.execute_tool(tool, serde_json::json!({})).await.unwrap();
+
+    assert!(!output.success);
+    assert!(output.rollback_performed);
+    assert_eq!(
+        hv.snapshot_manager().diff_snapshot_count(),
+        1,
+        "second execution should create a differential runtime snapshot"
+    );
+    assert_eq!(
+        hv.get_snapshot_stats().total_snapshots,
+        1,
+        "diff snapshots should not increment full snapshot count"
+    );
+    assert_eq!(hv.get_snapshot_stats().total_rollbacks, 1);
+
+    let memory = hv
+        .last_rollback_memory()
+        .expect("diff rollback should store reconstructed memory");
+    assert_eq!(&memory[..4], b"diff");
 }

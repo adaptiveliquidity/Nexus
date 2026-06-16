@@ -30,7 +30,7 @@ use crate::sandbox::{
 };
 use crate::security::{Capability, CapabilityManager};
 use crate::snapshot::{
-    ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
+    DiffSnapshotResult, ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
 };
 use crate::telemetry::{ExecutionRecord, TelemetrySink};
 // Re-exports at the top of this module bring `FailureMode`, `RecoveryAction`,
@@ -81,6 +81,32 @@ pub struct ToolOutput {
     pub error_log: Option<ErrorLog>,
 }
 
+/// Snapshot strategy used by the hypervisor execution path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotStrategy {
+    /// Always create and roll back full snapshots. This is the default.
+    Full,
+    /// Create a full base snapshot first, then use differential snapshots for
+    /// later executions until the snapshot manager promotes a chain.
+    Differential,
+}
+
+/// Recovery policy stack selected by [`HypervisorConfig`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum RecoveryConfig {
+    /// Use only the deterministic built-in policy. This is the default.
+    #[default]
+    Static,
+    /// Route recovery through `LayeredPolicy` with the static layer.
+    Layered,
+    /// Route recovery through `LayeredPolicy([Static, Instinct])` and attach
+    /// the same store for outcome feedback in `execute_with_retry`.
+    LayeredInstinct {
+        store_dir: std::path::PathBuf,
+        min_confidence: f32,
+    },
+}
+
 /// Configuration for the hypervisor
 #[derive(Debug, Clone)]
 pub struct HypervisorConfig {
@@ -96,6 +122,11 @@ pub struct HypervisorConfig {
     /// `None` (default), the original per-call `WasmSandbox` path is used —
     /// behavior is unchanged.
     pub pool_config: Option<PoolConfig>,
+    /// Opt-in snapshot strategy. Defaults to full snapshots to preserve the
+    /// existing execution and rollback behavior.
+    pub snapshot_strategy: SnapshotStrategy,
+    /// Opt-in recovery policy stack. Defaults to `StaticPolicy`.
+    pub recovery_config: RecoveryConfig,
 }
 
 impl Default for HypervisorConfig {
@@ -109,9 +140,31 @@ impl Default for HypervisorConfig {
             max_retries: 3,
             retry_delay: Duration::from_millis(100),
             pool_config: None,
+            snapshot_strategy: SnapshotStrategy::Full,
+            recovery_config: RecoveryConfig::Static,
         }
     }
 }
+
+#[derive(Debug, Clone)]
+enum RuntimeSnapshot {
+    Full(Box<Snapshot>),
+    Diff(uuid::Uuid),
+}
+
+impl RuntimeSnapshot {
+    fn id(&self) -> uuid::Uuid {
+        match self {
+            RuntimeSnapshot::Full(snapshot) => snapshot.id,
+            RuntimeSnapshot::Diff(id) => *id,
+        }
+    }
+}
+
+type RecoverySelection = (
+    Arc<dyn RecoveryPolicy>,
+    Option<Arc<crate::instinct::InstinctStore>>,
+);
 
 /// The main Nexus Hypervisor orchestrator
 pub struct NexusHypervisor {
@@ -143,13 +196,18 @@ pub struct NexusHypervisor {
     /// Opt-in warm sandbox pool. Built from `config.pool_config` when set.
     /// `None` preserves the original per-call execution path.
     pool: Option<Arc<SandboxPool>>,
+    /// Latest full-or-diff snapshot id used as the next differential base.
+    latest_runtime_snapshot: RwLock<Option<RuntimeSnapshot>>,
 }
 
 impl NexusHypervisor {
     /// Create a new hypervisor with the default `StaticPolicy` recovery
     /// policy. For custom policies use `new_with_policy`.
     pub fn new(config: HypervisorConfig) -> Result<Self> {
-        Self::new_with_policy(config, Arc::new(StaticPolicy::new()))
+        let (policy, instinct_store) = Self::recovery_from_config(&config.recovery_config)?;
+        let mut hv = Self::new_with_policy(config, policy)?;
+        hv.instinct_store = instinct_store;
+        Ok(hv)
     }
 
     /// Create a hypervisor with a custom recovery policy. Used by Phase B
@@ -205,7 +263,32 @@ impl NexusHypervisor {
             last_rollback_memory: RwLock::new(None),
             last_rollback_execution_state: RwLock::new(None),
             pool,
+            latest_runtime_snapshot: RwLock::new(None),
         })
+    }
+
+    fn recovery_from_config(recovery_config: &RecoveryConfig) -> Result<RecoverySelection> {
+        match recovery_config {
+            RecoveryConfig::Static => Ok((Arc::new(StaticPolicy::new()), None)),
+            RecoveryConfig::Layered => Ok((
+                Arc::new(LayeredPolicy::new(vec![Box::new(StaticPolicy::new())])),
+                None,
+            )),
+            RecoveryConfig::LayeredInstinct {
+                store_dir,
+                min_confidence,
+            } => {
+                let store = Arc::new(crate::instinct::InstinctStore::open(store_dir.clone())?);
+                let policy: Arc<dyn RecoveryPolicy> = Arc::new(LayeredPolicy::new(vec![
+                    Box::new(StaticPolicy::new()),
+                    Box::new(
+                        crate::instinct::InstinctPolicy::new(store.clone())
+                            .with_min_confidence(*min_confidence),
+                    ),
+                ]));
+                Ok((policy, Some(store)))
+            }
+        }
     }
 
     /// Inject a different recovery policy at runtime. Used by Phase B's
@@ -245,6 +328,16 @@ impl NexusHypervisor {
         self.pool.as_ref()
     }
 
+    /// Return the configured snapshot strategy.
+    pub fn snapshot_strategy(&self) -> SnapshotStrategy {
+        self.config.snapshot_strategy
+    }
+
+    /// Return the configured recovery stack selector.
+    pub fn recovery_config(&self) -> &RecoveryConfig {
+        &self.config.recovery_config
+    }
+
     /// Access the sandbox's wasmtime `Engine` for use with `ModuleCache`.
     pub fn sandbox_engine(&self) -> wasmtime::Engine {
         self.sandbox.read().unwrap().engine().clone()
@@ -252,6 +345,66 @@ impl NexusHypervisor {
 
     pub fn snapshot_manager(&self) -> &Arc<SnapshotManager> {
         &self.snapshot_manager
+    }
+
+    fn create_runtime_snapshot(
+        &self,
+        memory: Vec<u8>,
+        fs_diff: FilesystemDiff,
+        exec_state: ExecutionState,
+        metadata: SnapshotMetadata,
+    ) -> Result<RuntimeSnapshot> {
+        match self.config.snapshot_strategy {
+            SnapshotStrategy::Full => {
+                let snap = self
+                    .snapshot_manager
+                    .create_snapshot(memory, fs_diff, exec_state, metadata)?;
+                *self.current_snapshot.write().unwrap() = Some(snap.clone());
+                let runtime = RuntimeSnapshot::Full(Box::new(snap));
+                *self.latest_runtime_snapshot.write().unwrap() = Some(runtime.clone());
+                Ok(runtime)
+            }
+            SnapshotStrategy::Differential => {
+                let base_id = self
+                    .latest_runtime_snapshot
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .map(RuntimeSnapshot::id);
+
+                let runtime = if let Some(base_id) = base_id {
+                    match self
+                        .snapshot_manager
+                        .create_diff_snapshot(memory, &base_id, exec_state, metadata)?
+                    {
+                        DiffSnapshotResult::Diff(diff) => RuntimeSnapshot::Diff(diff.id),
+                        DiffSnapshotResult::Promoted(snap) => {
+                            *self.current_snapshot.write().unwrap() = Some(snap.clone());
+                            RuntimeSnapshot::Full(Box::new(snap))
+                        }
+                    }
+                } else {
+                    let snap = self
+                        .snapshot_manager
+                        .create_snapshot(memory, fs_diff, exec_state, metadata)?;
+                    *self.current_snapshot.write().unwrap() = Some(snap.clone());
+                    RuntimeSnapshot::Full(Box::new(snap))
+                };
+
+                *self.latest_runtime_snapshot.write().unwrap() = Some(runtime.clone());
+                Ok(runtime)
+            }
+        }
+    }
+
+    fn rollback_runtime_snapshot(&self, snapshot: &RuntimeSnapshot) -> Result<()> {
+        let result = match snapshot {
+            RuntimeSnapshot::Full(snap) => self.snapshot_manager.rollback_to(&snap.id)?,
+            RuntimeSnapshot::Diff(id) => self.snapshot_manager.rollback_to_diff(id)?,
+        };
+        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
+        *self.last_rollback_execution_state.write().unwrap() = Some(result.execution_state);
+        Ok(())
     }
 
     /// Grant a capability to the current session
@@ -602,14 +755,7 @@ impl NexusHypervisor {
                 tool.name.clone(),
                 format!("{:x}", sha2::Sha256::digest(&tool.wasm_bytes)),
             );
-            let snap = self.snapshot_manager.create_snapshot(
-                mem.clone(),
-                fs_diff,
-                exec_state,
-                metadata,
-            )?;
-            *self.current_snapshot.write().unwrap() = Some(snap.clone());
-            Some(snap)
+            Some(self.create_runtime_snapshot(mem.clone(), fs_diff, exec_state, metadata)?)
         } else {
             None
         };
@@ -654,10 +800,7 @@ impl NexusHypervisor {
             let mut rollback_performed = false;
             if mode.requires_rollback() {
                 if let Some(snap) = snapshot.as_ref() {
-                    if let Ok(result) = self.snapshot_manager.rollback_to(&snap.id) {
-                        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
-                        *self.last_rollback_execution_state.write().unwrap() =
-                            Some(result.execution_state);
+                    if self.rollback_runtime_snapshot(snap).is_ok() {
                         rollback_performed = true;
                     }
                 }
