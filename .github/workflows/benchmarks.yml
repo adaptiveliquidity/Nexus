@@ -30,12 +30,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: bench-${{ runner.os }}
-      - uses: bencherdev/bencher@7d9903445cb8a2320c2318c3c79463fcab1da36c
+      - uses: bencherdev/bencher@ec56bb69a7f34096002ca3384d10e2f6676b063e # v0.6.7
 
       - name: Record runner provenance
         run: |
@@ -123,25 +125,34 @@ jobs:
       # ── PR: compare against base branch, fail on regression ──
       - name: Upload to Bencher.dev (PR)
         if: steps.config.outputs.bencher_configured == 'true' && github.event_name == 'pull_request'
+        env:
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+          BENCHER_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.number }}
         run: |
           bencher run \
-            --project "${{ vars.BENCHER_PROJECT }}" \
-            --token "${{ secrets.BENCHER_API_TOKEN }}" \
-            --branch "${{ github.head_ref }}" \
-            --hash "${{ github.event.pull_request.head.sha }}" \
-            --start-point "${{ github.base_ref }}" \
-            --start-point-hash "${{ github.event.pull_request.base.sha }}" \
+            --project "$BENCHER_PROJECT" \
+            --token "$BENCHER_API_TOKEN" \
+            --branch "$HEAD_REF" \
+            --hash "$HEAD_SHA" \
+            --start-point "$BASE_REF" \
+            --start-point-hash "$BASE_SHA" \
             --start-point-clone-thresholds \
             --start-point-reset \
             --testbed "ubuntu-24.04-github" \
             --adapter rust_criterion \
-            --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+            --github-actions "$BENCHER_GITHUB_TOKEN" \
             --ci-only-on-alert \
-            --ci-number "${{ github.event.number }}" \
+            --ci-number "$PR_NUMBER" \
             --error-on-alert \
             --file benchmark_evidence/criterion_raw.log
 
-      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # pinned SHA
       - name: Sign artifacts with Sigstore
         continue-on-error: true
         run: |
@@ -152,7 +163,7 @@ jobs:
             --bundle benchmark_evidence/criterion_artifacts.sigstore \
             benchmark_evidence/criterion_artifacts.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: criterion-evidence-${{ github.sha }}
           path: benchmark_evidence/
@@ -167,16 +178,18 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: codspeed-${{ runner.os }}
       - name: Install cargo-codspeed (prebuilt)
-        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.81.11
         with:
           tool: cargo-codspeed
-      - uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534
+      - uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534 # pinned SHA
         with:
           mode: simulation,memory
           run: |
@@ -200,10 +213,12 @@ jobs:
     env:
       RUSTFLAGS: "--cfg codspeed"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
       - name: Install cargo-codspeed (prebuilt)
-        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2.81.11
         with:
           tool: cargo-codspeed
       - name: Verify compat version
@@ -213,7 +228,7 @@ jobs:
           cargo codspeed build --bench nexus_validation \
             --features bench-cold-start
       - name: Run CodSpeed walltime benchmark
-        uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534
+        uses: CodSpeedHQ/action@c8ffb9ced3005b12a98162811dcf60cf520da534 # pinned SHA
         with:
           mode: walltime
           run: cargo codspeed run
@@ -228,11 +243,11 @@ jobs:
       # already limited to refs/heads/main after a successful benchmark upload.
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           token: ${{ secrets.SVG_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: criterion-evidence-${{ github.sha }}
           path: benchmark_evidence
@@ -269,14 +284,14 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: criterion-evidence-${{ github.sha }}
           path: benchmark_evidence
       - name: Generate benchmark JSON for dashboard
         run: python3 scripts/criterion_to_json.py benchmark_evidence/criterion_raw.log dashboard/benchmark-data.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
@@ -286,9 +301,9 @@ jobs:
           cd dashboard
           npm ci
           npm run build
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: dashboard/out
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

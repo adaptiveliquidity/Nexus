@@ -12,9 +12,31 @@ jobs:
     if: vars.BENCHER_PROJECT != '' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     steps:
-      - uses: bencherdev/bencher@main
-      - run: |
+      - name: Detect Bencher archive configuration
+        id: config
+        env:
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+        run: |
+          if [ -n "$BENCHER_PROJECT" ] && [ -n "$BENCHER_API_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Bencher archive is configured"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Bencher archive skipped: BENCHER_PROJECT or BENCHER_API_TOKEN is not configured"
+          fi
+
+      - uses: bencherdev/bencher@ec56bb69a7f34096002ca3384d10e2f6676b063e # v0.6.7
+        if: steps.config.outputs.configured == 'true'
+
+      - name: Archive Bencher branch
+        if: steps.config.outputs.configured == 'true'
+        env:
+          BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
           bencher archive \
-            --project "${{ vars.BENCHER_PROJECT }}" \
-            --token "${{ secrets.BENCHER_API_TOKEN }}" \
-            --branch "${{ github.head_ref }}"
+            --project "$BENCHER_PROJECT" \
+            --token "$BENCHER_API_TOKEN" \
+            --branch "$HEAD_REF"
