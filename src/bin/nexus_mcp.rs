@@ -3,6 +3,7 @@
 //! Transport: stdio (for Claude Code / mcp.json integration).
 //! Start with: `nexus-mcp` (no arguments needed).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,6 +100,14 @@ pub struct IssueTokenParams {
 pub struct ForkAndRaceParams {
     #[schemars(description = "Path to the .wasm file to execute in each branch")]
     pub wasm_path: String,
+    #[schemars(
+        description = "Optional UUID of a real captured runtime snapshot to restore into every branch before execution."
+    )]
+    pub base_snapshot_id: Option<String>,
+    #[schemars(
+        description = "Optional snapshot source. Use latest_runtime to restore the latest snapshot captured by nexus_execute. Omit with base_snapshot_id unset to race branches from scratch."
+    )]
+    pub source: Option<String>,
     #[schemars(description = "Branch definitions: array of {entry?, input?} objects")]
     pub branches: Vec<BranchSpec>,
     #[schemars(description = "Selection strategy: first_success (default) or wait_all")]
@@ -184,7 +193,7 @@ impl NexusMcpServer {
     }
 
     #[tool(
-        description = "Fork execution into multiple branches and race them concurrently. Returns the first successful branch's output. Useful for speculative recovery and parallel exploration."
+        description = "Race multiple WASM branches. Pass base_snapshot_id or source:\"latest_runtime\" to restore a real captured runtime snapshot into each branch before execution; omit both for an explicitly from-scratch race."
     )]
     async fn nexus_fork_and_race(
         &self,
@@ -284,6 +293,9 @@ struct ForkAndRaceResponse {
     branches_succeeded: usize,
     winner_elapsed_ms: u64,
     winner_output: Option<ToolOutputResponse>,
+    base_snapshot_id: Option<String>,
+    base_snapshot_source: String,
+    semantics: String,
 }
 
 impl NexusMcpServer {
@@ -431,7 +443,10 @@ impl NexusMcpServer {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
         })?;
 
-        let base_snapshot_id = Uuid::new_v4();
+        let (base_snapshot_id, base_snapshot_source, semantics) =
+            self.resolve_fork_base_snapshot(&params)?;
+        let branch_base_snapshot_id = base_snapshot_id.unwrap_or_else(Uuid::new_v4);
+        let mut branch_inputs = HashMap::new();
 
         let branches: Vec<SpeculativeBranch> = params
             .branches
@@ -441,11 +456,16 @@ impl NexusMcpServer {
                 if let Some(entry) = spec.entry {
                     tool = tool.with_entry(&entry);
                 }
-                SpeculativeBranch::new(
-                    base_snapshot_id,
+                let branch = SpeculativeBranch::new(
+                    branch_base_snapshot_id,
                     tool,
                     RecoveryAction::new("mcp_fork_branch", RecoverySource::Static),
-                )
+                );
+                branch_inputs.insert(
+                    branch.id,
+                    spec.input.unwrap_or_else(|| serde_json::json!({})),
+                );
+                branch
             })
             .collect();
 
@@ -461,11 +481,21 @@ impl NexusMcpServer {
         };
 
         let hyp = self.hypervisor.clone();
+        let branch_inputs = Arc::new(branch_inputs);
         let result = fork_and_race(branches, &config, |branch| {
             let hyp = hyp.clone();
+            let branch_inputs = branch_inputs.clone();
             async move {
-                let input = serde_json::json!({});
-                hyp.execute_tool(branch.tool, input).await
+                let input = branch_inputs
+                    .get(&branch.id)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(base_snapshot_id) = base_snapshot_id {
+                    hyp.execute_tool_from_snapshot(base_snapshot_id, branch.tool, input)
+                        .await
+                } else {
+                    hyp.execute_tool(branch.tool, input).await
+                }
             }
         })
         .await?;
@@ -476,7 +506,55 @@ impl NexusMcpServer {
             branches_succeeded: result.branches_succeeded,
             winner_elapsed_ms: result.winner.elapsed.as_millis() as u64,
             winner_output: result.winner.output.map(ToolOutputResponse::from),
+            base_snapshot_id: base_snapshot_id.map(|id| id.to_string()),
+            base_snapshot_source,
+            semantics,
         })
+    }
+
+    fn resolve_fork_base_snapshot(
+        &self,
+        params: &ForkAndRaceParams,
+    ) -> Result<(Option<Uuid>, String, String)> {
+        if params.base_snapshot_id.is_some() && params.source.is_some() {
+            anyhow::bail!(
+                "base_snapshot_id and source are mutually exclusive; provide one snapshot seed or omit both for from-scratch racing"
+            );
+        }
+
+        if let Some(snapshot_id) = params.base_snapshot_id.as_deref() {
+            let id = Uuid::parse_str(snapshot_id)
+                .map_err(|e| anyhow::anyhow!("Invalid base_snapshot_id UUID: {e}"))?;
+            return Ok((
+                Some(id),
+                "explicit_snapshot_id".to_string(),
+                "fork_from_captured_runtime_snapshot".to_string(),
+            ));
+        }
+
+        if let Some(source) = params.source.as_deref() {
+            if source != "latest_runtime" {
+                anyhow::bail!(
+                    "unsupported fork_and_race snapshot source '{source}'; expected 'latest_runtime' or omit source for from-scratch racing"
+                );
+            }
+            let id = self.hypervisor.latest_runtime_snapshot_id().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no latest runtime snapshot is available; call nexus_execute first or omit source for from-scratch racing"
+                )
+            })?;
+            return Ok((
+                Some(id),
+                "latest_runtime".to_string(),
+                "fork_from_captured_runtime_snapshot".to_string(),
+            ));
+        }
+
+        Ok((
+            None,
+            "from_scratch".to_string(),
+            "from_scratch_no_snapshot_restore".to_string(),
+        ))
     }
 
     fn resolve_wasm_path(&self, wasm_path: impl AsRef<Path>) -> Result<PathBuf> {

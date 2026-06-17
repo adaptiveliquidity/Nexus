@@ -1,26 +1,26 @@
 //! Speculative Execution with Snapshot Forking
 //!
-//! Forks N recovery branches from a single base snapshot, races them
-//! concurrently, and returns the first branch that succeeds. Losing branches
-//! are cancelled (their futures dropped) and any state they produced is
-//! discarded — only the winner's result is returned to the caller.
+//! Races N recovery branches and returns the first branch that succeeds.
+//! Losing branches are cancelled (their futures dropped) and any state they
+//! produced is discarded — only the winner's result is returned to the caller.
 //!
 //! ## Claim taxonomy (anti-overclaim)
 //! - [`fork_and_race`] is a **benchmarked-primitive**: a self-contained,
 //!   unit-tested racing core that is generic over an async branch executor,
-//!   applies a per-branch timeout, and selects a winner by strategy. It has
-//!   no dependency on wasmtime, so its tests are fast and deterministic.
+//!   applies a per-branch timeout, and selects a winner by strategy. It does
+//!   not restore snapshots itself; the injected executor owns those semantics.
+//!   It has no dependency on wasmtime, so its tests are fast and deterministic.
 //! - [`NexusHypervisor::speculative_execute`](super::NexusHypervisor::speculative_execute)
 //!   is the **opt-in** integration that feeds real tool execution into the
 //!   racer. Branches race concurrently, but because they currently share a
 //!   single sandbox the wall-clock parallelism is bounded; multi-sandbox
 //!   pooling for true parallel branches is **roadmap** (Phase C).
 //!
-//! ## Why forking is cheap
-//! Every branch references the same `base_snapshot_id`. Reconstructing that
-//! base state is shared work, and a branch only stores the pages it dirties
-//! (see [`crate::snapshot::differential`]). A branch's marginal cost is
-//! therefore O(dirty pages), not O(total linear memory).
+//! ## Snapshot seeding
+//! Every branch carries a `base_snapshot_id`, but restoring that state is part
+//! of the executor closure. The real hypervisor integration uses that id to
+//! seed a fresh instance before branch execution; tests for this generic module
+//! may inject in-memory futures that ignore the id.
 
 use std::time::{Duration, Instant};
 
@@ -68,8 +68,9 @@ impl Default for SpeculativeConfig {
     }
 }
 
-/// One speculative recovery branch: run `tool` against a fork of
-/// `base_snapshot_id`, using the recovery `strategy` that proposed it.
+/// One speculative recovery branch. Hypervisor-backed executors restore
+/// `base_snapshot_id` before running `tool`; generic test executors may treat
+/// it as metadata.
 #[derive(Debug, Clone)]
 pub struct SpeculativeBranch {
     /// Unique id for this branch (used to identify the winner).

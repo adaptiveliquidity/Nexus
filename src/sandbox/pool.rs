@@ -28,7 +28,9 @@ use wasmtime::{Config, Engine, InstanceAllocationStrategy, Module, PoolingAlloca
 
 use crate::error::{NexusError, Result};
 use crate::sandbox::module_cache::ModuleCache;
-use crate::sandbox::wasm_runtime::{ExecutionResult, SandboxConfig, WasmSandbox};
+use crate::sandbox::wasm_runtime::{
+    ExecutionResult, RestoredExecutionState, SandboxConfig, WasmSandbox,
+};
 
 /// Configuration for a [`SandboxPool`].
 ///
@@ -200,6 +202,18 @@ impl SandboxPool {
         wasm_bytes: &[u8],
         args: &[Vec<u8>],
     ) -> Result<ExecutionResult> {
+        self.execute_pooled_with_entry(wasm_bytes, args, "_start")
+            .await
+    }
+
+    /// Convenience: acquire a slot, run the module at an explicit entrypoint,
+    /// and release the slot.
+    pub async fn execute_pooled_with_entry(
+        &self,
+        wasm_bytes: &[u8],
+        args: &[Vec<u8>],
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
         let permit = self.acquire(wasm_bytes).await?;
         // Clone the cheap handles needed by the blocking closure. The sandbox
         // is Arc<Engine> + small config; the module is an Arc. The permit moves
@@ -207,9 +221,54 @@ impl SandboxPool {
         let sandbox = self.sandbox.clone();
         let module = permit.module.clone();
         let args = args.to_vec();
+        let entry_point = entry_point.to_string();
         tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the task completes
-            sandbox.execute_module(module, &args)
+            sandbox.execute_module_with_entry(module, &args, &entry_point)
+        })
+        .await
+        .map_err(|e| NexusError::WasmError(format!("pooled execution task panicked: {e}")))?
+    }
+
+    /// Convenience: acquire a slot, restore captured runtime state into the
+    /// fresh instance, run the module, and release the slot.
+    pub async fn execute_pooled_from_restored_state(
+        &self,
+        wasm_bytes: &[u8],
+        args: &[Vec<u8>],
+        restored_state: RestoredExecutionState,
+    ) -> Result<ExecutionResult> {
+        self.execute_pooled_from_restored_state_with_entry(
+            wasm_bytes,
+            args,
+            restored_state,
+            "_start",
+        )
+        .await
+    }
+
+    /// Convenience: acquire a slot, restore captured runtime state into the
+    /// fresh instance, run an explicit entrypoint, and release the slot.
+    pub async fn execute_pooled_from_restored_state_with_entry(
+        &self,
+        wasm_bytes: &[u8],
+        args: &[Vec<u8>],
+        restored_state: RestoredExecutionState,
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
+        let permit = self.acquire(wasm_bytes).await?;
+        let sandbox = self.sandbox.clone();
+        let module = permit.module.clone();
+        let args = args.to_vec();
+        let entry_point = entry_point.to_string();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            sandbox.execute_precompiled_from_restored_state_with_entry(
+                module,
+                &args,
+                restored_state,
+                &entry_point,
+            )
         })
         .await
         .map_err(|e| NexusError::WasmError(format!("pooled execution task panicked: {e}")))?

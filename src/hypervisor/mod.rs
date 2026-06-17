@@ -25,8 +25,8 @@ use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
 use crate::sandbox::{
-    FuelBudgetPolicy, FuelProfile, PoolConfig, SandboxConfig, SandboxPool, WasiToolConfig,
-    WasmSandbox,
+    FuelBudgetPolicy, FuelProfile, PoolConfig, RestoredExecutionState, SandboxConfig, SandboxPool,
+    WasiToolConfig, WasmSandbox,
 };
 use crate::security::{Capability, CapabilityManager};
 use crate::snapshot::{
@@ -523,7 +523,42 @@ impl NexusHypervisor {
         input: serde_json::Value,
         caller_tokens: &[crate::security::CapabilityToken],
     ) -> Result<ToolOutput> {
-        self.execute_tool_inner(tool, input, caller_tokens, None)
+        self.execute_tool_inner(tool, input, caller_tokens, None, None)
+            .await
+    }
+
+    /// Execute a tool after restoring a captured runtime snapshot into a
+    /// fresh branch instance before entrypoint execution.
+    ///
+    /// This is intentionally explicit so normal `execute_tool` calls remain
+    /// from-scratch executions and callers cannot silently overclaim snapshot
+    /// fork semantics.
+    pub async fn execute_tool_from_snapshot(
+        &self,
+        snapshot_id: uuid::Uuid,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+    ) -> Result<ToolOutput> {
+        self.execute_tool_from_snapshot_with_tokens(snapshot_id, tool, input, &[])
+            .await
+    }
+
+    /// Execute a snapshot-seeded tool with capability-token validation.
+    pub async fn execute_tool_from_snapshot_with_tokens(
+        &self,
+        snapshot_id: uuid::Uuid,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+    ) -> Result<ToolOutput> {
+        if !tool.required_capabilities.is_empty() {
+            let manager = self.capability_manager.read().unwrap();
+            manager.authorize(caller_tokens, &tool.required_capabilities)?;
+        }
+
+        let rollback = self.rollback_snapshot(snapshot_id)?;
+        let restored_state = RestoredExecutionState::from_rollback(&rollback);
+        self.execute_tool_inner(tool, input, caller_tokens, None, Some(restored_state))
             .await
     }
 
@@ -535,7 +570,7 @@ impl NexusHypervisor {
         input: serde_json::Value,
         module: std::sync::Arc<wasmtime::Module>,
     ) -> Result<ToolOutput> {
-        self.execute_tool_inner(tool, input, &[], Some(module))
+        self.execute_tool_inner(tool, input, &[], Some(module), None)
             .await
     }
 
@@ -548,7 +583,7 @@ impl NexusHypervisor {
         caller_tokens: &[crate::security::CapabilityToken],
         module: std::sync::Arc<wasmtime::Module>,
     ) -> Result<ToolOutput> {
-        self.execute_tool_inner(tool, input, caller_tokens, Some(module))
+        self.execute_tool_inner(tool, input, caller_tokens, Some(module), None)
             .await
     }
 
@@ -738,6 +773,7 @@ impl NexusHypervisor {
         input: serde_json::Value,
         caller_tokens: &[crate::security::CapabilityToken],
         precompiled: Option<std::sync::Arc<wasmtime::Module>>,
+        restored_state: Option<RestoredExecutionState>,
     ) -> Result<ToolOutput> {
         let start = Instant::now();
 
@@ -751,6 +787,7 @@ impl NexusHypervisor {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
         })?;
         let input_hash = format!("{:x}", sha2::Sha256::digest(&input_bytes));
+        let args = vec![input_bytes];
 
         // Adaptive fuel budget: override per-invocation max_fuel with
         // the policy's recommendation for this tool.
@@ -777,22 +814,59 @@ impl NexusHypervisor {
         // deltas are anchored at the pre-call sample.
         self.health_validator.start_execution();
 
-        let exec_result = if let Some(module) = precompiled {
-            self.sandbox
+        let entry_point = tool.entry_point.clone();
+        let exec_result = match (precompiled, restored_state) {
+            (Some(module), Some(restored_state)) => self
+                .sandbox
                 .read()
                 .unwrap()
-                .execute_precompiled(module, &[input_bytes])?
-        } else if let Some(pool) = &self.pool {
-            // Opt-in warm pool: acquire a slot, run on the pooling-allocator
-            // engine with a cached compiled module. Isolation is preserved —
-            // each call still gets a fresh Store + Instance.
-            pool.execute_pooled(&tool.wasm_bytes, &[input_bytes])
-                .await?
-        } else {
-            self.sandbox
+                .execute_precompiled_from_restored_state_with_entry(
+                    module,
+                    &args,
+                    restored_state,
+                    &entry_point,
+                )?,
+            (Some(module), None) => self
+                .sandbox
                 .read()
                 .unwrap()
-                .execute(&tool.wasm_bytes, &[input_bytes])?
+                .execute_precompiled_with_entry(module, &args, &entry_point)?,
+            (None, Some(restored_state)) => {
+                if let Some(pool) = &self.pool {
+                    pool.execute_pooled_from_restored_state_with_entry(
+                        &tool.wasm_bytes,
+                        &args,
+                        restored_state,
+                        &entry_point,
+                    )
+                    .await?
+                } else {
+                    self.sandbox
+                        .read()
+                        .unwrap()
+                        .execute_from_restored_state_with_entry(
+                            &tool.wasm_bytes,
+                            &args,
+                            restored_state,
+                            &entry_point,
+                        )?
+                }
+            }
+            (None, None) => {
+                if let Some(pool) = &self.pool {
+                    // Opt-in warm pool: acquire a slot, run on the pooling-allocator
+                    // engine with a cached compiled module. Isolation is preserved —
+                    // each call still gets a fresh Store + Instance.
+                    pool.execute_pooled_with_entry(&tool.wasm_bytes, &args, &entry_point)
+                        .await?
+                } else {
+                    self.sandbox.read().unwrap().execute_with_entry(
+                        &tool.wasm_bytes,
+                        &args,
+                        &entry_point,
+                    )?
+                }
+            }
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -1018,7 +1092,10 @@ impl NexusHypervisor {
     ) -> Result<SpeculativeResult> {
         fork_and_race(branches, config, |branch| {
             let input = input.clone();
-            async move { self.execute_tool(branch.tool, input).await }
+            async move {
+                self.execute_tool_from_snapshot(branch.base_snapshot_id, branch.tool, input)
+                    .await
+            }
         })
         .await
     }

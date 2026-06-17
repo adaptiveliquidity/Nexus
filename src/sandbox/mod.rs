@@ -18,4 +18,6 @@ pub use wasi::{
     PreOpen, ValidatedWasiToolConfig, WasiAccess, WasiMount, WasiSandboxConfig, WasiToolConfig,
 };
 pub use wasm_memory::{MemoryStats, WasmExecutionSnapshot, WasmMemoryState};
-pub use wasm_runtime::{ExecutionResult, SandboxConfig, StepCapture, WasmSandbox};
+pub use wasm_runtime::{
+    ExecutionResult, RestoredExecutionState, SandboxConfig, StepCapture, WasmSandbox,
+};

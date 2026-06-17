@@ -13,6 +13,7 @@ use wasmtime::{Config, Engine, Linker, Module, Store, Trap};
 
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
+use crate::snapshot::{ExecutionState, RollbackResult};
 use crate::telemetry::{CaptureSite, CapturedCallStack};
 
 /// Configuration for the WASM sandbox
@@ -168,6 +169,24 @@ pub struct StepCapture {
     pub memory: Option<Vec<u8>>,
     /// Post-execution exported globals.
     pub globals: Vec<crate::snapshot::GlobalSnapshot>,
+}
+
+/// Restored WASM state used to seed a fresh instance before entrypoint
+/// execution. Table contents are not included because snapshots currently
+/// capture table metadata only.
+#[derive(Debug, Clone)]
+pub struct RestoredExecutionState {
+    pub memory: Vec<u8>,
+    pub execution_state: ExecutionState,
+}
+
+impl RestoredExecutionState {
+    pub fn from_rollback(result: &RollbackResult) -> Self {
+        RestoredExecutionState {
+            memory: result.memory.clone(),
+            execution_state: result.execution_state.clone(),
+        }
+    }
 }
 
 /// WASM Micro-Sandbox with fuel metering.
@@ -411,6 +430,17 @@ impl WasmSandbox {
     /// every failure path so the hypervisor can derive the correct
     /// `HealthStatus` and recovery actions without substring matching.
     pub fn execute(&self, wasm_bytes: &[u8], args: &[Vec<u8>]) -> Result<ExecutionResult> {
+        self.execute_with_entry(wasm_bytes, args, "_start")
+    }
+
+    /// Execute WASM code with an explicit entrypoint. The default `_start`
+    /// entrypoint preserves the legacy fallback to `main`.
+    pub fn execute_with_entry(
+        &self,
+        wasm_bytes: &[u8],
+        args: &[Vec<u8>],
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
         // Module compilation failures are load-time errors with no execution.
@@ -426,7 +456,7 @@ impl WasmSandbox {
             }
         };
 
-        self.execute_module(module, args)
+        self.execute_module_with_entry(module, args, entry_point)
     }
 
     /// Re-run a deterministic module up to `fuel_cap` and capture post-run state.
@@ -580,6 +610,81 @@ impl WasmSandbox {
         self.execute_module(module, args)
     }
 
+    /// Execute a precompiled `Module` with an explicit entrypoint.
+    pub fn execute_precompiled_with_entry(
+        &self,
+        module: Arc<Module>,
+        args: &[Vec<u8>],
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
+        self.execute_module_with_entry(module, args, entry_point)
+    }
+
+    /// Execute WASM code after restoring a captured runtime snapshot into the
+    /// fresh instance before guest input and entrypoint execution.
+    pub fn execute_from_restored_state(
+        &self,
+        wasm_bytes: &[u8],
+        args: &[Vec<u8>],
+        restored_state: RestoredExecutionState,
+    ) -> Result<ExecutionResult> {
+        self.execute_from_restored_state_with_entry(wasm_bytes, args, restored_state, "_start")
+    }
+
+    /// Execute WASM code with an explicit entrypoint after restoring captured
+    /// runtime state into the fresh instance.
+    pub fn execute_from_restored_state_with_entry(
+        &self,
+        wasm_bytes: &[u8],
+        args: &[Vec<u8>],
+        restored_state: RestoredExecutionState,
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
+        let start = Instant::now();
+
+        let module = match Module::from_binary(&self.engine, wasm_bytes) {
+            Ok(m) => Arc::new(m),
+            Err(e) => {
+                let mode = FailureMode::InvalidModule(e.to_string());
+                return Ok(ExecutionResult::failure_from_mode(
+                    mode,
+                    0,
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+        };
+
+        self.execute_module_inner(module, args, Some(restored_state), entry_point)
+    }
+
+    /// Execute a precompiled `Module` after restoring captured runtime state
+    /// into the fresh instance before guest input and entrypoint execution.
+    pub fn execute_precompiled_from_restored_state(
+        &self,
+        module: Arc<Module>,
+        args: &[Vec<u8>],
+        restored_state: RestoredExecutionState,
+    ) -> Result<ExecutionResult> {
+        self.execute_precompiled_from_restored_state_with_entry(
+            module,
+            args,
+            restored_state,
+            "_start",
+        )
+    }
+
+    /// Execute a precompiled `Module` with an explicit entrypoint after
+    /// restoring captured runtime state into the fresh instance.
+    pub fn execute_precompiled_from_restored_state_with_entry(
+        &self,
+        module: Arc<Module>,
+        args: &[Vec<u8>],
+        restored_state: RestoredExecutionState,
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
+        self.execute_module_inner(module, args, Some(restored_state), entry_point)
+    }
+
     fn capture_globals(
         instance: &wasmtime::Instance,
         store: &mut Store<WasmState>,
@@ -635,6 +740,26 @@ impl WasmSandbox {
     /// Execute a pre-compiled module. Public so [`crate::sandbox::pool`] can
     /// run modules from its cache on the pooled engine.
     pub fn execute_module(&self, module: Arc<Module>, args: &[Vec<u8>]) -> Result<ExecutionResult> {
+        self.execute_module_with_entry(module, args, "_start")
+    }
+
+    /// Execute a pre-compiled module with an explicit entrypoint.
+    pub fn execute_module_with_entry(
+        &self,
+        module: Arc<Module>,
+        args: &[Vec<u8>],
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
+        self.execute_module_inner(module, args, None, entry_point)
+    }
+
+    fn execute_module_inner(
+        &self,
+        module: Arc<Module>,
+        args: &[Vec<u8>],
+        restored_state: Option<RestoredExecutionState>,
+        entry_point: &str,
+    ) -> Result<ExecutionResult> {
         let start = Instant::now();
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
@@ -643,6 +768,7 @@ impl WasmSandbox {
         let epoch_deadline = epoch.reserve_deadline(time_limit);
         let max_memory_bytes = self.config.max_memory_pages as usize * 65536;
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
+        let entry_point = entry_point.to_string();
 
         let (tx, rx) = std::sync::mpsc::channel::<ExecReply>();
         #[cfg(test)]
@@ -688,10 +814,51 @@ impl WasmSandbox {
                 }
             };
 
+            if let Some(restored) = restored_state.as_ref() {
+                if let Some(mem) = instance.get_memory(&mut store, "memory") {
+                    if let Err(e) = crate::snapshot::restore_memory(
+                        &mem,
+                        &mut store,
+                        restored.memory.as_slice(),
+                    ) {
+                        let _ = tx.send(ExecReply::Failed {
+                            mode: FailureMode::HostError(format!(
+                                "snapshot memory restore failed: {e}"
+                            )),
+                            fuel_consumed: 0,
+                            pre_call_memory: None,
+                            globals: Vec::new(),
+                            tables: Vec::new(),
+                            call_stack: None,
+                        });
+                        return;
+                    }
+                }
+
+                if let Err(e) = crate::snapshot::restore_globals(
+                    &instance,
+                    &mut store,
+                    &restored.execution_state.captured_globals,
+                ) {
+                    let _ = tx.send(ExecReply::Failed {
+                        mode: FailureMode::HostError(format!(
+                            "snapshot globals restore failed: {e}"
+                        )),
+                        fuel_consumed: 0,
+                        pre_call_memory: None,
+                        globals: Vec::new(),
+                        tables: Vec::new(),
+                        call_stack: None,
+                    });
+                    return;
+                }
+            }
+
             // Phase A: capture the *real* WASM linear memory right after
-            // instantiation. This is what the hypervisor needs to build a
-            // snapshot it can actually roll back to. `None` here means the
-            // module has no `"memory"` export, which is legal.
+            // instantiation (and after optional restored-state seeding). This
+            // is what the hypervisor needs to build a snapshot it can actually
+            // roll back to. `None` here means the module has no `"memory"`
+            // export, which is legal.
             let pre_call_memory: Option<Vec<u8>> = instance
                 .get_memory(&mut store, "memory")
                 .map(|m| m.data(&store).to_vec());
@@ -711,25 +878,41 @@ impl WasmSandbox {
                 }
             }
 
-            // Resolve entrypoint: prefer `_start`, fall back to `main`.
-            let start_func = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
+            // Resolve entrypoint: preserve the legacy `_start` -> `main`
+            // fallback, but honor explicit non-default entrypoints exactly.
+            let start_func = match instance.get_typed_func::<(), ()>(&mut store, &entry_point) {
                 Ok(f) => f,
-                Err(_) => match instance.get_typed_func::<(), ()>(&mut store, "main") {
-                    Ok(f) => f,
-                    Err(_) => {
-                        let _ = tx.send(ExecReply::Failed {
-                            mode: FailureMode::MissingEntrypoint {
-                                expected: "_start".into(),
-                            },
-                            fuel_consumed: 0,
-                            pre_call_memory,
-                            globals: Vec::new(),
-                            tables: Vec::new(),
-                            call_stack: None,
-                        });
-                        return;
+                Err(_) if entry_point == "_start" => {
+                    match instance.get_typed_func::<(), ()>(&mut store, "main") {
+                        Ok(f) => f,
+                        Err(_) => {
+                            let _ = tx.send(ExecReply::Failed {
+                                mode: FailureMode::MissingEntrypoint {
+                                    expected: "_start".into(),
+                                },
+                                fuel_consumed: 0,
+                                pre_call_memory,
+                                globals: Vec::new(),
+                                tables: Vec::new(),
+                                call_stack: None,
+                            });
+                            return;
+                        }
                     }
-                },
+                }
+                Err(_) => {
+                    let _ = tx.send(ExecReply::Failed {
+                        mode: FailureMode::MissingEntrypoint {
+                            expected: entry_point.clone(),
+                        },
+                        fuel_consumed: 0,
+                        pre_call_memory,
+                        globals: Vec::new(),
+                        tables: Vec::new(),
+                        call_stack: None,
+                    });
+                    return;
+                }
             };
 
             let call_result = start_func.call(&mut store, ());

@@ -156,6 +156,46 @@ fn module_with_data(data: &str, global_value: i32) -> Vec<u8> {
     .unwrap()
 }
 
+fn module_sets_marker(marker_value: i32) -> Vec<u8> {
+    wat::parse_str(format!(
+        r#"(module
+            (memory (export "memory") 1)
+            (global $marker (export "marker") (mut i32) (i32.const 0))
+            (func (export "_start")
+                i32.const {marker_value}
+                global.set $marker)
+        )"#
+    ))
+    .unwrap()
+}
+
+fn module_requires_restored_marker_and_true_input(marker_value: i32) -> Vec<u8> {
+    wat::parse_str(format!(
+        r#"(module
+            (memory (export "memory") 1)
+            (global $marker (export "marker") (mut i32) (i32.const 0))
+            (func (export "_start")
+                global.get $marker
+                i32.const {marker_value}
+                i32.ne
+                if
+                    unreachable
+                end
+
+                ;; Runtime input is [len: u32 LE][JSON bytes]. The first byte
+                ;; of JSON `true` is ASCII 't' at offset 4.
+                i32.const 4
+                i32.load8_u
+                i32.const 116
+                i32.ne
+                if
+                    unreachable
+                end)
+        )"#
+    ))
+    .unwrap()
+}
+
 fn expected_memory(data: &[u8]) -> Vec<u8> {
     let mut memory = vec![0u8; WASM_PAGE_SIZE];
     memory[..data.len()].copy_from_slice(data);
@@ -391,6 +431,189 @@ async fn snapshot_create_latest_runtime_rolls_back_restored_state() {
             > 0,
         "restored execution state summary should report captured globals: {rollback}"
     );
+}
+
+#[tokio::test]
+async fn fork_and_race_from_snapshot_seeds_each_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_path = tmp.path().join("fork_base_marker.wasm");
+    let branch_path = tmp.path().join("fork_branch_requires_marker.wasm");
+    fs::write(&base_path, module_sets_marker(1234)).unwrap();
+    fs::write(
+        &branch_path,
+        module_requires_restored_marker_and_true_input(1234),
+    )
+    .unwrap();
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    initialize_client(&mut client).await;
+
+    let base_exec = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": base_path }
+            }),
+        )
+        .await;
+    let base_exec = tool_json(&base_exec);
+    assert_eq!(
+        base_exec["success"], true,
+        "base execute failed: {base_exec}"
+    );
+    let base_snapshot_id = base_exec["snapshot_id"]
+        .as_str()
+        .expect("base execution should expose a runtime snapshot id");
+    uuid::Uuid::parse_str(base_snapshot_id).expect("base snapshot id should be a UUID");
+
+    let race_resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_fork_and_race",
+                "arguments": {
+                    "wasm_path": branch_path,
+                    "base_snapshot_id": base_snapshot_id,
+                    "strategy": "wait_all",
+                    "branches": [
+                        { "input": true },
+                        { "entry": "_start", "input": true }
+                    ]
+                }
+            }),
+        )
+        .await;
+    let race = tool_json(&race_resp);
+
+    assert_eq!(race["base_snapshot_id"].as_str(), Some(base_snapshot_id));
+    assert_eq!(
+        race["base_snapshot_source"].as_str(),
+        Some("explicit_snapshot_id")
+    );
+    assert_eq!(
+        race["semantics"].as_str(),
+        Some("fork_from_captured_runtime_snapshot")
+    );
+    assert_eq!(race["branches_tried"].as_u64(), Some(2));
+    assert_eq!(
+        race["branches_succeeded"].as_u64(),
+        Some(2),
+        "wait_all should prove every branch observed restored marker state: {race}"
+    );
+    assert_eq!(race["winner_output"]["success"], true);
+    assert_eq!(race["winner_output"]["error"], Value::Null);
+}
+
+#[tokio::test]
+async fn fork_and_race_latest_runtime_source_uses_real_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_path = tmp.path().join("fork_latest_runtime_base.wasm");
+    let branch_path = tmp.path().join("fork_latest_runtime_branch.wasm");
+    fs::write(&base_path, module_sets_marker(4321)).unwrap();
+    fs::write(
+        &branch_path,
+        module_requires_restored_marker_and_true_input(4321),
+    )
+    .unwrap();
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    initialize_client(&mut client).await;
+
+    let base_exec = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": base_path }
+            }),
+        )
+        .await;
+    let base_exec = tool_json(&base_exec);
+    assert_eq!(base_exec["success"], true);
+    let base_snapshot_id = base_exec["snapshot_id"]
+        .as_str()
+        .expect("base execution should expose a runtime snapshot id");
+
+    let race_resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_fork_and_race",
+                "arguments": {
+                    "wasm_path": branch_path,
+                    "source": "latest_runtime",
+                    "strategy": "wait_all",
+                    "branches": [
+                        { "input": true },
+                        { "input": true }
+                    ]
+                }
+            }),
+        )
+        .await;
+    let race = tool_json(&race_resp);
+
+    assert_eq!(race["base_snapshot_id"].as_str(), Some(base_snapshot_id));
+    assert_eq!(
+        race["base_snapshot_source"].as_str(),
+        Some("latest_runtime")
+    );
+    assert_eq!(
+        race["semantics"].as_str(),
+        Some("fork_from_captured_runtime_snapshot")
+    );
+    assert_eq!(race["branches_tried"].as_u64(), Some(2));
+    assert_eq!(race["branches_succeeded"].as_u64(), Some(2));
+}
+
+#[tokio::test]
+async fn fork_and_race_without_snapshot_labels_from_scratch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let branch_path = tmp.path().join("fork_from_scratch_noop.wasm");
+    fs::write(
+        &branch_path,
+        wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "_start"))
+            )"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    initialize_client(&mut client).await;
+
+    let race_resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_fork_and_race",
+                "arguments": {
+                    "wasm_path": branch_path,
+                    "strategy": "wait_all",
+                    "branches": [{}, {}]
+                }
+            }),
+        )
+        .await;
+    let race = tool_json(&race_resp);
+
+    assert_eq!(race["base_snapshot_id"], Value::Null);
+    assert_eq!(race["base_snapshot_source"].as_str(), Some("from_scratch"));
+    assert_eq!(
+        race["semantics"].as_str(),
+        Some("from_scratch_no_snapshot_restore")
+    );
+    assert_eq!(race["branches_tried"].as_u64(), Some(2));
+    assert_eq!(race["branches_succeeded"].as_u64(), Some(2));
 }
 
 #[tokio::test]
