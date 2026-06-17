@@ -29,6 +29,7 @@ flock -n 9 || { log_error "Another dispatch is running (lock: $CODEX_LOCK)"; exi
 git -C "$REPO" fetch origin --quiet
 worktree_create "$REPO" "$WORKTREE" "$TASK_BRANCH" "origin/$INT_BRANCH"
 
+# Build runner from template (runner contains the actual AI invocation)
 umask 0177
 RUNNER=$(mktemp "/tmp/codex-run-${WAVE_ID}-XXXXXX.sh")
 RUNNER_TEMPLATE="$SCRIPT_DIR/wsl-runner-template.sh"
@@ -42,8 +43,25 @@ sed \
   "$RUNNER_TEMPLATE" > "$RUNNER"
 chmod 0700 "$RUNNER"
 
-setsid bash "$RUNNER" 9>&- &
-DISPATCH_PID=$!
-echo "DISPATCH_PID=$DISPATCH_PID" >> "$LOG"
-state_set "dispatch_pid" "$DISPATCH_PID" "$STATE_FILE"
-log_ok "Dispatched $TASK_BRANCH (pid=$DISPATCH_PID) -- monitor: tail -f $LOG"
+# Run synchronously -- parent stays alive so bubblewrap user-namespace works.
+# Fire this whole script as a background Bash tool call for non-blocking dispatch.
+state_set "dispatch_pid" "$$" "$STATE_FILE"
+log_info "Running AI worker for $TASK_BRANCH (synchronous)"
+bash "$RUNNER"
+log_info "AI worker finished for $TASK_BRANCH"
+
+# ---- Gate execution ---------------------------------------------------------
+mapfile -t GATES < <(state_get_array required_gates "$STATE_FILE")
+if [[ ${#GATES[@]} -eq 0 ]]; then
+  log_warn "No required_gates in state file"
+  state_set "gate_result" "PASS" "$STATE_FILE"
+else
+  if run_gates "$WORKTREE" "${GATES[@]}"; then
+    state_set "gate_result" "PASS" "$STATE_FILE"
+    log_ok "Gate result: PASS for $TASK_BRANCH"
+  else
+    state_set "gate_result" "FAIL" "$STATE_FILE"
+    log_error "Gate result: FAIL for $TASK_BRANCH"
+    exit 1
+  fi
+fi
