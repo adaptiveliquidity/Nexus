@@ -13,6 +13,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
+const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
 const WASM_PAGE_SIZE: usize = 65_536;
 
 fn cargo_bin() -> std::path::PathBuf {
@@ -45,6 +46,15 @@ impl McpClient {
         module_dir: Option<&std::path::Path>,
         capability_allowlist: Option<&str>,
     ) -> Self {
+        Self::spawn_with_module_dir_allowlist_and_profile(module_dir, capability_allowlist, None)
+            .await
+    }
+
+    async fn spawn_with_module_dir_allowlist_and_profile(
+        module_dir: Option<&std::path::Path>,
+        capability_allowlist: Option<&str>,
+        capability_profile: Option<&std::path::Path>,
+    ) -> Self {
         let bin = cargo_bin();
         assert!(
             bin.exists(),
@@ -59,11 +69,15 @@ impl McpClient {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         command.env_remove(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV);
+        command.env_remove(NEXUS_MCP_PROFILE_ENV);
         if let Some(module_dir) = module_dir {
             command.env("NEXUS_MCP_MODULE_DIR", module_dir);
         }
         if let Some(capability_allowlist) = capability_allowlist {
             command.env(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV, capability_allowlist);
+        }
+        if let Some(capability_profile) = capability_profile {
+            command.env(NEXUS_MCP_PROFILE_ENV, capability_profile);
         }
 
         let mut child = command.spawn().expect("failed to spawn nexus-mcp");
@@ -116,11 +130,45 @@ fn read_file_allowlist(path: &Path) -> String {
     .to_string()
 }
 
+fn write_file_allowlist(path: &Path) -> String {
+    json!([
+        {
+            "type": "write_file",
+            "path": path.display().to_string()
+        }
+    ])
+    .to_string()
+}
+
+fn profile_with_capability(dir: &Path, capability_type: &str, path: &Path) -> std::path::PathBuf {
+    let profile_path = dir.join(format!("{capability_type}_profile.toml"));
+    fs::write(
+        &profile_path,
+        format!(
+            "name = 'test-profile'\n\n[[capabilities]]\ntype = '{capability_type}'\npath = '{}'\n",
+            path.display()
+        ),
+    )
+    .unwrap();
+    profile_path
+}
+
 fn tool_json(resp: &Value) -> Value {
     let text = resp["result"]["content"][0]["text"]
         .as_str()
         .expect("tool response should contain text content");
     serde_json::from_str(text).expect("tool response text should be JSON")
+}
+
+fn write_noop_wasm(path: &Path) {
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start"))
+        )"#,
+    )
+    .unwrap();
+    fs::write(path, wasm).unwrap();
 }
 
 async fn initialize_client(client: &mut McpClient) {
@@ -889,6 +937,123 @@ async fn execute_wasi_grants_allowlisted_read_file_capability() {
     assert_eq!(resp["id"], 2);
     let parsed = tool_json(&resp);
 
+    assert_eq!(parsed["success"], true, "expected success, got: {parsed}");
+    assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
+}
+
+#[tokio::test]
+async fn profile_enforcement_blocks_disallowed_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("profile_blocks_write.wasm");
+    write_noop_wasm(&wasm_path);
+
+    let profile_path = profile_with_capability(tmp.path(), "read_file", tmp.path());
+    let allowlist = write_file_allowlist(tmp.path());
+    let mut client = McpClient::spawn_with_module_dir_allowlist_and_profile(
+        Some(tmp.path()),
+        Some(&allowlist),
+        Some(&profile_path),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "capabilities": [
+                        { "type": "write_file", "path": tmp.path() }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    assert_eq!(
+        parsed["code"].as_i64(),
+        Some(-32602),
+        "profile denial should use MCP invalid-params code: {parsed}"
+    );
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("capability not permitted by active profile: write:"),
+        "expected active profile rejection, got: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn profile_enforcement_allows_matching_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("profile_allows_read.wasm");
+    write_noop_wasm(&wasm_path);
+
+    let profile_path = profile_with_capability(tmp.path(), "read_file", tmp.path());
+    let allowlist = read_file_allowlist(tmp.path());
+    let mut client = McpClient::spawn_with_module_dir_allowlist_and_profile(
+        Some(tmp.path()),
+        Some(&allowlist),
+        Some(&profile_path),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "capabilities": [
+                        { "type": "read_file", "path": tmp.path() }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    assert_eq!(parsed["success"], true, "expected success, got: {parsed}");
+    assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
+}
+
+#[tokio::test]
+async fn no_profile_env_skips_enforcement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("profile_absent_allows_write.wasm");
+    write_noop_wasm(&wasm_path);
+
+    let allowlist = write_file_allowlist(tmp.path());
+    let mut client =
+        McpClient::spawn_with_module_dir_and_allowlist(Some(tmp.path()), Some(&allowlist)).await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "capabilities": [
+                        { "type": "write_file", "path": tmp.path() }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
     assert_eq!(parsed["success"], true, "expected success, got: {parsed}");
     assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
 }

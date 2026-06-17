@@ -1,26 +1,5 @@
-[profile]
-name = "local-mcp-development"
-version = "0.1.0"
-description = "Local development profile with narrow filesystem and HTTP access"
-
-[execution]
-module_dirs = ["/srv/nexus/modules", "/opt/nexus/tools"]
-daemon_auth_required = false
-max_token_validity_secs = 3600
+name = "sample"
 
 [[capabilities]]
-scope = "ReadFile"
-path = "/srv/nexus/data"
-
-[[capabilities]]
-scope = "ListDirectory"
-path = "/srv/nexus/modules"
-
-[[capabilities]]
-scope = "HttpGet"
-url = "https://api.example.com/v1/*"
-
-[mcp]
-tool_allowlist = ["nexus_execute", "nexus_execute_wasi", "nexus_issue_token"]
-snapshot_enabled = true
-fork_enabled = false
+type = "read_file"
+path = "/tmp"
