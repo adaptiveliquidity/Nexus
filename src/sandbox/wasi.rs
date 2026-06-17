@@ -23,8 +23,8 @@ use wasmtime_wasi::WasiCtxBuilder;
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
 use crate::sandbox::wasm_runtime::{
-    configure_epoch_deadline, is_epoch_interrupt, join_with_timeout, timeout_mode,
-    ExecutionResult, WasmSandbox, TIMEOUT_JOIN_GRACE,
+    configure_epoch_deadline, is_epoch_interrupt, join_with_timeout, timeout_mode, ExecutionResult,
+    WasmSandbox, TIMEOUT_JOIN_GRACE,
 };
 use crate::security::capability::normalize_lexical_path;
 use crate::security::Capability;
