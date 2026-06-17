@@ -42,7 +42,7 @@ sed \
   "$RUNNER_TEMPLATE" > "$RUNNER"
 chmod 0700 "$RUNNER"
 
-nohup bash "$RUNNER" &
+nohup bash "$RUNNER" 9>&- &
 DISPATCH_PID=$!
 echo "DISPATCH_PID=$DISPATCH_PID" >> "$LOG"
 state_set "dispatch_pid" "$DISPATCH_PID" "$STATE_FILE"
