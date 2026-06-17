@@ -740,6 +740,14 @@ fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {
 }
 
 fn resolve_wasm_path(wasm_path: &Path, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
+    let requested_path = absolute_request_path(wasm_path)?;
+    if !path_is_lexically_allowed(&requested_path, allowed_dirs) {
+        anyhow::bail!(
+            "wasm path '{}' is outside allowed MCP module directories",
+            wasm_path.display()
+        );
+    }
+
     let canonical = std::fs::canonicalize(wasm_path).map_err(|e| {
         anyhow::anyhow!(
             "Failed to canonicalize wasm file '{}': {e}",
@@ -763,6 +771,43 @@ fn resolve_wasm_path(wasm_path: &Path, allowed_dirs: &[PathBuf]) -> Result<PathB
         "wasm path '{}' is outside allowed MCP module directories",
         wasm_path.display()
     )
+}
+
+fn absolute_request_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(std::env::current_dir()?.join(path))
+}
+
+fn path_is_lexically_allowed(path: &Path, allowed_dirs: &[PathBuf]) -> bool {
+    let normalized_path = lexical_normalize_path(path);
+    allowed_dirs.iter().any(|dir| {
+        let normalized_dir = lexical_normalize_path(dir);
+        normalized_path.starts_with(normalized_dir)
+    })
+}
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let is_absolute = path.is_absolute();
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !is_absolute {
+                    normalized.push("..");
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
 }
 
 /// Apply security limits to an MCP token request: reject the unrestricted
@@ -883,6 +928,29 @@ mod tests {
         assert!(
             err.to_string().contains("outside allowed MCP module"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_wasm_path_outside_allowed_module_dir_without_stat_leak() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let wasm_path = outside.join("missing.wasm");
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_wasm_path(&wasm_path, &allowed_dirs).unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("outside allowed MCP module"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !message.contains("No such file"),
+            "outside-root misses must not reveal host path existence: {err}"
         );
     }
 

@@ -434,6 +434,124 @@ async fn snapshot_create_latest_runtime_rolls_back_restored_state() {
 }
 
 #[tokio::test]
+async fn smoke_execute_snapshot_rollback_recover() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_path = tmp.path().join("smoke_base_runtime.wasm");
+    let mutated_path = tmp.path().join("smoke_mutated_runtime.wasm");
+    fs::write(&base_path, module_with_data("smoke-base", 17)).unwrap();
+    fs::write(&mutated_path, module_with_data("smoke-mutated", 23)).unwrap();
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    initialize_client(&mut client).await;
+
+    let base_exec = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": base_path }
+            }),
+        )
+        .await;
+    let base_exec = tool_json(&base_exec);
+    assert_eq!(
+        base_exec["success"], true,
+        "base execute failed: {base_exec}"
+    );
+
+    let create_resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_create",
+                "arguments": {
+                    "label": "mcp-smoke-base",
+                    "source": "latest_runtime"
+                }
+            }),
+        )
+        .await;
+    let created = tool_json(&create_resp);
+    assert_eq!(
+        created["source"].as_str(),
+        Some("latest_runtime"),
+        "snapshot_create should use the latest runtime source: {created}"
+    );
+    let base_snapshot_id = created["snapshot_id"]
+        .as_str()
+        .expect("latest_runtime snapshot_create should return a snapshot id");
+    assert_eq!(
+        Some(base_snapshot_id),
+        base_exec["snapshot_id"].as_str(),
+        "latest_runtime snapshot_create must reference the execute snapshot"
+    );
+    uuid::Uuid::parse_str(base_snapshot_id).expect("base snapshot id should be a UUID");
+
+    let mutated_exec = client
+        .request(
+            4,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": mutated_path }
+            }),
+        )
+        .await;
+    let mutated_exec = tool_json(&mutated_exec);
+    assert_eq!(
+        mutated_exec["success"], true,
+        "mutated execute failed: {mutated_exec}"
+    );
+    assert_ne!(
+        mutated_exec["snapshot_id"].as_str(),
+        Some(base_snapshot_id),
+        "mutated execution should advance the latest runtime snapshot"
+    );
+
+    let rollback_resp = client
+        .request(
+            5,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_rollback",
+                "arguments": {
+                    "snapshot_id": base_snapshot_id,
+                    "include_restored_state": true
+                }
+            }),
+        )
+        .await;
+    let rollback = tool_json(&rollback_resp);
+    assert_eq!(rollback["snapshot_id"].as_str(), Some(base_snapshot_id));
+
+    let memory_sha256 = rollback["restored_state"]["memory"]["sha256"]
+        .as_str()
+        .expect("rollback restored_state.memory.sha256 should be present");
+    assert!(
+        !memory_sha256.is_empty(),
+        "rollback restored memory sha256 should be non-empty: {rollback}"
+    );
+
+    let recovered_exec = client
+        .request(
+            6,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": base_path }
+            }),
+        )
+        .await;
+    let recovered_exec = tool_json(&recovered_exec);
+    assert_eq!(
+        recovered_exec["success"], true,
+        "recover execute failed: {recovered_exec}"
+    );
+}
+
+#[tokio::test]
 async fn fork_and_race_from_snapshot_seeds_each_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let base_path = tmp.path().join("fork_base_marker.wasm");
