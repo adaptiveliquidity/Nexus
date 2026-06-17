@@ -41,9 +41,19 @@ fn trapping_tool(name: &str) -> ToolDefinition {
     ToolDefinition::new(name.to_string(), wasm)
 }
 
-fn branch(tool: ToolDefinition) -> SpeculativeBranch {
+async fn base_snapshot_id(hv: &NexusHypervisor) -> Uuid {
+    let output = hv
+        .execute_tool(good_tool("base_snapshot"), serde_json::json!({}))
+        .await
+        .expect("base snapshot execution should run");
+    output
+        .snapshot_id
+        .expect("base execution should capture a runtime snapshot")
+}
+
+fn branch(base_snapshot_id: Uuid, tool: ToolDefinition) -> SpeculativeBranch {
     SpeculativeBranch::new(
-        Uuid::new_v4(),
+        base_snapshot_id,
         tool,
         RecoveryAction::new("retry-variant", RecoverySource::Static),
     )
@@ -82,10 +92,11 @@ fn assert_host_environment_error(e: &nexus::NexusError) {
 #[tokio::test]
 async fn speculative_round_returns_a_successful_winner() {
     let hv = hypervisor();
+    let base = base_snapshot_id(&hv).await;
     let branches = vec![
-        branch(trapping_tool("bad")),
-        branch(good_tool("good")),
-        branch(trapping_tool("also_bad")),
+        branch(base, trapping_tool("bad")),
+        branch(base, good_tool("good")),
+        branch(base, trapping_tool("also_bad")),
     ];
 
     match hv
@@ -110,7 +121,11 @@ async fn speculative_round_returns_a_successful_winner() {
 #[tokio::test]
 async fn speculative_round_all_trapping_is_error() {
     let hv = hypervisor();
-    let branches = vec![branch(trapping_tool("a")), branch(trapping_tool("b"))];
+    let base = base_snapshot_id(&hv).await;
+    let branches = vec![
+        branch(base, trapping_tool("a")),
+        branch(base, trapping_tool("b")),
+    ];
 
     let result = hv
         .speculative_execute(
@@ -127,7 +142,11 @@ async fn speculative_round_all_trapping_is_error() {
 #[tokio::test]
 async fn first_success_strategy_picks_the_good_branch() {
     let hv = hypervisor();
-    let branches = vec![branch(good_tool("good")), branch(trapping_tool("bad"))];
+    let base = base_snapshot_id(&hv).await;
+    let branches = vec![
+        branch(base, good_tool("good")),
+        branch(base, trapping_tool("bad")),
+    ];
 
     match hv
         .speculative_execute(
