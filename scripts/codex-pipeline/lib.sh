@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # .codex/scripts/lib.sh — shared functions for the Nexus WSL Codex pipeline
 # Source this file; do not execute directly.
 set -euo pipefail

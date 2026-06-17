@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # .codex/scripts/wsl-dispatch-task.sh
 # Usage: wsl-dispatch-task.sh <state-file> <prompt-file>
 # Creates a git worktree for the task, fires Codex, returns immediately.

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # .codex/scripts/wsl-task-preflight.sh
 # Usage: wsl-task-preflight.sh [state-file]
 # Validates environment before dispatching a Codex task.
