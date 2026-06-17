@@ -3,13 +3,10 @@
 pub mod receipt;
 pub mod schema;
 
-pub use receipt::{
-    ActiveCapabilityProfile, ExecutionReceipt, FailureModeLite, McpProofReference,
-    ProofCaptureMode, ProofHmacKey,
-};
+pub use receipt::ExecutionReceipt;
 pub use schema::{
     BranchRaceEvidence, CapabilityEvidence, DigestMode, FailureEvidence, InputIdentity,
-    PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofScorecard, ProofSubject,
-    RedactionReport, RollbackEvidence, SignatureEnvelope, SnapshotEvidence, SnapshotKind,
-    ToolIdentity, TypedDigest,
+    PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofSubject, RedactionReport,
+    RollbackEvidence, SignatureEnvelope, SnapshotEvidence, SnapshotKind, ToolIdentity, TypedDigest,
+    PROOF_CAPSULE_VERSION,
 };
