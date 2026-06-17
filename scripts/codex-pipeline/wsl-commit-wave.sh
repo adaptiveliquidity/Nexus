@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# .codex/scripts/wsl-commit-wave.sh — stages ONLY allowed_files, commits -F, pushes
+# scripts/codex-pipeline/wsl-commit-wave.sh -- stages ONLY allowed_files, commits, pushes
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib.sh"
@@ -9,10 +9,13 @@ WORKTREE=$(state_get worktree "$STATE_FILE")
 TASK_BRANCH=$(state_get task_branch "$STATE_FILE")
 WAVE_ID=$(state_get wave_id "$STATE_FILE")
 GATE_RESULT=$(state_get gate_result "$STATE_FILE")
-[[ "$GATE_RESULT" == "PASS" ]] || { log_error "Gate result is '$GATE_RESULT' — must be PASS before commit"; exit 1; }
+[[ "$GATE_RESULT" == "PASS" ]] || { log_error "Gate result is '$GATE_RESULT' -- must be PASS before commit"; exit 1; }
 validate_branch "$WORKTREE" "$TASK_BRANCH"
 mapfile -t allowed < <(state_get_array allowed_files "$STATE_FILE")
 [[ ${#allowed[@]} -gt 0 ]] || { log_error "No allowed_files declared in state"; exit 1; }
+for f in "${allowed[@]}"; do
+  validate_allowed_file "$f" "$WORKTREE" || exit 1
+done
 validate_clean_except "$WORKTREE" "${allowed[@]}"
 staged=()
 for f in "${allowed[@]}"; do
@@ -23,7 +26,7 @@ for f in "${allowed[@]}"; do
     log_info "Unchanged (skip): $f"
   fi
 done
-[[ ${#staged[@]} -gt 0 ]] || { log_warn "Nothing to stage — already committed?"; exit 0; }
+[[ ${#staged[@]} -gt 0 ]] || { log_warn "Nothing to stage -- already committed?"; exit 0; }
 MSG_FILE="/tmp/codex-commit-msg-${WAVE_ID}.txt"
 printf 'feat(proof): %s implementation\n\nWave ID: %s | Branch: %s\nFiles: %s\nGate: PASS\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\n' \
   "$WAVE_ID" "$WAVE_ID" "$TASK_BRANCH" "${staged[*]}" > "$MSG_FILE"
