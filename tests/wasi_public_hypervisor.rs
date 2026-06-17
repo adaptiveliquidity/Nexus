@@ -145,6 +145,24 @@ async fn missing_write_capability_rejects_mount() {
     assert!(matches!(result, Err(NexusError::CapabilityDenied(_))));
 }
 
+#[tokio::test]
+async fn denied_wasi_config_does_not_create_missing_mount_dir() {
+    let hv = hypervisor();
+    let tmp = tempfile::tempdir().unwrap();
+    let missing_mount = tmp.path().join("not-authorized-output");
+    let config = WasiToolConfig::new().with_mount(&missing_mount, "/output", WasiAccess::ReadWrite);
+
+    let result = hv
+        .execute_tool_wasi_with_config(csv_tool(), serde_json::json!({}), &[], config)
+        .await;
+
+    assert!(matches!(result, Err(NexusError::CapabilityDenied(_))));
+    assert!(
+        !missing_mount.exists(),
+        "missing WASI mount directory must not be created before authorization"
+    );
+}
+
 #[test]
 fn duplicate_guest_path_rejected() {
     let dir = tempfile::tempdir().unwrap();

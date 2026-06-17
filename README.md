@@ -164,7 +164,7 @@ nexus demo --demo all
 | Snap-rollback | Shipped | Linear memory + globals + tables captured; sub-ms rollback at 1 MiB |
 | WASI execution | Shipped | WASI Preview 1 via `execute_tool_wasi` / `execute_tool_wasi_with_config`; capability tokens gate pre-opens |
 | WASI mount builder | Shipped | `WasiToolConfig` builder API with `with_mount()`, `validate()`, `required_capabilities()` |
-| Capability enforcement | Shipped | Ed25519-signed tokens with attenuation chains (`attenuate()`); authorization before filesystem side effects |
+| Capability enforcement | Shipped | Ed25519-signed tokens with attenuation chains (`attenuate()`); required-capability derivation performs no filesystem writes, and any WASI mount directory creation happens only after successful authorization |
 | Speculative execution | Shipped | `fork_and_race` runs N sandbox branches, picks the winner |
 | Execution replay | Shipped | Deterministic checkpoint trace with time-travel cursor (`TraceReplay`) |
 | Failure taxonomy | Shipped | 15+ typed `FailureMode` variants with `requires_rollback()` |
@@ -235,7 +235,7 @@ Monitors three dimensions during execution:
 ## Security Model
 
 1. **Ed25519-signed tokens** — every capability token is cryptographically signed
-2. **Authorization before side effects** — capability tokens are validated before any filesystem operations (directory creation, path resolution)
+2. **Authorization before filesystem side effects** — on the WASI execution path, required capabilities are derived without filesystem writes, and any host mount directory creation happens only after capability authorization succeeds
 3. **WASM isolation** — each sandbox operates in complete memory isolation
 4. **Attenuation chains** — tokens can be narrowed and re-delegated, never widened
 5. **Denial on failure** — missing, expired, revoked, or incorrectly-signed tokens produce `CapabilityDenied`
