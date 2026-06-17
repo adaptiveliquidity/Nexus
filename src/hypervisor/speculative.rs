@@ -267,6 +267,7 @@ mod tests {
             execution_time_ms: 0,
             fuel_consumed: 0,
             error_log: None,
+            snapshot_id: None,
         }
     }
 
@@ -279,6 +280,7 @@ mod tests {
             execution_time_ms: 0,
             fuel_consumed: 0,
             error_log: None,
+            snapshot_id: None,
         }
     }
 

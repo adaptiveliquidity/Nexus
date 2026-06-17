@@ -12,6 +12,7 @@ use rmcp::{
     handler::server::wrapper::Parameters, schemars, tool, tool_router, transport::stdio, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use tracing_subscriber::{self, EnvFilter};
 use uuid::Uuid;
 
@@ -66,12 +67,20 @@ pub struct CapabilitySpec {
 pub struct SnapshotCreateParams {
     #[schemars(description = "Human-readable label for the snapshot")]
     pub label: Option<String>,
+    #[schemars(
+        description = "Snapshot source. Omit for the backwards-compatible empty/stateless baseline, or use latest_runtime to return the real snapshot captured by the latest nexus_execute call."
+    )]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SnapshotRollbackParams {
     #[schemars(description = "UUID of the snapshot to roll back to")]
     pub snapshot_id: String,
+    #[schemars(
+        description = "When true, include a memory checksum/preview and execution-state summary for the restored snapshot."
+    )]
+    pub include_restored_state: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -116,7 +125,7 @@ pub struct NexusMcpServer {
 #[tool_router(server_handler)]
 impl NexusMcpServer {
     #[tool(
-        description = "Execute a WASM tool in the Nexus sandbox. Loads the .wasm file, runs it with optional JSON input, and returns structured output including success/failure, result bytes, execution time, and fuel consumed."
+        description = "Execute a WASM tool in the Nexus sandbox. Loads the .wasm file, runs it with optional JSON input, and returns structured output including success/failure, result bytes, execution time, fuel consumed, and the runtime snapshot id when WASM memory was captured."
     )]
     async fn nexus_execute(&self, Parameters(params): Parameters<ExecuteParams>) -> String {
         match self.do_execute(params).await {
@@ -139,14 +148,14 @@ impl NexusMcpServer {
     }
 
     #[tool(
-        description = "Create a snapshot of the current hypervisor state. Returns the snapshot UUID which can be used for rollback."
+        description = "Create an MCP snapshot handle. By default this creates the backwards-compatible empty/stateless baseline (no WASM memory or execution state). Pass source:\"latest_runtime\" after nexus_execute to return the real runtime snapshot captured from sandbox memory/state."
     )]
     async fn nexus_snapshot_create(
         &self,
         Parameters(params): Parameters<SnapshotCreateParams>,
     ) -> String {
         match self.do_snapshot_create(params) {
-            Ok(id) => format!("{{\"snapshot_id\": \"{id}\", \"success\": true}}"),
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
             Err(e) => tool_error_response(e),
         }
     }
@@ -198,6 +207,8 @@ struct ToolOutputResponse {
     execution_time_ms: u64,
     fuel_consumed: u64,
     rollback_performed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<String>,
 }
 
 impl From<ToolOutput> for ToolOutputResponse {
@@ -213,6 +224,7 @@ impl From<ToolOutput> for ToolOutputResponse {
             execution_time_ms: o.execution_time_ms,
             fuel_consumed: o.fuel_consumed,
             rollback_performed: o.rollback_performed,
+            snapshot_id: o.snapshot_id.map(|id| id.to_string()),
         }
     }
 }
@@ -222,10 +234,40 @@ fn tool_error_response(error: impl std::fmt::Display) -> String {
 }
 
 #[derive(Serialize)]
+struct SnapshotCreateResponse {
+    snapshot_id: String,
+    success: bool,
+    source: String,
+    semantics: String,
+}
+
+#[derive(Serialize)]
 struct RollbackResponse {
     snapshot_id: String,
     timestamp: String,
     fs_operations: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restored_state: Option<RestoredStateSummary>,
+}
+
+#[derive(Serialize)]
+struct RestoredStateSummary {
+    memory: RestoredMemorySummary,
+    execution_state: RestoredExecutionStateSummary,
+}
+
+#[derive(Serialize)]
+struct RestoredMemorySummary {
+    byte_len: usize,
+    sha256: String,
+    preview_len: usize,
+    preview_base64: String,
+}
+
+#[derive(Serialize)]
+struct RestoredExecutionStateSummary {
+    captured_globals: usize,
+    captured_tables: usize,
 }
 
 #[derive(Serialize)]
@@ -297,8 +339,29 @@ impl NexusMcpServer {
         Ok(ToolOutputResponse::from(output))
     }
 
-    fn do_snapshot_create(&self, params: SnapshotCreateParams) -> Result<String> {
+    fn do_snapshot_create(&self, params: SnapshotCreateParams) -> Result<SnapshotCreateResponse> {
         let label = params.label.unwrap_or_else(|| "mcp_snapshot".to_string());
+        let source = params.source.as_deref().unwrap_or("empty_baseline");
+
+        if source == "latest_runtime" {
+            let snapshot_id = self.hypervisor.latest_runtime_snapshot_id().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no latest runtime snapshot is available; call nexus_execute first or omit source for an empty/stateless baseline"
+                )
+            })?;
+            return Ok(SnapshotCreateResponse {
+                snapshot_id: snapshot_id.to_string(),
+                success: true,
+                source: "latest_runtime".to_string(),
+                semantics: "runtime_capture_from_execute".to_string(),
+            });
+        }
+
+        if source != "empty_baseline" {
+            anyhow::bail!(
+                "unsupported snapshot source '{source}'; expected 'latest_runtime' or omit source for the empty/stateless baseline"
+            );
+        }
 
         let metadata = SnapshotMetadata {
             operation_name: label,
@@ -315,19 +378,30 @@ impl NexusMcpServer {
             metadata,
         )?;
 
-        Ok(snapshot.id.to_string())
+        Ok(SnapshotCreateResponse {
+            snapshot_id: snapshot.id.to_string(),
+            success: true,
+            source: "empty_baseline".to_string(),
+            semantics: "empty_stateless_baseline_no_wasm_memory_or_execution_state".to_string(),
+        })
     }
 
     fn do_snapshot_rollback(&self, params: SnapshotRollbackParams) -> Result<RollbackResponse> {
         let id = Uuid::parse_str(&params.snapshot_id)
             .map_err(|e| anyhow::anyhow!("Invalid snapshot UUID: {e}"))?;
 
-        let result = self.hypervisor.snapshot_manager().rollback_to(&id)?;
+        let result = self.hypervisor.rollback_snapshot(id)?;
+        let restored_state = if params.include_restored_state.unwrap_or(false) {
+            Some(restored_state_summary(&result))
+        } else {
+            None
+        };
 
         Ok(RollbackResponse {
             snapshot_id: result.snapshot_id.to_string(),
             timestamp: result.timestamp.to_rfc3339(),
             fs_operations: result.fs_operations.len(),
+            restored_state,
         })
     }
 
@@ -489,10 +563,33 @@ impl NexusMcpServer {
 
 const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
+const RESTORED_MEMORY_PREVIEW_BYTES: usize = 64;
 
 /// Maximum token validity an MCP client may request, in seconds (1 hour).
 /// Larger caller-supplied values are clamped to this. See SECURITY.md.
 const MAX_TOKEN_VALIDITY_SECS: u64 = 3600;
+
+fn restored_state_summary(result: &nexus::snapshot::RollbackResult) -> RestoredStateSummary {
+    let preview_len = result.memory.len().min(RESTORED_MEMORY_PREVIEW_BYTES);
+    let sha256 = format!("{:x}", sha2::Sha256::digest(&result.memory));
+    let preview_base64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &result.memory[..preview_len],
+    );
+
+    RestoredStateSummary {
+        memory: RestoredMemorySummary {
+            byte_len: result.memory.len(),
+            sha256,
+            preview_len,
+            preview_base64,
+        },
+        execution_state: RestoredExecutionStateSummary {
+            captured_globals: result.execution_state.captured_globals.len(),
+            captured_tables: result.execution_state.captured_tables.len(),
+        },
+    }
+}
 
 fn capability_allowed_by(allowlist: &[Capability], capability: &Capability) -> bool {
     allowlist
