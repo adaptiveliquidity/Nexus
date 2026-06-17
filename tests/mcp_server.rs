@@ -13,6 +13,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
+const WASM_PAGE_SIZE: usize = 65_536;
 
 fn cargo_bin() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -122,6 +123,53 @@ fn tool_json(resp: &Value) -> Value {
     serde_json::from_str(text).expect("tool response text should be JSON")
 }
 
+async fn initialize_client(client: &mut McpClient) {
+    client
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1.0" }
+            }),
+        )
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))
+        .await;
+}
+
+fn module_with_data(data: &str, global_value: i32) -> Vec<u8> {
+    wat::parse_str(format!(
+        r#"(module
+            (memory (export "memory") 1)
+            (data (i32.const 0) "{data}")
+            (global (export "marker") (mut i32) (i32.const {global_value}))
+            (func (export "_start"))
+        )"#
+    ))
+    .unwrap()
+}
+
+fn expected_memory(data: &[u8]) -> Vec<u8> {
+    let mut memory = vec![0u8; WASM_PAGE_SIZE];
+    memory[..data.len()].copy_from_slice(data);
+    memory
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 #[tokio::test]
 async fn initialize_and_list_tools() {
     let mut client = McpClient::spawn().await;
@@ -222,6 +270,127 @@ async fn snapshot_create_returns_uuid() {
     // Verify the snapshot_id is a valid UUID
     let snap_id = parsed["snapshot_id"].as_str().unwrap();
     uuid::Uuid::parse_str(snap_id).expect("snapshot_id should be a valid UUID");
+}
+
+#[tokio::test]
+async fn snapshot_create_latest_runtime_rolls_back_restored_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_path = tmp.path().join("base_runtime_snapshot.wasm");
+    let diff_path = tmp.path().join("diff_runtime_snapshot.wasm");
+    fs::write(&base_path, module_with_data("base", 7)).unwrap();
+    fs::write(&diff_path, module_with_data("diff", 11)).unwrap();
+
+    let base_memory = expected_memory(b"base");
+    let diff_memory = expected_memory(b"diff");
+    let base_checksum = sha256_hex(&base_memory);
+    let diff_checksum = sha256_hex(&diff_memory);
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    initialize_client(&mut client).await;
+
+    let base_exec = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": base_path }
+            }),
+        )
+        .await;
+    let base_exec = tool_json(&base_exec);
+    assert_eq!(
+        base_exec["success"], true,
+        "base execute failed: {base_exec}"
+    );
+    let execute_snapshot_id = base_exec["snapshot_id"]
+        .as_str()
+        .expect("execute response should expose the runtime snapshot id");
+
+    let create_resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_create",
+                "arguments": {
+                    "label": "base-runtime",
+                    "source": "latest_runtime"
+                }
+            }),
+        )
+        .await;
+    let created = tool_json(&create_resp);
+    assert_eq!(
+        created["snapshot_id"].as_str(),
+        Some(execute_snapshot_id),
+        "latest_runtime snapshot_create must return the real execution snapshot"
+    );
+    let base_snapshot_id = created["snapshot_id"].as_str().unwrap();
+
+    let diff_exec = client
+        .request(
+            4,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": diff_path }
+            }),
+        )
+        .await;
+    let diff_exec = tool_json(&diff_exec);
+    assert_eq!(
+        diff_exec["success"], true,
+        "diff execute failed: {diff_exec}"
+    );
+    assert_ne!(
+        diff_exec["snapshot_id"].as_str(),
+        Some(base_snapshot_id),
+        "second execution should create a distinct runtime snapshot"
+    );
+
+    let rollback_resp = client
+        .request(
+            5,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_rollback",
+                "arguments": {
+                    "snapshot_id": base_snapshot_id,
+                    "include_restored_state": true
+                }
+            }),
+        )
+        .await;
+    let rollback = tool_json(&rollback_resp);
+    assert_eq!(rollback["snapshot_id"].as_str(), Some(base_snapshot_id));
+    assert_eq!(rollback["fs_operations"], 0);
+    let restored = &rollback["restored_state"];
+    assert!(
+        restored.is_object(),
+        "rollback should include restored_state when requested: {rollback}"
+    );
+
+    let memory = &restored["memory"];
+    assert_eq!(memory["byte_len"], WASM_PAGE_SIZE);
+    assert_eq!(memory["sha256"], base_checksum);
+    assert_ne!(memory["sha256"], diff_checksum);
+
+    let preview = memory["preview_base64"]
+        .as_str()
+        .expect("restored memory preview should be present");
+    let preview = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, preview)
+        .expect("memory preview should be valid base64");
+    assert_eq!(&preview[..4], b"base");
+    assert_ne!(&preview[..4], b"diff");
+
+    assert!(
+        restored["execution_state"]["captured_globals"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "restored execution state summary should report captured globals: {rollback}"
+    );
 }
 
 #[tokio::test]

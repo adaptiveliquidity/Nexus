@@ -30,7 +30,8 @@ use crate::sandbox::{
 };
 use crate::security::{Capability, CapabilityManager};
 use crate::snapshot::{
-    DiffSnapshotResult, ExecutionState, FilesystemDiff, Snapshot, SnapshotManager, SnapshotMetadata,
+    DiffSnapshotResult, ExecutionState, FilesystemDiff, RollbackResult, Snapshot, SnapshotManager,
+    SnapshotMetadata,
 };
 use crate::telemetry::{ExecutionRecord, TelemetrySink};
 // Re-exports at the top of this module bring `FailureMode`, `RecoveryAction`,
@@ -79,6 +80,10 @@ pub struct ToolOutput {
     pub execution_time_ms: u64,
     pub fuel_consumed: u64,
     pub error_log: Option<ErrorLog>,
+    /// Runtime snapshot captured for this execution, when the WASM module
+    /// exported linear memory and the hypervisor could capture it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<uuid::Uuid>,
 }
 
 /// Snapshot strategy used by the hypervisor execution path.
@@ -159,6 +164,10 @@ impl RuntimeSnapshot {
             RuntimeSnapshot::Diff(id) => *id,
         }
     }
+}
+
+fn wasm_pages_for_bytes(byte_len: usize) -> u32 {
+    byte_len.div_ceil(65_536).min(u32::MAX as usize) as u32
 }
 
 type RecoverySelection = (
@@ -402,9 +411,44 @@ impl NexusHypervisor {
             RuntimeSnapshot::Full(snap) => self.snapshot_manager.rollback_to(&snap.id)?,
             RuntimeSnapshot::Diff(id) => self.snapshot_manager.rollback_to_diff(id)?,
         };
-        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
-        *self.last_rollback_execution_state.write().unwrap() = Some(result.execution_state);
+        self.cache_rollback_result(&result);
         Ok(())
+    }
+
+    fn cache_rollback_result(&self, result: &RollbackResult) {
+        *self.last_rollback_memory.write().unwrap() = Some(result.memory.clone());
+        *self.last_rollback_execution_state.write().unwrap() = Some(result.execution_state.clone());
+    }
+
+    /// Return the latest runtime snapshot id captured by an execution.
+    ///
+    /// This is empty until a normal execution path captures WASM linear
+    /// memory. Stateless/manual snapshots created directly in the manager do
+    /// not update this runtime slot.
+    pub fn latest_runtime_snapshot_id(&self) -> Option<uuid::Uuid> {
+        self.latest_runtime_snapshot
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(RuntimeSnapshot::id)
+    }
+
+    /// Roll back to a full or differential snapshot id and cache the restored
+    /// memory/execution state for callers that need to inspect it.
+    pub fn rollback_snapshot(&self, snapshot_id: uuid::Uuid) -> Result<RollbackResult> {
+        let result = match self.snapshot_manager.rollback_to(&snapshot_id) {
+            Ok(result) => result,
+            Err(full_err) => match self.snapshot_manager.rollback_to_diff(&snapshot_id) {
+                Ok(result) => result,
+                Err(diff_err) => {
+                    return Err(NexusError::RollbackFailed(format!(
+                        "snapshot {snapshot_id} was not restorable as a full or differential snapshot (full: {full_err}; diff: {diff_err})"
+                    )));
+                }
+            },
+        };
+        self.cache_rollback_result(&result);
+        Ok(result)
     }
 
     /// Grant a capability to the current session
@@ -576,6 +620,7 @@ impl NexusHypervisor {
                 execution_time_ms: duration_ms,
                 fuel_consumed,
                 error_log: None,
+                snapshot_id: None,
             })
         } else {
             let record =
@@ -590,6 +635,7 @@ impl NexusHypervisor {
                 execution_time_ms: duration_ms,
                 fuel_consumed,
                 error_log: None,
+                snapshot_id: None,
             })
         }
     }
@@ -666,6 +712,7 @@ impl NexusHypervisor {
                 execution_time_ms: duration_ms,
                 fuel_consumed,
                 error_log: None,
+                snapshot_id: None,
             })
         } else {
             let record =
@@ -680,6 +727,7 @@ impl NexusHypervisor {
                 execution_time_ms: duration_ms,
                 fuel_consumed,
                 error_log: None,
+                snapshot_id: None,
             })
         }
     }
@@ -702,6 +750,7 @@ impl NexusHypervisor {
         let input_bytes = serde_json::to_vec(&input).map_err(|e| {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
         })?;
+        let input_hash = format!("{:x}", sha2::Sha256::digest(&input_bytes));
 
         // Adaptive fuel budget: override per-invocation max_fuel with
         // the policy's recommendation for this tool.
@@ -768,14 +817,18 @@ impl NexusHypervisor {
                 captured_globals: exec_result.post_call_globals.clone().unwrap_or_default(),
                 captured_tables: exec_result.post_call_tables.clone().unwrap_or_default(),
             };
-            let metadata = SnapshotMetadata::new(
-                tool.name.clone(),
-                format!("{:x}", sha2::Sha256::digest(&tool.wasm_bytes)),
-            );
+            let mut metadata = SnapshotMetadata::new(tool.name.clone(), input_hash);
+            metadata.memory_pages = wasm_pages_for_bytes(mem.len());
+            metadata.preconditions = tool
+                .required_capabilities
+                .iter()
+                .map(|capability| format!("{capability:?}"))
+                .collect();
             Some(self.create_runtime_snapshot(mem.clone(), fs_diff, exec_state, metadata)?)
         } else {
             None
         };
+        let snapshot_id = snapshot.as_ref().map(RuntimeSnapshot::id);
 
         // Resource sample for telemetry and the error log.
         let resources = self.health_validator.current_resources();
@@ -839,6 +892,7 @@ impl NexusHypervisor {
                 execution_time_ms: duration_ms,
                 fuel_consumed,
                 error_log: Some(error_log),
+                snapshot_id,
             })
         } else {
             // Success path.
@@ -854,6 +908,7 @@ impl NexusHypervisor {
                 execution_time_ms: duration_ms,
                 fuel_consumed,
                 error_log: None,
+                snapshot_id,
             })
         }
     }
@@ -938,6 +993,7 @@ impl NexusHypervisor {
             execution_time_ms: 0,
             fuel_consumed: 0,
             error_log: None,
+            snapshot_id: None,
         })
     }
 
@@ -1079,9 +1135,7 @@ impl NexusHypervisor {
 
     /// Rollback to a specific snapshot manually
     pub async fn manual_rollback(&self, snapshot_id: uuid::Uuid) -> Result<()> {
-        let result = self.snapshot_manager.rollback_to(&snapshot_id)?;
-        *self.last_rollback_memory.write().unwrap() = Some(result.memory);
-        *self.last_rollback_execution_state.write().unwrap() = Some(result.execution_state);
+        self.rollback_snapshot(snapshot_id)?;
         Ok(())
     }
 
