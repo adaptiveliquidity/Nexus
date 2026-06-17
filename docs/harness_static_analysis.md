@@ -13,7 +13,7 @@ and the per-PR review-subagent routing the plan called for.
 | `cargo test --all-targets` | `.github/workflows/ci.yml::test` | All tests pass |
 | `cargo test --test phase3_distinct_outputs` | Same workflow, explicit step | The Claude-recommended regression test must stay green |
 | `bash validate.sh 0 3` | Same workflow | Phase 0 specs + Phase 3 capture succeed |
-| AI rescore | `.github/workflows/ai-rescore.yml` (PRs touching `src/hypervisor/**` or `src/instinct/**`) | `Aggregate accuracy rate >= 70%` |
+| AI rescore | `.github/workflows/ai-rescore.yml` (triggered on push-to-main only) | `Aggregate accuracy rate >= 70%` |
 
 The `-A` allowlist on the clippy step is intentional and small:
 `-A dead_code -A unused_imports`. The pre-Phase-A code carries a handful
