@@ -1,0 +1,5 @@
+name = "sample"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"

@@ -21,8 +21,10 @@ use nexus::hypervisor::{
     fork_and_race, HypervisorConfig, NexusHypervisor, RecoveryAction, RecoverySource,
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
+use nexus::profile::{load_and_validate, CapabilityProfileManifest};
 use nexus::security::{Capability, CapabilityToken};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
+use nexus::NexusError;
 
 // ─── MCP Tool Parameter Types ────────────────────────────────────────────────
 
@@ -129,6 +131,7 @@ pub struct NexusMcpServer {
     hypervisor: Arc<NexusHypervisor>,
     wasm_module_dirs: Arc<Vec<PathBuf>>,
     capability_allowlist: Arc<Option<Vec<Capability>>>,
+    capability_profile: Option<Arc<CapabilityProfileManifest>>,
 }
 
 #[tool_router(server_handler)]
@@ -139,7 +142,7 @@ impl NexusMcpServer {
     async fn nexus_execute(&self, Parameters(params): Parameters<ExecuteParams>) -> String {
         match self.do_execute(params).await {
             Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
-            Err(e) => tool_error_response(e),
+            Err(e) => tool_anyhow_error_response(e),
         }
     }
 
@@ -152,7 +155,7 @@ impl NexusMcpServer {
     ) -> String {
         match self.do_execute_wasi(params).await {
             Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
-            Err(e) => tool_error_response(e),
+            Err(e) => tool_anyhow_error_response(e),
         }
     }
 
@@ -165,7 +168,7 @@ impl NexusMcpServer {
     ) -> String {
         match self.do_snapshot_create(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
-            Err(e) => tool_error_response(e),
+            Err(e) => tool_anyhow_error_response(e),
         }
     }
 
@@ -178,7 +181,7 @@ impl NexusMcpServer {
     ) -> String {
         match self.do_snapshot_rollback(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
-            Err(e) => tool_error_response(e),
+            Err(e) => tool_anyhow_error_response(e),
         }
     }
 
@@ -188,7 +191,7 @@ impl NexusMcpServer {
     async fn nexus_issue_token(&self, Parameters(params): Parameters<IssueTokenParams>) -> String {
         match self.do_issue_token(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
-            Err(e) => tool_error_response(e),
+            Err(e) => tool_anyhow_error_response(e),
         }
     }
 
@@ -201,7 +204,7 @@ impl NexusMcpServer {
     ) -> String {
         match self.do_fork_and_race(params).await {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
-            Err(e) => tool_error_response(e),
+            Err(e) => tool_anyhow_error_response(e),
         }
     }
 }
@@ -240,6 +243,25 @@ impl From<ToolOutput> for ToolOutputResponse {
 
 fn tool_error_response(error: impl std::fmt::Display) -> String {
     serde_json::json!({ "error": error.to_string() }).to_string()
+}
+
+fn tool_anyhow_error_response(error: anyhow::Error) -> String {
+    let message = error.to_string();
+    if let Some(code) = mcp_error_code(&error) {
+        return serde_json::json!({ "code": code, "error": message }).to_string();
+    }
+    tool_error_response(message)
+}
+
+fn mcp_error_code(error: &anyhow::Error) -> Option<i64> {
+    match error.downcast_ref::<NexusError>() {
+        Some(NexusError::CapabilityDenied(message))
+            if message.starts_with("capability not permitted by active profile:") =>
+        {
+            Some(-32602)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Serialize)]
@@ -304,6 +326,7 @@ impl NexusMcpServer {
             hypervisor,
             wasm_module_dirs: Arc::new(allowed_wasm_module_dirs()?),
             capability_allowlist: Arc::new(capability_allowlist_from_env()?),
+            capability_profile: profile_manifest_from_env()?.map(Arc::new),
         })
     }
 
@@ -319,6 +342,7 @@ impl NexusMcpServer {
         }
 
         let input = params.input.unwrap_or(serde_json::json!({}));
+        self.check_tokens_against_active_profile(&[])?;
         let output = self.hypervisor.execute_tool(tool, input).await?;
         Ok(ToolOutputResponse::from(output))
     }
@@ -341,6 +365,7 @@ impl NexusMcpServer {
             .map(|spec| parse_capability(&spec))
             .collect::<Result<_>>()?;
         let caller_tokens = self.execute_wasi_tokens(&caps, params.parent_token_id.as_deref())?;
+        self.check_tokens_against_active_profile(&caller_tokens)?;
         tool = tool.with_capabilities(caps);
 
         let input = params.input.unwrap_or(serde_json::json!({}));
@@ -635,12 +660,20 @@ impl NexusMcpServer {
         }
         Ok(())
     }
+
+    fn check_tokens_against_active_profile(&self, tokens: &[CapabilityToken]) -> Result<()> {
+        if let Some(profile) = self.capability_profile.as_deref() {
+            check_tokens_against_profile(tokens, profile)?;
+        }
+        Ok(())
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
+const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
 const RESTORED_MEMORY_PREVIEW_BYTES: usize = 64;
 
 /// Maximum token validity an MCP client may request, in seconds (1 hour).
@@ -673,6 +706,62 @@ fn capability_allowed_by(allowlist: &[Capability], capability: &Capability) -> b
     allowlist
         .iter()
         .any(|allowed| capability.is_subset_of(allowed))
+}
+
+fn check_tokens_against_profile(
+    tokens: &[CapabilityToken],
+    manifest: &CapabilityProfileManifest,
+) -> nexus::Result<()> {
+    for token in tokens {
+        let permitted = manifest
+            .allowed_capabilities()
+            .iter()
+            .any(|allowed| allowed.allows(&token.capability));
+        if !permitted {
+            return Err(NexusError::CapabilityDenied(format!(
+                "capability not permitted by active profile: {}",
+                token.capability.description()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn profile_manifest_from_env() -> Result<Option<CapabilityProfileManifest>> {
+    let Some(raw) = std::env::var_os(NEXUS_MCP_PROFILE_ENV) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw);
+
+    match load_and_validate(&path) {
+        Ok(manifest) => {
+            tracing::info!(
+                profile = %manifest.name,
+                path = %path.display(),
+                "Loaded Nexus MCP capability profile"
+            );
+            Ok(Some(manifest))
+        }
+        Err(errors) => {
+            for error in &errors {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %error,
+                    "Invalid Nexus MCP capability profile"
+                );
+            }
+            let joined = errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!(
+                "invalid {NEXUS_MCP_PROFILE_ENV} '{}': {joined}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn capability_allowlist_from_env() -> Result<Option<Vec<Capability>>> {
