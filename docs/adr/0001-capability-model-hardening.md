@@ -127,59 +127,38 @@ Expected-behavior tests:
 
 ## H4: WASI Required-Capability Derivation Creates Host Directories Before Authorization
 
-Confirmed gap:
+Status: fixed in `security/h4-auth-ordering`.
 
-- `src/hypervisor/mod.rs:595` calls
-  `wasi_tool_config.required_capabilities()` while building the capability list.
-- `src/hypervisor/mod.rs:599` authorizes caller tokens only after that call.
-- `src/sandbox/wasi.rs:119` calls `canonicalize_mount_dir()` during required
-  capability derivation.
-- `src/sandbox/wasi.rs:200` creates missing host directories via
-  `std::fs::create_dir_all()` before authorization.
-- `SECURITY.md:72` states that capability checks run before filesystem
-  operations, including directory creation and path resolution.
+Resolution:
 
-Why this is a design decision, not a mechanical bug:
+- `WasiToolConfig::required_capabilities()` is side-effect free with respect to
+  filesystem writes. It validates guest mount aliases and derives required
+  `ReadFile`/`WriteFile` capabilities without calling any helper that can create
+  host mount directories.
+- Missing host mount directories are prepared only by
+  `WasiToolConfig::prepare_mounts()`, the explicit post-authorization mount
+  preparation phase. `validate()` remains a compatibility wrapper around this
+  preparation path for public callers that intentionally validate and prepare a
+  config outside execution.
+- `NexusHypervisor::execute_tool_wasi_with_config()` now derives the combined
+  tool + WASI required capabilities, authorizes the caller tokens, and only then
+  calls `prepare_mounts()` to create any missing mount directories and build the
+  validated WASI preopen config.
 
-The current implementation intentionally makes `required_capabilities()` and
-`validate()` derive the same canonical host paths, including creation of missing
-mount directories so canonicalization can succeed. Removing that side effect
-requires choosing a replacement path policy: require pre-existing mount
-directories, defer creation until after authorization, or split canonical path
-derivation into a no-create phase plus a post-authorization creation/validation
-phase. Each choice affects WASI tool configuration and mount lifecycle behavior.
+Evidence:
 
-Recommended fix and implementation split:
-
-1. Split mount processing into two phases:
-   `derive_required_capabilities_no_create()` and
-   `validate_and_prepare_mounts_after_authorization()`.
-2. In the pre-authorization phase, reject non-existent host mount paths or
-   derive requirements from a normalized absolute path without creating it.
-3. After authorization succeeds, create directories only if the selected policy
-   allows auto-create and then canonicalize/validate the final preopen path.
-4. Update `SECURITY.md` to describe the selected behavior exactly.
-
-Risk and back-compat notes:
-
-- Rejecting non-existent mount paths would break callers that rely on automatic
-  directory creation.
-- Deferring creation preserves more compatibility but requires careful
-  time-of-check/time-of-use handling between authorization and preopen setup.
-- Symlink behavior must be specified together with the creation policy.
-
-Expected-behavior test:
-
-- `src/sandbox/wasi.rs:694`
-  `required_capabilities_must_not_create_host_directories_before_authorization`
-  is ignored with `#[ignore = "C4 ADR: pending design approval"]`. It should
-  pass once required-capability derivation has no pre-authorization filesystem
-  side effects.
+- `required_capabilities_must_not_create_host_directories_before_authorization`
+  is enabled and verifies required-capability derivation does not create a
+  missing host mount directory.
+- `wasi_public_hypervisor::denied_wasi_config_does_not_create_missing_mount_dir`
+  verifies the public hypervisor path returns `CapabilityDenied` and leaves a
+  missing mount directory absent when authorization fails.
 
 ## Decision
 
-For this draft PR:
+For `security/h4-auth-ordering`:
 
 - H2 is documented only. Runtime behavior is unchanged pending human approval.
 - H3 receives a mechanical, pure lexical normalization fix with passing tests.
-- H4 is documented only. Runtime behavior is unchanged pending human approval.
+- H4 is fixed: required-capability derivation is side-effect free, and WASI
+  mount creation is post-authorization.

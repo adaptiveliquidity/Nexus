@@ -69,8 +69,7 @@ Out of scope:
 
 - **Capability tokens are Ed25519-signed**; verification is mandatory before any
   authorization decision.
-- **Authorization precedes side effects** — capability checks run before
-  filesystem operations (directory creation, path resolution).
+- **Authorization precedes filesystem side effects** — on the WASI execution path, required capabilities are derived without filesystem writes, and any host mount directory creation happens only after capability authorization succeeds.
 - **Attenuation narrows, never widens** — a delegated token can only be a subset
   of its parent.
 - **WASM isolation** — each execution runs in an isolated sandbox with fuel +
