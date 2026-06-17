@@ -113,9 +113,15 @@ impl Capability {
 
 /// Normalize a path lexically without consulting the filesystem.
 ///
-/// This resolves `.` and `..` components for capability containment checks and
-/// WASI preopen derivation while preserving non-existent paths and avoiding
-/// symlink resolution.
+/// Capability token containment is intentionally a lexical relation over path
+/// components: this resolves `.` and `..` while preserving non-existent paths
+/// and avoiding symlink resolution. Symlink targets are not part of capability
+/// attenuation.
+///
+/// Enforcement for real WASI host mounts belongs at explicit mount preparation
+/// (`WasiToolConfig`) and at wasmtime/cap-std preopen traversal. Raw
+/// capability-derived preopens preserve token paths for compatibility with
+/// trusted-path callers.
 pub(crate) fn normalize_lexical_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     let mut normal_depth = 0usize;
@@ -564,6 +570,34 @@ mod tests {
         let child = Capability::ReadFile(PathBuf::from("/safe/data/nested/.."));
         assert!(child.is_subset_of(&parent));
         assert!(parent.allows(&child));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_path_containment_is_lexical_not_symlink_aware() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        let target = outside.join("target");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("file.txt"), b"data").unwrap();
+
+        let link = allowed.join("link");
+        symlink(&target, &link).unwrap();
+
+        let parent = Capability::ReadFile(allowed.clone());
+        let linked_spelling = Capability::ReadFile(link.join("file.txt"));
+        let canonical_spelling = Capability::ReadFile(target.join("file.txt"));
+
+        assert_eq!(
+            std::fs::canonicalize(allowed.join("link").join("file.txt")).unwrap(),
+            std::fs::canonicalize(target.join("file.txt")).unwrap()
+        );
+        assert!(parent.allows(&linked_spelling));
+        assert!(!parent.allows(&canonical_spelling));
     }
 
     #[test]
