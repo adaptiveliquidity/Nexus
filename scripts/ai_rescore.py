@@ -13,9 +13,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 from datetime import datetime, timezone
+
+ACCURACY_RE = re.compile(r"Aggregate accuracy rate:\s*([0-9]+(?:\.[0-9]+)?)\s*%")
 
 
 def build_prompt(index: list) -> str:
@@ -90,23 +93,52 @@ def call_openai(prompt: str) -> tuple[str, str]:
     return model, resp.choices[0].message.content or ""
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--samples must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("--samples must be >= 1")
+    return parsed
+
+
+def parse_accuracy(text: str) -> float:
+    match = ACCURACY_RE.search(text)
+    if not match:
+        raise ValueError("could not parse Aggregate accuracy rate from LLM response")
+    return float(match.group(1))
+
+
+def score_once(prompt: str) -> tuple[str, str]:
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return call_anthropic(prompt)
+    if os.environ.get("OPENAI_API_KEY"):
+        return call_openai(prompt)
+    raise RuntimeError("no provider env var set (ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--index", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--samples", type=positive_int, default=3)
     args = ap.parse_args()
 
     with open(args.index) as f:
         index = json.load(f)
     prompt = build_prompt(index)
 
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        model, text = call_anthropic(prompt)
-    elif os.environ.get("OPENAI_API_KEY"):
-        model, text = call_openai(prompt)
-    else:
-        print("no provider env var set (ANTHROPIC_API_KEY or OPENAI_API_KEY)", file=sys.stderr)
+    scored = []
+    try:
+        for _ in range(args.samples):
+            model, text = score_once(prompt)
+            scored.append((parse_accuracy(text), model, text))
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
         return 2
+
+    _, model, text = sorted(scored, key=lambda sample: sample[0])[len(scored) // 2]
 
     with open(args.out, "w") as f:
         f.write(f"<!-- model: {model} -->\n{text}\n")
