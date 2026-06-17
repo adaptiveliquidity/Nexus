@@ -120,7 +120,7 @@ no_active_processes() {
   local repo="$1"
   local repo_esc
   repo_esc=$(printf '%s' "$repo" | sed 's/[.[\*^$()|+?{]/\\&/g')
-  if pgrep -f "codex.*${repo_esc}" &>/dev/null; then
+  if pgrep -f "codex e .*${repo_esc}" &>/dev/null; then
     log_error "Active Codex process found for $repo"; return 1
   fi
   if pgrep -f "cargo.*${repo_esc}" &>/dev/null; then
