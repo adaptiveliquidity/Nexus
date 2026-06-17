@@ -141,6 +141,7 @@ impl SandboxPool {
 
         let mut cfg = Config::new();
         cfg.consume_fuel(true);
+        cfg.epoch_interruption(true);
         cfg.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
         Engine::new(&cfg)
