@@ -427,6 +427,23 @@ impl NexusHypervisor {
         manager.issue(capability, granted_by, validity)
     }
 
+    /// Attenuate an existing capability token by ID using the hypervisor's
+    /// capability manager.
+    ///
+    /// The returned child token is registered with the same manager, so it can
+    /// be validated by subsequent execution calls and can itself be used as an
+    /// attenuation parent subject to the manager's chain-depth limit.
+    pub fn attenuate_token(
+        &self,
+        parent_id: uuid::Uuid,
+        capability: Capability,
+        granted_by: &str,
+        validity: Duration,
+    ) -> Result<crate::security::CapabilityToken> {
+        let mut manager = self.capability_manager.write().unwrap();
+        manager.attenuate(parent_id, capability, granted_by, validity)
+    }
+
     /// Execute a tool with automatic snapshot/rollback.
     ///
     /// Phase A rewrite. Key semantic changes versus the prior version:
