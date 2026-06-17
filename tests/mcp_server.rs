@@ -5,11 +5,14 @@
 
 use serde_json::{json, Value};
 use std::fs;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
+
+const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
 
 fn cargo_bin() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -30,10 +33,17 @@ struct McpClient {
 
 impl McpClient {
     async fn spawn() -> Self {
-        Self::spawn_with_module_dir(None).await
+        Self::spawn_with_module_dir_and_allowlist(None, None).await
     }
 
     async fn spawn_with_module_dir(module_dir: Option<&std::path::Path>) -> Self {
+        Self::spawn_with_module_dir_and_allowlist(module_dir, None).await
+    }
+
+    async fn spawn_with_module_dir_and_allowlist(
+        module_dir: Option<&std::path::Path>,
+        capability_allowlist: Option<&str>,
+    ) -> Self {
         let bin = cargo_bin();
         assert!(
             bin.exists(),
@@ -47,8 +57,12 @@ impl McpClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        command.env_remove(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV);
         if let Some(module_dir) = module_dir {
             command.env("NEXUS_MCP_MODULE_DIR", module_dir);
+        }
+        if let Some(capability_allowlist) = capability_allowlist {
+            command.env(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV, capability_allowlist);
         }
 
         let mut child = command.spawn().expect("failed to spawn nexus-mcp");
@@ -89,6 +103,23 @@ impl McpClient {
         self.send(&msg).await;
         self.recv().await
     }
+}
+
+fn read_file_allowlist(path: &Path) -> String {
+    json!([
+        {
+            "type": "read_file",
+            "path": path.display().to_string()
+        }
+    ])
+    .to_string()
+}
+
+fn tool_json(resp: &Value) -> Value {
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool response should contain text content");
+    serde_json::from_str(text).expect("tool response text should be JSON")
 }
 
 #[tokio::test]
@@ -195,7 +226,8 @@ async fn snapshot_create_returns_uuid() {
 
 #[tokio::test]
 async fn issue_token_returns_token_info() {
-    let mut client = McpClient::spawn().await;
+    let allowlist = read_file_allowlist(Path::new("/tmp/test"));
+    let mut client = McpClient::spawn_with_module_dir_and_allowlist(None, Some(&allowlist)).await;
 
     // Initialize
     client
@@ -245,7 +277,55 @@ async fn issue_token_returns_token_info() {
 }
 
 #[tokio::test]
-async fn execute_wasi_grants_requested_read_file_capability() {
+async fn issue_token_rejects_capability_without_operator_allowlist() {
+    let mut client = McpClient::spawn().await;
+
+    client
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1.0" }
+            }),
+        )
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))
+        .await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_issue_token",
+                "arguments": {
+                    "capability": "read_file",
+                    "path": "/tmp/test",
+                    "validity_secs": 300
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("requires operator allowlist")
+            && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        "expected non-allowlisted token issuance rejection, got: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn execute_wasi_grants_allowlisted_read_file_capability() {
     let tmp = tempfile::tempdir().unwrap();
     let wasm_path = tmp.path().join("wasi_grant_regression.wasm");
     let wasm = wat::parse_str(
@@ -257,7 +337,9 @@ async fn execute_wasi_grants_requested_read_file_capability() {
     .unwrap();
     fs::write(&wasm_path, wasm).unwrap();
 
-    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    let allowlist = read_file_allowlist(tmp.path());
+    let mut client =
+        McpClient::spawn_with_module_dir_and_allowlist(Some(tmp.path()), Some(&allowlist)).await;
 
     client
         .request(
@@ -295,14 +377,12 @@ async fn execute_wasi_grants_requested_read_file_capability() {
         .await;
 
     assert_eq!(resp["id"], 2);
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-    let parsed: Value = serde_json::from_str(text).unwrap();
+    let parsed = tool_json(&resp);
 
     assert_eq!(parsed["success"], true, "expected success, got: {parsed}");
     assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
 }
 
-#[ignore = "C4 ADR: pending design approval"]
 #[tokio::test]
 async fn execute_wasi_rejects_caller_chosen_capability_without_parent_token_or_allowlist() {
     let tmp = tempfile::tempdir().unwrap();
@@ -354,9 +434,238 @@ async fn execute_wasi_rejects_caller_chosen_capability_without_parent_token_or_a
         .await;
 
     assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        resp.get("error").is_some(),
-        "execute_wasi must reject self-granted caller-chosen capabilities without a parent token or allowlist; got: {resp}"
+        error.contains("parent_token_id")
+            && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        "execute_wasi must reject self-granted caller-chosen capabilities without a parent token or allowlist; got: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn execute_wasi_rejects_capability_not_in_operator_allowlist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("wasi_allowlist_rejection.wasm");
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start"))
+        )"#,
+    )
+    .unwrap();
+    fs::write(&wasm_path, wasm).unwrap();
+
+    let allowed_dir = tmp.path().join("allowed");
+    let denied_dir = tmp.path().join("denied");
+    fs::create_dir_all(&allowed_dir).unwrap();
+    fs::create_dir_all(&denied_dir).unwrap();
+
+    let allowlist = read_file_allowlist(&allowed_dir);
+    let mut client =
+        McpClient::spawn_with_module_dir_and_allowlist(Some(tmp.path()), Some(&allowlist)).await;
+
+    client
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1.0" }
+            }),
+        )
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))
+        .await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "capabilities": [
+                        { "type": "read_file", "path": denied_dir }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("not allowed") && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        "expected non-allowlisted capability rejection, got: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn execute_wasi_accepts_capability_attenuated_from_parent_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("wasi_parent_token_success.wasm");
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start"))
+        )"#,
+    )
+    .unwrap();
+    fs::write(&wasm_path, wasm).unwrap();
+
+    let allowlist = read_file_allowlist(tmp.path());
+    let mut client =
+        McpClient::spawn_with_module_dir_and_allowlist(Some(tmp.path()), Some(&allowlist)).await;
+
+    client
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1.0" }
+            }),
+        )
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))
+        .await;
+
+    let token_resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_issue_token",
+                "arguments": {
+                    "capability": "read_file",
+                    "path": tmp.path(),
+                    "validity_secs": 300
+                }
+            }),
+        )
+        .await;
+    let token = tool_json(&token_resp);
+    let parent_token_id = token["token_id"].as_str().unwrap();
+
+    let resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "parent_token_id": parent_token_id,
+                    "capabilities": [
+                        { "type": "read_file", "path": tmp.path() }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 3);
+    let parsed = tool_json(&resp);
+    assert_eq!(parsed["success"], true, "expected success, got: {parsed}");
+    assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
+}
+
+#[tokio::test]
+async fn execute_wasi_rejects_capability_outside_parent_token_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("wasi_parent_token_rejection.wasm");
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start"))
+        )"#,
+    )
+    .unwrap();
+    fs::write(&wasm_path, wasm).unwrap();
+
+    let allowed_dir = tmp.path().join("allowed");
+    let denied_dir = tmp.path().join("denied");
+    fs::create_dir_all(&allowed_dir).unwrap();
+    fs::create_dir_all(&denied_dir).unwrap();
+
+    let allowlist = read_file_allowlist(&allowed_dir);
+    let mut client =
+        McpClient::spawn_with_module_dir_and_allowlist(Some(tmp.path()), Some(&allowlist)).await;
+
+    client
+        .request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1.0" }
+            }),
+        )
+        .await;
+
+    client
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }))
+        .await;
+
+    let token_resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_issue_token",
+                "arguments": {
+                    "capability": "read_file",
+                    "path": allowed_dir,
+                    "validity_secs": 300
+                }
+            }),
+        )
+        .await;
+    let token = tool_json(&token_resp);
+    let parent_token_id = token["token_id"].as_str().unwrap();
+
+    let resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_wasi",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "parent_token_id": parent_token_id,
+                    "capabilities": [
+                        { "type": "read_file", "path": denied_dir }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 3);
+    let parsed = tool_json(&resp);
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("parent_token_id") && error.contains("not a subset"),
+        "expected parent token scope rejection, got: {parsed}"
     );
 }
 
