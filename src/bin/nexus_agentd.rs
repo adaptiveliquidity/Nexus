@@ -11,6 +11,7 @@
 //!   nexus-agentd --pool 8                # custom pool size
 //!   nexus-agentd --socket /tmp/foo.sock  # custom socket path (or \\.\pipe\name on Windows)
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -463,8 +464,11 @@ fn unauthorized_response(req: &DaemonRequest, auth_token: Option<&str>) -> Optio
 }
 
 fn read_allowlisted_wasm_path(wasm_path: &Path) -> anyhow::Result<Vec<u8>> {
-    let resolved = resolve_agentd_wasm_path(wasm_path)?;
-    std::fs::read(resolved).map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))
+    let (mut file, _) = open_agentd_wasm_path(wasm_path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))?;
+    Ok(bytes)
 }
 
 fn allowed_agentd_module_dirs() -> anyhow::Result<Vec<PathBuf>> {
@@ -490,26 +494,66 @@ fn allowed_agentd_module_dirs() -> anyhow::Result<Vec<PathBuf>> {
         .collect()
 }
 
-fn resolve_agentd_wasm_path(wasm_path: &Path) -> anyhow::Result<PathBuf> {
+fn open_agentd_wasm_path(wasm_path: &Path) -> anyhow::Result<(std::fs::File, PathBuf)> {
     let allowed_dirs = allowed_agentd_module_dirs()?;
-    resolve_agentd_wasm_path_with_dirs(wasm_path, &allowed_dirs)
+    open_agentd_wasm_path_with_dirs(wasm_path, &allowed_dirs)
 }
 
-fn resolve_agentd_wasm_path_with_dirs(
+fn open_agentd_wasm_path_with_dirs(
     wasm_path: &Path,
     allowed_dirs: &[PathBuf],
-) -> anyhow::Result<PathBuf> {
-    let canonical = std::fs::canonicalize(wasm_path)
+) -> anyhow::Result<(std::fs::File, PathBuf)> {
+    let file = open_untrusted_agentd_file(wasm_path)?;
+    let metadata = file
+        .metadata()
         .map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))?;
 
-    if !canonical.is_file() {
+    if !metadata.is_file() {
         anyhow::bail!(WASM_PATH_REJECTED_MESSAGE);
     }
 
+    let canonical = canonicalize_open_agentd_file(&file)?;
+
     if allowed_dirs.iter().any(|dir| canonical.starts_with(dir)) {
-        return Ok(canonical);
+        return Ok((file, canonical));
     }
 
+    anyhow::bail!(WASM_PATH_REJECTED_MESSAGE)
+}
+
+#[cfg(target_os = "linux")]
+fn open_untrusted_agentd_file(wasm_path: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const LINUX_O_NONBLOCK: i32 = 0o0004000;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(LINUX_O_NONBLOCK)
+        .open(wasm_path)
+        .map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_untrusted_agentd_file(_wasm_path: &Path) -> anyhow::Result<std::fs::File> {
+    // The daemon's wasm_path loading path is Linux-targeted. On other
+    // platforms, reject instead of falling back to a path-based reopen.
+    anyhow::bail!(WASM_PATH_REJECTED_MESSAGE)
+}
+
+#[cfg(target_os = "linux")]
+fn canonicalize_open_agentd_file(file: &std::fs::File) -> anyhow::Result<PathBuf> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+    std::fs::canonicalize(fd_path).map_err(|_| anyhow::anyhow!(WASM_PATH_REJECTED_MESSAGE))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn canonicalize_open_agentd_file(_file: &std::fs::File) -> anyhow::Result<PathBuf> {
+    // A path-based fallback would reintroduce the check-then-open race. Until a
+    // platform-specific handle canonicalization path is available, reject
+    // wasm_path inputs on unsupported platforms.
     anyhow::bail!(WASM_PATH_REJECTED_MESSAGE)
 }
 
@@ -586,11 +630,12 @@ mod auth_tests {
         std::fs::write(&wasm_path, b"\0asm").unwrap();
 
         let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
-        let err = resolve_agentd_wasm_path_with_dirs(&wasm_path, &allowed_dirs).unwrap_err();
+        let err = open_agentd_wasm_path_with_dirs(&wasm_path, &allowed_dirs).unwrap_err();
 
         assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn accepts_wasm_path_inside_allowed_module_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -600,9 +645,57 @@ mod auth_tests {
         std::fs::write(&wasm_path, b"\0asm").unwrap();
 
         let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
-        let resolved = resolve_agentd_wasm_path_with_dirs(&wasm_path, &allowed_dirs).unwrap();
+        let (_file, resolved) = open_agentd_wasm_path_with_dirs(&wasm_path, &allowed_dirs).unwrap();
 
         assert_eq!(resolved, std::fs::canonicalize(wasm_path).unwrap());
+    }
+
+    #[test]
+    fn rejects_wasm_path_directory_inside_allowed_module_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let module_dir = allowed.join("tool_dir");
+        std::fs::create_dir_all(&module_dir).unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = open_agentd_wasm_path_with_dirs(&module_dir, &allowed_dirs).unwrap_err();
+
+        assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn validated_handle_reads_original_bytes_after_path_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let wasm_path = allowed.join("tool.wasm");
+        let replacement_path = allowed.join("replacement.wasm");
+        std::fs::write(&wasm_path, b"original").unwrap();
+        std::fs::write(&replacement_path, b"replacement").unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let (mut file, resolved) =
+            open_agentd_wasm_path_with_dirs(&wasm_path, &allowed_dirs).unwrap();
+
+        assert_eq!(resolved, std::fs::canonicalize(&wasm_path).unwrap());
+
+        // This deterministic rename covers the security property better than a
+        // flaky race test: once validation returns an open descriptor, later
+        // path replacement must not redirect the bytes read by the daemon.
+        std::fs::rename(&replacement_path, &wasm_path).unwrap();
+
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+
+        assert_eq!(bytes, b"original");
+
+        let mut replacement_bytes = Vec::new();
+        std::fs::File::open(&wasm_path)
+            .unwrap()
+            .read_to_end(&mut replacement_bytes)
+            .unwrap();
+        assert_eq!(replacement_bytes, b"replacement");
     }
 
     #[cfg(unix)]
@@ -621,7 +714,7 @@ mod auth_tests {
         symlink(&outside_wasm, &linked_wasm).unwrap();
 
         let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
-        let err = resolve_agentd_wasm_path_with_dirs(&linked_wasm, &allowed_dirs).unwrap_err();
+        let err = open_agentd_wasm_path_with_dirs(&linked_wasm, &allowed_dirs).unwrap_err();
 
         assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
     }
@@ -638,7 +731,7 @@ mod auth_tests {
         let traversal = allowed.join("..").join("outside").join("tool.wasm");
 
         let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
-        let err = resolve_agentd_wasm_path_with_dirs(&traversal, &allowed_dirs).unwrap_err();
+        let err = open_agentd_wasm_path_with_dirs(&traversal, &allowed_dirs).unwrap_err();
 
         assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
     }
