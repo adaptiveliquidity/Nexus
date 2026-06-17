@@ -34,6 +34,56 @@ fn pure_compute_module() -> Vec<u8> {
     .unwrap()
 }
 
+fn wasi_symlink_escape_probe_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"(module
+            (import "wasi_snapshot_preview1" "path_open"
+                (func $path_open
+                    (param i32 i32 i32 i32 i32 i64 i64 i32 i32)
+                    (result i32)))
+            (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 8) "inside.txt")
+            (data (i32.const 32) "link/secret.txt")
+            (func (export "_start")
+                (local $errno i32)
+
+                ;; Sanity check that fd 3 is the capability-derived preopen.
+                (local.set $errno
+                    (call $path_open
+                        (i32.const 3)
+                        (i32.const 0)
+                        (i32.const 8)
+                        (i32.const 10)
+                        (i32.const 0)
+                        (i64.const 2)
+                        (i64.const 0)
+                        (i32.const 0)
+                        (i32.const 0)))
+                (if (i32.ne (local.get $errno) (i32.const 0))
+                    (then (call $proc_exit (i32.const 66))))
+
+                ;; cap-std should reject this symlink escape under the preopen.
+                (local.set $errno
+                    (call $path_open
+                        (i32.const 3)
+                        (i32.const 0)
+                        (i32.const 32)
+                        (i32.const 15)
+                        (i32.const 0)
+                        (i64.const 2)
+                        (i64.const 0)
+                        (i32.const 0)
+                        (i32.const 4)))
+                (if (i32.eq (local.get $errno) (i32.const 0))
+                    (then (call $proc_exit (i32.const 77))))
+
+                (call $proc_exit (i32.const 0)))
+        )"#,
+    )
+    .unwrap()
+}
+
 #[test]
 fn wasi_execution_with_empty_config() {
     let sb = sandbox();
@@ -101,6 +151,32 @@ fn from_capabilities_ignores_non_fs() {
     let config = WasiSandboxConfig::from_capabilities(&caps);
     assert!(config.preopens.is_empty());
     assert!(!config.inherit_stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn capability_derived_preopen_confines_symlink_traversal() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let safe = tmp.path().join("safe");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&safe).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(safe.join("inside.txt"), b"inside").unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    symlink(&outside, safe.join("link")).unwrap();
+
+    let config = WasiSandboxConfig::from_capabilities(&[Capability::ReadFile(safe)]);
+    let result = sandbox()
+        .execute_wasi(&wasi_symlink_escape_probe_module(), &[], &config)
+        .unwrap();
+
+    assert!(
+        result.success,
+        "guest must not open a symlink escape under a capability-derived preopen: {:?}",
+        result.error
+    );
 }
 
 #[test]

@@ -69,7 +69,18 @@ Out of scope:
 
 - **Capability tokens are Ed25519-signed**; verification is mandatory before any
   authorization decision.
-- **Authorization precedes filesystem side effects** — on the WASI execution path, required capabilities are derived without filesystem writes, and any host mount directory creation happens only after capability authorization succeeds.
+- **Authorization precedes filesystem side effects** — on the WASI execution
+  path, required capabilities are derived without filesystem writes, and any
+  host mount directory creation happens only after capability authorization
+  succeeds.
+- **Symlink trust boundary for WASI paths** — capability token path checks are
+  lexical: `.` and `..` are normalized, but symlinks are not resolved. Raw
+  capability-derived preopens are compatibility/trusted-path mode. Use
+  `execute_tool_wasi_with_config` / `WasiToolConfig` for untrusted or
+  symlink-sensitive host mounts; this path derives required capabilities and
+  prepared preopens from canonical host paths. Wasmtime/cap-std confines guest
+  traversal inside an opened preopen, but does not choose whether a symlinked
+  preopen root is the intended host directory.
 - **Attenuation narrows, never widens** — a delegated token can only be a subset
   of its parent.
 - **WASM isolation** — each execution runs in an isolated sandbox with fuel +

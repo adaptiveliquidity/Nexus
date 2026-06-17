@@ -23,8 +23,8 @@ use wasmtime_wasi::WasiCtxBuilder;
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
 use crate::sandbox::wasm_runtime::{
-    configure_epoch_deadline, is_epoch_interrupt, join_with_timeout, timeout_mode,
-    ExecutionResult, WasmSandbox, TIMEOUT_JOIN_GRACE,
+    configure_epoch_deadline, is_epoch_interrupt, join_with_timeout, timeout_mode, ExecutionResult,
+    WasmSandbox, TIMEOUT_JOIN_GRACE,
 };
 use crate::security::capability::normalize_lexical_path;
 use crate::security::Capability;
@@ -831,6 +831,28 @@ mod tests {
         assert!(config.preopens[0].writable);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn from_capabilities_preserves_symlink_root_lexically() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        let link = tmp.path().join("link");
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&target, &link).unwrap();
+        let canonical_link = std::fs::canonicalize(&link).unwrap();
+        assert_eq!(canonical_link, std::fs::canonicalize(&target).unwrap());
+
+        let caps = vec![Capability::ReadFile(link.clone())];
+        let config = WasiSandboxConfig::from_capabilities(&caps);
+
+        assert_eq!(config.preopens.len(), 1);
+        assert_eq!(config.preopens[0].host_path, link);
+        assert_eq!(config.preopens[0].guest_path, link.to_string_lossy());
+        assert_ne!(config.preopens[0].host_path, canonical_link);
+    }
+
     #[test]
     fn required_capabilities_must_not_create_host_directories_before_authorization() {
         let tmp = tempfile::tempdir().unwrap();
@@ -877,5 +899,49 @@ mod tests {
             !required.contains(&Capability::ReadFile(raw_mount)),
             "raw symlink traversal path must not be authorized"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wasi_tool_config_requires_canonical_target_not_raw_symlink_capability() {
+        use crate::security::CapabilityManager;
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        let link = tmp.path().join("link");
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let expected = std::fs::canonicalize(&target).unwrap();
+        let config = WasiToolConfig::new().with_mount(&link, "/data", WasiAccess::ReadOnly);
+
+        let required = config.required_capabilities().unwrap();
+        let validated = config.validate().unwrap();
+
+        assert_eq!(required, vec![Capability::ReadFile(expected.clone())]);
+        assert_eq!(
+            validated.sandbox_config.preopens[0].host_path,
+            expected.clone()
+        );
+
+        let mut manager = CapabilityManager::new();
+        let raw_token = manager
+            .issue(
+                Capability::ReadFile(link),
+                "test",
+                std::time::Duration::from_secs(3600),
+            )
+            .unwrap();
+        assert!(manager.authorize(&[raw_token], &required).is_err());
+
+        let canonical_token = manager
+            .issue(
+                Capability::ReadFile(expected),
+                "test",
+                std::time::Duration::from_secs(3600),
+            )
+            .unwrap();
+        assert!(manager.authorize(&[canonical_token], &required).is_ok());
     }
 }
