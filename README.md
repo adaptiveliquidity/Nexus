@@ -2,7 +2,7 @@
 
 **Game save-states for AI agents.**
 
-Nexus provides microsecond-class cold starts, native snapshot/rollback, capability-gated WASI execution, and opt-in AI telemetry for self-correcting agents.
+Nexus provides microsecond-class sandbox initialization, native snapshot/rollback, capability-gated WASI execution, and opt-in self-correction telemetry for agents.
 
 [![Benchmarks](https://img.shields.io/badge/benchmarks-live-brightgreen)](https://adaptiveliquidity.github.io/Nexus/)
 
@@ -15,7 +15,7 @@ Nexus provides microsecond-class cold starts, native snapshot/rollback, capabili
   <img src="docs/benchmark-chart.svg" alt="Nexus benchmark results — log-scale horizontal bar chart showing cold start, rollback, execute, snapshot, and integrated benchmarks across 12 workloads" width="850"/>
 </p>
 
-> Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. Five instruments: wall-clock latency, binary size ([Bencher.dev](https://bencher.dev/perf/nexus-ai)), CPU simulation, heap memory, bare-metal walltime ([CodSpeed.io](https://codspeed.io/adaptiveliquidity/Nexus)). PRs gated on regression. [Live dashboard →](https://adaptiveliquidity.github.io/Nexus/)
+> Measured with [Criterion.rs](https://github.com/bheisler/criterion.rs) on ubuntu-24.04 CI runners. The always-on pipeline tracks wall-clock latency and binary size ([Bencher.dev](https://bencher.dev/perf/nexus-ai)) plus CPU simulation and heap memory ([CodSpeed.io](https://codspeed.io/adaptiveliquidity/Nexus)); bare-metal walltime is opt-in. Benchmark PRs are gated on configured regression checks. [Live dashboard →](https://adaptiveliquidity.github.io/Nexus/)
 
 ## What Problem Does Nexus Solve?
 
@@ -172,19 +172,24 @@ nexus demo --demo all
 | Recovery policies | Shipped | Static + instinct-based + optional LLM-backed (`ai-recovery` feature) |
 | Module cache | Shipped | SHA-256-keyed `Arc<Module>` reuse avoids recompilation |
 | Daemon mode | Shipped | `nexus-agentd` with Unix socket + Windows named pipes, hypervisor pool |
-| Live benchmarks | Shipped | 5-instrument pipeline (wall-clock, binary size, CPU sim, memory, walltime) with PR gating + auto-updating [dashboard](https://adaptiveliquidity.github.io/Nexus/) |
+| MCP server | Shipped | `nexus-mcp` exposes execute, WASI execute, issue-token, snapshot, and fork-and-race tools over stdio |
+| Warm sandbox pool | Shipped | Opt-in `SandboxPool` / `PoolConfig` with semaphore backpressure and module-cache reuse |
+| Density benchmark harness | Shipped (manual) | `cargo bench --bench density_validation --features bench-density`; intentionally excluded from normal PR gates |
+| WASM call-stack capture | Shipped (diagnostic) | Trap call stacks flow into `ErrorLog` as telemetry metadata without changing snapshot digests |
+| Snapshot sync protocol | Shipped (local/tested) | Digest, framed transport, lineage, and protocol tests are in-tree; distributed deployment remains RFC work |
+| Live benchmarks | Shipped | Always-on wall-clock, binary size, CPU-simulation, and heap-memory checks; bare-metal walltime is opt-in; dashboard auto-updates from main |
 
 ### Roadmap
 
 | Priority | Item | Status |
 |----------|------|--------|
 | P1 | Cross-platform daemon (named pipes on Windows) | **Shipped** |
-| P1 | MCP server integration | Planned |
-| P1 | Security review / audit | Planned |
-| P2 | Sandbox pool with warm instances | Planned |
-| P2 | Concurrent sandbox density benchmarking | Planned |
-| P3 | Distributed snapshot synchronization | Research |
-| P3 | WASM call-stack capture | Research |
+| P1 | MCP server integration | **Shipped** |
+| P1 | Security review / audit | Ongoing; CI and dependency gates are active, deeper capability-model design is tracked separately |
+| P2 | Sandbox pool with warm instances | **Shipped** |
+| P2 | Concurrent sandbox density benchmarking | Manual harness shipped behind `bench-density`; not part of normal PR gates |
+| P3 | Distributed snapshot synchronization | RFC + local protocol/test harness shipped; networked multi-node fabric remains research |
+| P3 | WASM call-stack capture | Opt-in diagnostic capture shipped; richer stack/register recovery remains research |
 | P3 | Zero-knowledge capability attestation | Research |
 
 ## Technical Design
@@ -247,7 +252,7 @@ Monitors three dimensions during execution:
 | Native Snapshots | Yes (mem+globals+tables) | No | No | External tooling |
 | Sub-ms Rollback (small state) | Yes | No | No | ~4 ms |
 | WASI + Capability Gating | Yes | No | No | No |
-| AI Telemetry | Default-on | No | No | No |
+| AI Telemetry / Recovery Hints | Built-in telemetry; self-correction opt-in | No | No | No |
 | Self-Correction | Opt-in | No | No | No |
 | Speculative Execution | Yes | No | No | No |
 

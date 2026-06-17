@@ -22,7 +22,7 @@ The following claims appeared in earlier versions of this document and have been
 
 3. **"<1 ms rollback"** — true at 1 MiB (sub-millisecond), but 1.62 ms at 10 MiB and 53.6 ms at 100 MiB. Rollback time scales with state size.
 
-4. **"10,000+ concurrent sandboxes"** — never measured by the shipped benchmark harness. Density benchmarking is planned as a separate effort.
+4. **"10,000+ concurrent sandboxes"** — never measured by the shipped benchmark harness. A manual density harness now exists behind `bench-density`, but it reports measured pooled vs non-pooled results and does not imply this headline claim.
 
 ## Benchmark Methodology
 

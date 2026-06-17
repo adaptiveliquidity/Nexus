@@ -10,12 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **WASM Sandbox**: WebAssembly execution using wasmtime 45.0
-  - Cold start ~23 µs (sandbox struct init; end-to-end first-call is higher)
+  - Sandbox and hypervisor init are benchmarked in the live Criterion/Bencher/CodSpeed pipeline; do not treat struct-init numbers as end-to-end cold-start latency
   - Fuel metering for resource control (integrated, enforced per-call)
-  - WASI support is in development (not yet integrated)
+  - WASI Preview 1 execution is integrated through `execute_tool_wasi` and `execute_tool_wasi_with_config`
 
 - **Snapshot Engine**: Native snapshot/rollback system
-  - Snapshot creation: ~2.92 ms @ 1 MiB incompressible memory (~56 µs for empty/zero memory)
+  - Snapshot creation is tracked in the live benchmark dashboard; earlier empty-buffer timings are not used for current public claims
   - Zstd compression for efficient storage
   - SHA-256 checksum verification for state integrity
   - Ring buffer for snapshot history management
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Memory pressure detection
   - Execution timeout enforcement
 
-- **AI Telemetry**: Built-in learning and feedback system (default-on)
+- **AI Telemetry**: Built-in execution telemetry with opt-in self-correction
   - Error pattern detection and classification
   - Recovery action suggestions
   - LLM-compatible feedback generation
@@ -50,9 +50,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Wired into `nexus-agentd` daemon hot path
 
 - **Daemon**: `nexus-agentd` long-lived daemon with hypervisor pool
-  - Unix socket transport (Windows named-pipe deferred)
+  - Unix socket and Windows named-pipe transport
   - Length-prefixed JSON framing
   - Module cache integration
+  - Optional per-request auth with `NEXUS_AGENTD_AUTH_TOKEN`
+  - `wasm_path` reads restricted to `NEXUS_AGENTD_MODULE_DIR`; clients should prefer `wasm_bytes`
+
+- **MCP Server**: `nexus-mcp` stdio tool surface
+  - Exposes execute, WASI execute, issue-token, snapshot create/rollback, and fork-and-race tools
+  - Restricts MCP `wasm_path` reads to `NEXUS_MCP_MODULE_DIR`
+  - MCP WASI execution issues caller tokens for requested capabilities
+
+- **Sandbox Pool**: Opt-in warm pool and manual density harness
+  - `SandboxPool` / `PoolConfig` provide semaphore-bounded concurrent execution
+  - `cargo bench --bench density_validation --features bench-density` emits density measurements outside normal PR gates
+
+- **Snapshot Sync and Diagnostics**
+  - Snapshot sync digest, framed transport, lineage, and protocol components are implemented and tested locally
+  - WASM trap call-stack capture flows into `ErrorLog` as diagnostic telemetry
 
 - **CLI Interface**: Command-line tool for sandbox management
 
@@ -72,18 +87,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Metric | Value | Category |
 |--------|-------|----------|
-| Cold Start (sandbox init) | ~23 µs | benchmarked-primitive |
-| Snapshot Creation (1 MiB) | ~2.92 ms | integrated-live |
-| Rollback (1 MiB) | <1 ms | benchmarked-primitive |
-| Rollback (100 MiB) | ~53.6 ms | benchmarked-primitive |
-| Execute trivial WASM e2e | measured | integrated-live |
+| Cold start / init paths | See live dashboard | benchmarked-primitive + integrated-live |
+| Snapshot creation | See live dashboard | integrated-live |
+| Rollback | See live dashboard | benchmarked-primitive |
+| Execute trivial WASM e2e | See live dashboard | integrated-live |
+| Density benchmarks | Manual `bench-density` harness | opt-in/manual |
 
 ### Known Limitations
 
-- WASI filesystem/network access is not yet implemented (orphan code removed)
-- Snapshot captures linear memory only (globals, tables, stack not captured)
-- Concurrent sandbox density not yet benchmarked
-- Windows named-pipe transport not yet implemented
+- WASI filesystem access is capability-gated through host preopens; general WASI networking is not exposed as a default capability.
+- Snapshot/rollback captures linear memory plus exported globals and tables; call stacks are diagnostic metadata, not full register/stack restoration.
+- Concurrent sandbox density benchmarking exists as a manual `bench-density` harness and is intentionally excluded from normal PR gates.
+- Daemon auth is backward-compatible: local-dev mode stays tokenless unless `NEXUS_AGENTD_AUTH_TOKEN` is configured.
 
 ### Dependencies
 
