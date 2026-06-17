@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod error;
 pub mod hypervisor;
 pub mod instinct;
+pub mod profile;
 pub mod sandbox;
 pub mod security;
 pub mod snapshot;
