@@ -579,10 +579,10 @@ impl NexusHypervisor {
 
     /// Execute a WASI tool with explicit host-to-guest mount aliases.
     ///
-    /// Mounts are validated and converted into required capabilities before
-    /// the guest starts. This is the public path used by proof-grade WASI
-    /// demos and benchmark runners so filesystem access is always derived
-    /// from caller-held capability tokens rather than ad hoc preopens.
+    /// Mount requirements are derived and authorized before post-authorization
+    /// mount preparation. This is the public path used by proof-grade WASI
+    /// demos and benchmark runners so filesystem access is always derived from
+    /// caller-held capability tokens rather than ad hoc preopens.
     pub async fn execute_tool_wasi_with_config(
         &self,
         tool: ToolDefinition,
@@ -599,7 +599,7 @@ impl NexusHypervisor {
             manager.authorize(caller_tokens, &required_capabilities)?;
         }
 
-        let validated_config = wasi_tool_config.validate()?;
+        let validated_config = wasi_tool_config.prepare_mounts()?;
 
         let input_bytes = serde_json::to_vec(&input).map_err(|e| {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
