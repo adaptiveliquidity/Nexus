@@ -3,9 +3,13 @@
 //! High-performance WebAssembly sandbox with fuel metering for AI agent execution.
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, Store, Trap};
 
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
@@ -175,6 +179,9 @@ pub struct StepCapture {
 pub struct WasmSandbox {
     pub(crate) engine: Arc<Engine>,
     pub(crate) config: SandboxConfig,
+    pub(crate) epoch: Arc<SandboxEpoch>,
+    #[cfg(test)]
+    active_workers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Reply payload sent from the worker thread to the timeout-bounded receiver.
@@ -209,6 +216,151 @@ enum StepReply {
     Failed(String),
 }
 
+const EPOCH_TICK_MS: u128 = 10;
+pub(crate) const TIMEOUT_JOIN_GRACE: Duration = Duration::from_millis(200);
+
+pub(crate) struct SandboxEpoch {
+    current: AtomicU64,
+    next_deadline: AtomicU64,
+}
+
+impl SandboxEpoch {
+    fn new() -> Self {
+        Self {
+            current: AtomicU64::new(0),
+            next_deadline: AtomicU64::new(1),
+        }
+    }
+
+    pub(crate) fn reserve_deadline(&self, time_limit: Duration) -> u64 {
+        let ticks = epoch_ticks_for_time_limit(time_limit);
+        let mut deadline = self.next_deadline.fetch_add(ticks, Ordering::SeqCst);
+        loop {
+            let current = self.current.load(Ordering::SeqCst);
+            if deadline > current {
+                return deadline;
+            }
+
+            let adjusted = current.saturating_add(ticks.max(1));
+            match self.next_deadline.compare_exchange(
+                deadline.saturating_add(ticks),
+                adjusted.saturating_add(1),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return adjusted,
+                Err(next) => deadline = next,
+            }
+        }
+    }
+
+    pub(crate) fn relative_ticks_until(&self, deadline: u64) -> u64 {
+        let current = self.current.load(Ordering::SeqCst);
+        deadline.saturating_sub(current).max(1)
+    }
+
+    pub(crate) fn advance_to(&self, engine: &Engine, deadline: u64) {
+        loop {
+            let current = self.current.load(Ordering::SeqCst);
+            if current >= deadline {
+                break;
+            }
+
+            if self
+                .current
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                increment_engine_epoch(engine);
+            }
+        }
+    }
+}
+
+fn epoch_ticks_for_time_limit(time_limit: Duration) -> u64 {
+    let millis = time_limit.as_millis().max(1);
+    let ticks = millis.div_ceil(EPOCH_TICK_MS);
+    ticks.min(u64::MAX as u128) as u64
+}
+
+pub(crate) fn configure_epoch_deadline<T>(store: &mut Store<T>, relative_ticks: u64) {
+    #[cfg(target_has_atomic = "64")]
+    {
+        store.epoch_deadline_trap();
+        store.set_epoch_deadline(relative_ticks.max(1));
+    }
+
+    #[cfg(not(target_has_atomic = "64"))]
+    {
+        let _ = (store, relative_ticks);
+    }
+}
+
+fn increment_engine_epoch(engine: &Engine) {
+    #[cfg(target_has_atomic = "64")]
+    engine.increment_epoch();
+
+    #[cfg(not(target_has_atomic = "64"))]
+    let _ = engine;
+}
+
+pub(crate) fn join_with_timeout<T>(handle: JoinHandle<T>, grace: Duration) -> bool {
+    let deadline = Instant::now()
+        .checked_add(grace)
+        .unwrap_or_else(Instant::now);
+    loop {
+        if handle.is_finished() {
+            let _ = handle.join();
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
+}
+
+pub(crate) fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+pub(crate) fn timeout_mode(time_limit: Duration, observed: Duration) -> FailureMode {
+    FailureMode::Timeout {
+        limit_ms: duration_millis(time_limit),
+        observed_ms: duration_millis(observed),
+    }
+}
+
+pub(crate) fn is_epoch_interrupt(err: &wasmtime::Error) -> bool {
+    if matches!(err.downcast_ref::<Trap>(), Some(Trap::Interrupt)) {
+        return true;
+    }
+    err.chain()
+        .any(|cause| matches!(cause.downcast_ref::<Trap>(), Some(Trap::Interrupt)))
+}
+
+#[cfg(test)]
+struct WorkerThreadGuard {
+    active_workers: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl WorkerThreadGuard {
+    fn new(active_workers: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        active_workers.fetch_add(1, Ordering::SeqCst);
+        Self { active_workers }
+    }
+}
+
+#[cfg(test)]
+impl Drop for WorkerThreadGuard {
+    fn drop(&mut self) {
+        self.active_workers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl WasmSandbox {
     /// Create a new WASM sandbox.
     ///
@@ -218,6 +370,7 @@ impl WasmSandbox {
     pub fn new(config: SandboxConfig) -> Result<Self> {
         let mut cfg = Config::new();
         cfg.consume_fuel(true);
+        cfg.epoch_interruption(true);
 
         let engine = Engine::new(&cfg)
             .map_err(|e| NexusError::ConfigError(format!("Failed to create engine: {}", e)))?;
@@ -225,6 +378,9 @@ impl WasmSandbox {
         Ok(WasmSandbox {
             engine: Arc::new(engine),
             config,
+            epoch: Arc::new(SandboxEpoch::new()),
+            #[cfg(test)]
+            active_workers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -232,9 +388,16 @@ impl WasmSandbox {
     ///
     /// Used by [`crate::sandbox::pool::SandboxPool`] so cached modules are
     /// compiled with — and executed on — the pool's pooling-allocator engine.
-    /// The engine must have `consume_fuel(true)` set, matching [`Self::new`].
+    /// The engine must have `consume_fuel(true)` and `epoch_interruption(true)`
+    /// set, matching [`Self::new`].
     pub fn from_engine(engine: Arc<Engine>, config: SandboxConfig) -> Self {
-        WasmSandbox { engine, config }
+        WasmSandbox {
+            engine,
+            config,
+            epoch: Arc::new(SandboxEpoch::new()),
+            #[cfg(test)]
+            active_workers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
     /// Access the wasmtime `Engine` for use with `ModuleCache`.
@@ -282,12 +445,20 @@ impl WasmSandbox {
 
         let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
+        let epoch = self.epoch.clone();
+        let epoch_deadline = epoch.reserve_deadline(time_limit);
         let max_memory_bytes = self.config.max_memory_pages as usize * 65536;
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
         let (tx, rx) = std::sync::mpsc::channel::<StepReply>();
+        #[cfg(test)]
+        let active_workers = self.active_workers.clone();
 
         let handle = std::thread::spawn(move || {
+            #[cfg(test)]
+            let _worker_guard = WorkerThreadGuard::new(active_workers);
+
             let mut store = Store::new(&engine, WasmState::new(max_memory_bytes));
+            configure_epoch_deadline(&mut store, epoch.relative_ticks_until(epoch_deadline));
             store.limiter(|s| &mut s.limits);
             if let Err(e) = store.set_fuel(fuel_cap) {
                 let _ = tx.send(StepReply::Failed(format!("set_fuel failed: {e}")));
@@ -330,6 +501,7 @@ impl WasmSandbox {
             let call_result = start_func.call(&mut store, ());
             let completed = match &call_result {
                 Ok(_) => true,
+                Err(e) if is_epoch_interrupt(e) => false,
                 Err(e) => !matches!(
                     FailureMode::from_anyhow_error(e),
                     Some(FailureMode::FuelExhausted { .. })
@@ -379,7 +551,13 @@ impl WasmSandbox {
                 Err(NexusError::WasmError(message))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                drop(handle);
+                self.epoch.advance_to(&self.engine, epoch_deadline);
+                if !join_with_timeout(handle, TIMEOUT_JOIN_GRACE) {
+                    tracing::warn!(
+                        "WASM replay worker did not stop within {:?} after timeout",
+                        TIMEOUT_JOIN_GRACE
+                    );
+                }
                 Err(NexusError::Timeout(time_limit.as_millis() as u64))
             }
             Err(_) => {
@@ -461,13 +639,22 @@ impl WasmSandbox {
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
+        let epoch = self.epoch.clone();
+        let epoch_deadline = epoch.reserve_deadline(time_limit);
         let max_memory_bytes = self.config.max_memory_pages as usize * 65536;
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
 
         let (tx, rx) = std::sync::mpsc::channel::<ExecReply>();
+        #[cfg(test)]
+        let active_workers = self.active_workers.clone();
 
         let handle = std::thread::spawn(move || {
+            #[cfg(test)]
+            let _worker_guard = WorkerThreadGuard::new(active_workers);
+
+            let worker_start = Instant::now();
             let mut store = Store::new(&engine, WasmState::new(max_memory_bytes));
+            configure_epoch_deadline(&mut store, epoch.relative_ticks_until(epoch_deadline));
             store.limiter(|s| &mut s.limits);
 
             // With consume_fuel(true) in Config, set_fuel is required and
@@ -573,13 +760,18 @@ impl WasmSandbox {
                     let call_stack = e
                         .downcast_ref::<wasmtime::WasmBacktrace>()
                         .map(|bt| CapturedCallStack::from_wasm_backtrace(bt, CaptureSite::Trap));
-                    let mode = FailureMode::from_anyhow_error(&e)
-                        .unwrap_or_else(|| FailureMode::HostError(format!("wasm error: {e:#}")));
-                    let mode = match mode {
-                        FailureMode::FuelExhausted { .. } => {
-                            FailureMode::FuelExhausted { limit: max_fuel }
+                    let mode = if is_epoch_interrupt(&e) {
+                        timeout_mode(time_limit, worker_start.elapsed())
+                    } else {
+                        let mode = FailureMode::from_anyhow_error(&e).unwrap_or_else(|| {
+                            FailureMode::HostError(format!("wasm error: {e:#}"))
+                        });
+                        match mode {
+                            FailureMode::FuelExhausted { .. } => {
+                                FailureMode::FuelExhausted { limit: max_fuel }
+                            }
+                            other => other,
                         }
-                        other => other,
                     };
                     let _ = tx.send(ExecReply::Failed {
                         mode,
@@ -627,14 +819,14 @@ impl WasmSandbox {
                 )
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Detach the worker — the WASM is sandboxed so the loop is
-                // contained, but we want to return to the caller now.
-                drop(handle);
-                let limit_ms = time_limit.as_millis() as u64;
-                let mode = FailureMode::Timeout {
-                    limit_ms,
-                    observed_ms: duration_ms,
-                };
+                self.epoch.advance_to(&self.engine, epoch_deadline);
+                if !join_with_timeout(handle, TIMEOUT_JOIN_GRACE) {
+                    tracing::warn!(
+                        "WASM worker did not stop within {:?} after epoch cancellation",
+                        TIMEOUT_JOIN_GRACE
+                    );
+                }
+                let mode = timeout_mode(time_limit, start.elapsed());
                 Ok(ExecutionResult::failure_from_mode(mode, 0, duration_ms))
             }
             Err(_) => {
@@ -663,6 +855,74 @@ impl WasmState {
             limits: wasmtime::StoreLimitsBuilder::new()
                 .memory_size(max_memory_bytes)
                 .build(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tight_loop_wasm() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+                (func (export "_start")
+                    (loop $spin
+                        br $spin)))"#,
+        )
+        .unwrap()
+    }
+
+    fn timeout_sandbox() -> WasmSandbox {
+        WasmSandbox::new(SandboxConfig {
+            max_fuel: u64::MAX / 4,
+            time_limit: Duration::from_millis(20),
+            ..SandboxConfig::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn tight_loop_timeout_exits_worker_thread() {
+        let sandbox = timeout_sandbox();
+        let wasm = tight_loop_wasm();
+        let start = Instant::now();
+
+        let result = sandbox.execute(&wasm, &[]).unwrap();
+
+        assert!(!result.success);
+        assert!(matches!(
+            result.failure_mode,
+            Some(FailureMode::Timeout { .. })
+        ));
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "timeout cancellation should finish within the bounded join window"
+        );
+        assert_eq!(
+            sandbox.active_workers.load(Ordering::SeqCst),
+            0,
+            "timeout worker should exit after epoch cancellation"
+        );
+    }
+
+    #[test]
+    fn sequential_timeouts_do_not_accumulate_orphaned_runtime_threads() {
+        let sandbox = timeout_sandbox();
+        let wasm = tight_loop_wasm();
+
+        for attempt in 0..5 {
+            let result = sandbox.execute(&wasm, &[]).unwrap();
+            assert!(
+                matches!(result.failure_mode, Some(FailureMode::Timeout { .. })),
+                "attempt {attempt} should time out, got {:?}",
+                result.failure_mode
+            );
+            assert_eq!(
+                sandbox.active_workers.load(Ordering::SeqCst),
+                0,
+                "attempt {attempt} left a runtime worker running"
+            );
         }
     }
 }

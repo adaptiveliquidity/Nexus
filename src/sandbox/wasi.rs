@@ -10,7 +10,10 @@
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use wasmtime::{Linker, Module, Store};
@@ -19,7 +22,10 @@ use wasmtime_wasi::WasiCtxBuilder;
 
 use crate::error::{NexusError, Result};
 use crate::hypervisor::failure_mode::FailureMode;
-use crate::sandbox::wasm_runtime::{ExecutionResult, WasmSandbox};
+use crate::sandbox::wasm_runtime::{
+    configure_epoch_deadline, is_epoch_interrupt, join_with_timeout, timeout_mode,
+    ExecutionResult, WasmSandbox, TIMEOUT_JOIN_GRACE,
+};
 use crate::security::capability::normalize_lexical_path;
 use crate::security::Capability;
 
@@ -430,13 +436,22 @@ impl WasmSandbox {
         let max_fuel = self.config.max_fuel;
         let time_limit = self.config.time_limit;
         let engine = self.engine.clone();
+        let epoch = self.epoch.clone();
+        let epoch_deadline = epoch.reserve_deadline(time_limit);
         let max_memory_bytes = self.config.max_memory_pages as usize * 65536;
         let input_data: Vec<u8> = args.first().cloned().unwrap_or_default();
         let wasi_config = wasi_config.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
 
         let (tx, rx) = std::sync::mpsc::channel::<WasiReply>();
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
+            let worker_start = Instant::now();
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
+
             let mut ctx_builder = WasiCtxBuilder::new();
 
             if wasi_config.inherit_stdout {
@@ -446,13 +461,25 @@ impl WasmSandbox {
                 ctx_builder.inherit_stderr();
             }
             for (k, v) in &wasi_config.env_vars {
+                if worker_cancel.load(Ordering::Acquire) {
+                    return;
+                }
                 ctx_builder.env(k, v);
             }
             for arg in &wasi_config.args {
+                if worker_cancel.load(Ordering::Acquire) {
+                    return;
+                }
                 ctx_builder.arg(arg);
             }
 
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
             for preopen in &wasi_config.preopens {
+                if worker_cancel.load(Ordering::Acquire) {
+                    return;
+                }
                 let dir_perms = if preopen.writable {
                     wasmtime_wasi::DirPerms::all()
                 } else {
@@ -482,9 +509,13 @@ impl WasmSandbox {
                     return;
                 }
             }
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
 
             let wasi_ctx = ctx_builder.build_p1();
             let mut store = Store::new(&engine, WasiState::new(wasi_ctx, max_memory_bytes));
+            configure_epoch_deadline(&mut store, epoch.relative_ticks_until(epoch_deadline));
             store.limiter(|s| &mut s.limits);
 
             if let Err(e) = store.set_fuel(max_fuel) {
@@ -497,8 +528,14 @@ impl WasmSandbox {
                 });
                 return;
             }
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
 
             let mut linker: Linker<WasiState> = Linker::new(&engine);
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
             if let Err(e) = wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s| &mut s.wasi) {
                 let _ = tx.send(WasiReply::Failed {
                     mode: FailureMode::HostError(format!("WASI linker: {e}")),
@@ -509,7 +546,13 @@ impl WasmSandbox {
                 });
                 return;
             }
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
 
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
             let instance = match linker.instantiate(&mut store, &module) {
                 Ok(i) => i,
                 Err(e) => {
@@ -523,11 +566,17 @@ impl WasmSandbox {
                     return;
                 }
             };
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
 
             let pre_call_memory: Option<Vec<u8>> = instance
                 .get_memory(&mut store, "memory")
                 .map(|m| m.data(&store).to_vec());
 
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
             if !input_data.is_empty() {
                 if let Some(mem) = instance.get_memory(&mut store, "memory") {
                     let needed = 4 + input_data.len();
@@ -538,6 +587,9 @@ impl WasmSandbox {
                         data[4..4 + input_data.len()].copy_from_slice(&input_data);
                     }
                 }
+            }
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
             }
 
             let start_func = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
@@ -558,13 +610,28 @@ impl WasmSandbox {
                     }
                 },
             };
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
 
             let call_result = start_func.call(&mut store, ());
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
             let fuel_remaining = store.get_fuel().unwrap_or(0);
             let fuel_consumed = max_fuel.saturating_sub(fuel_remaining);
 
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
             let globals = capture_globals_wasi(&instance, &mut store);
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
             let tables = capture_tables_wasi(&instance, &mut store);
+            if worker_cancel.load(Ordering::Acquire) {
+                return;
+            }
 
             match call_result {
                 Ok(_) => {
@@ -589,13 +656,17 @@ impl WasmSandbox {
                         return;
                     }
 
-                    let mode = FailureMode::from_anyhow_error(&e)
-                        .unwrap_or_else(|| FailureMode::HostError(format!("wasm: {e:#}")));
-                    let mode = match mode {
-                        FailureMode::FuelExhausted { .. } => {
-                            FailureMode::FuelExhausted { limit: max_fuel }
+                    let mode = if is_epoch_interrupt(&e) {
+                        timeout_mode(time_limit, worker_start.elapsed())
+                    } else {
+                        let mode = FailureMode::from_anyhow_error(&e)
+                            .unwrap_or_else(|| FailureMode::HostError(format!("wasm: {e:#}")));
+                        match mode {
+                            FailureMode::FuelExhausted { .. } => {
+                                FailureMode::FuelExhausted { limit: max_fuel }
+                            }
+                            other => other,
                         }
-                        other => other,
                     };
                     let _ = tx.send(WasiReply::Failed {
                         mode,
@@ -617,31 +688,42 @@ impl WasmSandbox {
                 pre_call_memory,
                 globals,
                 tables,
-            }) => Ok(
-                ExecutionResult::success(Vec::new(), fuel_consumed, duration_ms)
-                    .with_pre_call_memory(pre_call_memory)
-                    .with_post_call_state(globals, tables),
-            ),
+            }) => {
+                let _ = handle.join();
+                Ok(
+                    ExecutionResult::success(Vec::new(), fuel_consumed, duration_ms)
+                        .with_pre_call_memory(pre_call_memory)
+                        .with_post_call_state(globals, tables),
+                )
+            }
             Ok(WasiReply::Failed {
                 mode,
                 fuel_consumed,
                 pre_call_memory,
                 globals,
                 tables,
-            }) => Ok(
-                ExecutionResult::failure_from_mode(mode, fuel_consumed, duration_ms)
-                    .with_pre_call_memory(pre_call_memory)
-                    .with_post_call_state(globals, tables),
-            ),
+            }) => {
+                let _ = handle.join();
+                Ok(
+                    ExecutionResult::failure_from_mode(mode, fuel_consumed, duration_ms)
+                        .with_pre_call_memory(pre_call_memory)
+                        .with_post_call_state(globals, tables),
+                )
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let limit_ms = time_limit.as_millis() as u64;
-                let mode = FailureMode::Timeout {
-                    limit_ms,
-                    observed_ms: duration_ms,
-                };
+                cancel.store(true, Ordering::Release);
+                self.epoch.advance_to(&self.engine, epoch_deadline);
+                if !join_with_timeout(handle, TIMEOUT_JOIN_GRACE) {
+                    tracing::warn!(
+                        "WASI worker did not stop within {:?} after timeout; sync WASI host calls may continue until the host syscall returns",
+                        TIMEOUT_JOIN_GRACE
+                    );
+                }
+                let mode = timeout_mode(time_limit, start.elapsed());
                 Ok(ExecutionResult::failure_from_mode(mode, 0, duration_ms))
             }
             Err(_) => {
+                let _ = handle.join();
                 let mode = FailureMode::HostError(
                     "WASI worker disconnected before sending result".to_string(),
                 );
