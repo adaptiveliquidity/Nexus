@@ -172,9 +172,11 @@ fn run_profile(cmd: ProfileCmd) -> anyhow::Result<()> {
             Ok(_) => {
                 println!("profile validation OK: {}", path.display());
             }
-            Err(error) => {
+            Err(errors) => {
                 eprintln!("profile validation failed: {}", path.display());
-                eprintln!("{error:#}");
+                for error in &errors {
+                    eprintln!("  - {error}");
+                }
                 std::process::exit(1);
             }
         },
