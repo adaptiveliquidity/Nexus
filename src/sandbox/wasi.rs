@@ -93,61 +93,34 @@ impl WasiToolConfig {
         self
     }
 
-    /// Derive required capabilities using the same canonical host paths as
-    /// `validate()`.
+    /// Derive required capabilities without creating missing host mount
+    /// directories.
     pub fn required_capabilities(&self) -> Result<Vec<Capability>> {
+        let mounts = self.normalized_mounts()?;
         let mut caps = Vec::with_capacity(self.mounts.len() * 2);
-        let mut guest_paths = HashSet::new();
-        let mut normalized_guests: Vec<String> = Vec::new();
 
-        for mount in &self.mounts {
-            let guest_path = normalize_guest_path(&mount.guest_path)?;
-            if !guest_paths.insert(guest_path.clone()) {
-                return Err(NexusError::ConfigError(format!(
-                    "duplicate WASI guest path: {guest_path}"
-                )));
-            }
-            for existing in &normalized_guests {
-                if guest_path_overlaps(existing, &guest_path) {
-                    return Err(NexusError::ConfigError(format!(
-                        "overlapping WASI guest paths: {existing} and {guest_path}"
-                    )));
-                }
-            }
-            normalized_guests.push(guest_path.clone());
-
-            let host_path = canonicalize_mount_dir(&mount.host_path)?;
+        for mount in mounts {
+            let host_path = required_capability_mount_dir(mount.host_path)?;
             caps.push(Capability::ReadFile(host_path.clone()));
             if matches!(mount.access, WasiAccess::ReadWrite) {
                 caps.push(Capability::WriteFile(host_path));
             }
         }
+
         Ok(caps)
     }
 
-    pub fn validate(&self) -> Result<ValidatedWasiToolConfig> {
+    /// Validate and prepare WASI mounts after caller authorization.
+    ///
+    /// This may create missing host mount directories before canonicalizing them
+    /// into the preopen configuration.
+    pub fn prepare_mounts(&self) -> Result<ValidatedWasiToolConfig> {
+        let mounts = self.normalized_mounts()?;
         let mut preopens = Vec::with_capacity(self.mounts.len());
         let mut required_capabilities = Vec::with_capacity(self.mounts.len() * 2);
-        let mut guest_paths = HashSet::new();
-        let mut normalized_guests: Vec<String> = Vec::new();
 
-        for mount in &self.mounts {
-            let guest_path = normalize_guest_path(&mount.guest_path)?;
-            if !guest_paths.insert(guest_path.clone()) {
-                return Err(NexusError::ConfigError(format!(
-                    "duplicate WASI guest path: {guest_path}"
-                )));
-            }
-            for existing in &normalized_guests {
-                if guest_path_overlaps(existing, &guest_path) {
-                    return Err(NexusError::ConfigError(format!(
-                        "overlapping WASI guest paths: {existing} and {guest_path}"
-                    )));
-                }
-            }
-            normalized_guests.push(guest_path.clone());
-
-            let host_path = canonicalize_mount_dir(&mount.host_path)?;
+        for mount in mounts {
+            let host_path = prepare_mount_dir(mount.host_path)?;
             let writable = matches!(mount.access, WasiAccess::ReadWrite);
             required_capabilities.push(Capability::ReadFile(host_path.clone()));
             if writable {
@@ -155,7 +128,7 @@ impl WasiToolConfig {
             }
             preopens.push(PreOpen {
                 host_path,
-                guest_path,
+                guest_path: mount.guest_path,
                 writable,
             });
         }
@@ -171,6 +144,47 @@ impl WasiToolConfig {
             required_capabilities,
         })
     }
+
+    pub fn validate(&self) -> Result<ValidatedWasiToolConfig> {
+        self.prepare_mounts()
+    }
+
+    fn normalized_mounts(&self) -> Result<Vec<NormalizedWasiMount<'_>>> {
+        let mut mounts = Vec::with_capacity(self.mounts.len());
+        let mut guest_paths = HashSet::new();
+        let mut normalized_guests: Vec<String> = Vec::new();
+
+        for mount in &self.mounts {
+            let guest_path = normalize_guest_path(&mount.guest_path)?;
+            if !guest_paths.insert(guest_path.clone()) {
+                return Err(NexusError::ConfigError(format!(
+                    "duplicate WASI guest path: {guest_path}"
+                )));
+            }
+            for existing in &normalized_guests {
+                if guest_path_overlaps(existing, &guest_path) {
+                    return Err(NexusError::ConfigError(format!(
+                        "overlapping WASI guest paths: {existing} and {guest_path}"
+                    )));
+                }
+            }
+            normalized_guests.push(guest_path.clone());
+
+            mounts.push(NormalizedWasiMount {
+                host_path: mount.host_path.as_path(),
+                guest_path,
+                access: mount.access,
+            });
+        }
+
+        Ok(mounts)
+    }
+}
+
+struct NormalizedWasiMount<'a> {
+    host_path: &'a Path,
+    guest_path: String,
+    access: WasiAccess,
 }
 
 #[derive(Debug, Clone)]
@@ -189,7 +203,39 @@ pub struct WasiSandboxConfig {
     pub args: Vec<String>,
 }
 
-fn canonicalize_mount_dir(path: &Path) -> Result<PathBuf> {
+fn required_capability_mount_dir(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return canonicalize_existing_mount_dir(path);
+    }
+
+    let absolute = absolute_mount_path(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut missing_components = Vec::new();
+    while !ancestor.exists() {
+        let component = ancestor.file_name().ok_or_else(|| {
+            NexusError::FilesystemError(format!(
+                "failed to resolve WASI mount directory {} without creation",
+                path.display()
+            ))
+        })?;
+        missing_components.push(component.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            NexusError::FilesystemError(format!(
+                "failed to resolve WASI mount directory {} without creation",
+                path.display()
+            ))
+        })?;
+    }
+
+    let mut resolved = canonicalize_existing_mount_dir(ancestor)?;
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+
+    Ok(normalize_lexical_path(&resolved))
+}
+
+fn prepare_mount_dir(path: &Path) -> Result<PathBuf> {
     if path.exists() && !path.is_dir() {
         return Err(NexusError::ConfigError(format!(
             "WASI mount host path is not a directory: {}",
@@ -204,6 +250,10 @@ fn canonicalize_mount_dir(path: &Path) -> Result<PathBuf> {
             ))
         })?;
     }
+    canonicalize_existing_mount_dir(path)
+}
+
+fn canonicalize_existing_mount_dir(path: &Path) -> Result<PathBuf> {
     let canonical = std::fs::canonicalize(path).map_err(|e| {
         NexusError::FilesystemError(format!(
             "failed to canonicalize WASI mount directory {}: {e}",
@@ -217,6 +267,16 @@ fn canonicalize_mount_dir(path: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(canonical)
+}
+
+fn absolute_mount_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|e| NexusError::FilesystemError(format!("failed to resolve current dir: {e}")))
 }
 
 fn normalize_guest_path(path: &str) -> Result<String> {
@@ -689,7 +749,6 @@ mod tests {
         assert!(config.preopens[0].writable);
     }
 
-    #[ignore = "C4 ADR: pending design approval"]
     #[test]
     fn required_capabilities_must_not_create_host_directories_before_authorization() {
         let tmp = tempfile::tempdir().unwrap();
