@@ -19,7 +19,7 @@ use nexus::hypervisor::{
     fork_and_race, HypervisorConfig, NexusHypervisor, RecoveryAction, RecoverySource,
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
-use nexus::security::Capability;
+use nexus::security::{Capability, CapabilityToken};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
 
 // ─── MCP Tool Parameter Types ────────────────────────────────────────────────
@@ -46,6 +46,10 @@ pub struct ExecuteWasiParams {
         description = "Capabilities to grant: array of {type, path?} objects. Types: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
     )]
     pub capabilities: Option<Vec<CapabilitySpec>>,
+    #[schemars(
+        description = "Optional parent capability token UUID. When set, requested capabilities are attenuated from this token instead of granted from the operator allowlist."
+    )]
+    pub parent_token_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -106,6 +110,7 @@ pub struct BranchSpec {
 pub struct NexusMcpServer {
     hypervisor: Arc<NexusHypervisor>,
     wasm_module_dirs: Arc<Vec<PathBuf>>,
+    capability_allowlist: Arc<Option<Vec<Capability>>>,
 }
 
 #[tool_router(server_handler)]
@@ -115,9 +120,8 @@ impl NexusMcpServer {
     )]
     async fn nexus_execute(&self, Parameters(params): Parameters<ExecuteParams>) -> String {
         match self.do_execute(params).await {
-            Ok(output) => serde_json::to_string_pretty(&output)
-                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
+            Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
+            Err(e) => tool_error_response(e),
         }
     }
 
@@ -129,9 +133,8 @@ impl NexusMcpServer {
         Parameters(params): Parameters<ExecuteWasiParams>,
     ) -> String {
         match self.do_execute_wasi(params).await {
-            Ok(output) => serde_json::to_string_pretty(&output)
-                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
+            Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
+            Err(e) => tool_error_response(e),
         }
     }
 
@@ -144,7 +147,7 @@ impl NexusMcpServer {
     ) -> String {
         match self.do_snapshot_create(params) {
             Ok(id) => format!("{{\"snapshot_id\": \"{id}\", \"success\": true}}"),
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
+            Err(e) => tool_error_response(e),
         }
     }
 
@@ -156,20 +159,18 @@ impl NexusMcpServer {
         Parameters(params): Parameters<SnapshotRollbackParams>,
     ) -> String {
         match self.do_snapshot_rollback(params) {
-            Ok(info) => serde_json::to_string_pretty(&info)
-                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_error_response(e),
         }
     }
 
     #[tool(
-        description = "Issue a capability token that can be passed to execute_wasi calls. Tokens are time-limited and scoped to a specific capability."
+        description = "Issue an operator-allowlisted capability token that can be passed to execute_wasi calls. Tokens are time-limited and scoped to a specific capability."
     )]
     async fn nexus_issue_token(&self, Parameters(params): Parameters<IssueTokenParams>) -> String {
         match self.do_issue_token(params) {
-            Ok(info) => serde_json::to_string_pretty(&info)
-                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_error_response(e),
         }
     }
 
@@ -181,9 +182,8 @@ impl NexusMcpServer {
         Parameters(params): Parameters<ForkAndRaceParams>,
     ) -> String {
         match self.do_fork_and_race(params).await {
-            Ok(info) => serde_json::to_string_pretty(&info)
-                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_error_response(e),
         }
     }
 }
@@ -217,6 +217,10 @@ impl From<ToolOutput> for ToolOutputResponse {
     }
 }
 
+fn tool_error_response(error: impl std::fmt::Display) -> String {
+    serde_json::json!({ "error": error.to_string() }).to_string()
+}
+
 #[derive(Serialize)]
 struct RollbackResponse {
     snapshot_id: String,
@@ -245,6 +249,7 @@ impl NexusMcpServer {
         Ok(Self {
             hypervisor,
             wasm_module_dirs: Arc::new(allowed_wasm_module_dirs()?),
+            capability_allowlist: Arc::new(capability_allowlist_from_env()?),
         })
     }
 
@@ -279,17 +284,9 @@ impl NexusMcpServer {
             .capabilities
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|spec| parse_capability(&spec))
-            .collect();
-        let mut caller_tokens = Vec::with_capacity(caps.len());
-        for capability in &caps {
-            let (capability, validity_secs) = sanitize_token_request(capability.clone(), None)?;
-            let validity = Duration::from_secs(validity_secs);
-            caller_tokens.push(
-                self.hypervisor
-                    .issue_token(capability, "mcp_client", validity)?,
-            );
-        }
+            .map(|spec| parse_capability(&spec))
+            .collect::<Result<_>>()?;
+        let caller_tokens = self.execute_wasi_tokens(&caps, params.parent_token_id.as_deref())?;
         tool = tool.with_capabilities(caps);
 
         let input = params.input.unwrap_or(serde_json::json!({}));
@@ -341,6 +338,7 @@ impl NexusMcpServer {
         // Security: reject the unrestricted `All` capability and clamp the
         // caller-supplied validity to a bounded maximum (see SECURITY.md).
         let (capability, validity_secs) = sanitize_token_request(capability, params.validity_secs)?;
+        self.ensure_operator_allowlisted(&capability)?;
         let validity = Duration::from_secs(validity_secs);
         let token = self
             .hypervisor
@@ -410,15 +408,133 @@ impl NexusMcpServer {
     fn resolve_wasm_path(&self, wasm_path: impl AsRef<Path>) -> Result<PathBuf> {
         resolve_wasm_path(wasm_path.as_ref(), self.wasm_module_dirs.as_slice())
     }
+
+    fn execute_wasi_tokens(
+        &self,
+        capabilities: &[Capability],
+        parent_token_id: Option<&str>,
+    ) -> Result<Vec<CapabilityToken>> {
+        if capabilities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sanitized = Vec::with_capacity(capabilities.len());
+        for capability in capabilities {
+            sanitized.push(sanitize_token_request(capability.clone(), None)?);
+        }
+
+        if let Some(parent_token_id) = parent_token_id {
+            let parent_id = Uuid::parse_str(parent_token_id)
+                .map_err(|e| anyhow::anyhow!("invalid parent_token_id '{parent_token_id}': {e}"))?;
+            return sanitized
+                .into_iter()
+                .map(|(capability, validity_secs)| {
+                    self.hypervisor
+                        .attenuate_token(
+                            parent_id,
+                            capability,
+                            "mcp_client",
+                            Duration::from_secs(validity_secs),
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "parent_token_id {parent_id} does not authorize requested capability: {e}"
+                            )
+                        })
+                })
+                .collect();
+        }
+
+        let Some(allowlist) = self.capability_allowlist.as_ref() else {
+            anyhow::bail!(
+                "execute_wasi capability requests require parent_token_id or operator allowlist {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}"
+            );
+        };
+
+        let mut tokens = Vec::with_capacity(sanitized.len());
+        for (capability, validity_secs) in sanitized {
+            if !capability_allowed_by(allowlist, &capability) {
+                anyhow::bail!(
+                    "requested capability {:?} is not allowed by {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}",
+                    capability
+                );
+            }
+            tokens.push(self.hypervisor.issue_token(
+                capability,
+                "mcp_operator_allowlist",
+                Duration::from_secs(validity_secs),
+            )?);
+        }
+        Ok(tokens)
+    }
+
+    fn ensure_operator_allowlisted(&self, capability: &Capability) -> Result<()> {
+        let Some(allowlist) = self.capability_allowlist.as_ref() else {
+            anyhow::bail!(
+                "capability token issuance requires operator allowlist {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}"
+            );
+        };
+
+        if !capability_allowed_by(allowlist, capability) {
+            anyhow::bail!(
+                "requested capability {:?} is not allowed by {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}",
+                capability
+            );
+        }
+        Ok(())
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
+const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
 
 /// Maximum token validity an MCP client may request, in seconds (1 hour).
 /// Larger caller-supplied values are clamped to this. See SECURITY.md.
 const MAX_TOKEN_VALIDITY_SECS: u64 = 3600;
+
+fn capability_allowed_by(allowlist: &[Capability], capability: &Capability) -> bool {
+    allowlist
+        .iter()
+        .any(|allowed| capability.is_subset_of(allowed))
+}
+
+fn capability_allowlist_from_env() -> Result<Option<Vec<Capability>>> {
+    let Some(raw) = std::env::var_os(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV) else {
+        return Ok(None);
+    };
+    let raw = raw.into_string().map_err(|_| {
+        anyhow::anyhow!(
+            "{NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV} must be a UTF-8 JSON array of capability objects"
+        )
+    })?;
+
+    // Format: JSON array using the same object shape as execute_wasi
+    // capabilities, for example:
+    // [{"type":"read_file","path":"/srv/nexus/modules"}]
+    // Capability type "all" is rejected even when configured by the operator.
+    let specs: Vec<CapabilitySpec> = serde_json::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!(
+            "{NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV} must be a JSON array of capability objects: {e}"
+        )
+    })?;
+
+    specs
+        .into_iter()
+        .map(|spec| {
+            let capability = parse_capability(&spec)?;
+            let (capability, _) = sanitize_token_request(capability, None).map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV} entry {:?}: {e}",
+                    spec
+                )
+            })?;
+            Ok(capability)
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
 
 fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {
     let raw_dirs: Vec<PathBuf> = match std::env::var_os(NEXUS_MCP_MODULE_DIR_ENV) {
@@ -493,8 +609,9 @@ fn sanitize_token_request(
     Ok((capability, secs))
 }
 
-fn parse_capability(spec: &CapabilitySpec) -> Option<Capability> {
+fn parse_capability(spec: &CapabilitySpec) -> Result<Capability> {
     parse_capability_from_str(&spec.r#type, spec.path.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", spec.r#type))
 }
 
 fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capability> {
