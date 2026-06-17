@@ -83,6 +83,10 @@ enum Commands {
     /// Manage the instinct store (Phase B continuous-learning).
     #[command(subcommand)]
     Instinct(InstinctCmd),
+
+    /// Validate capability profile manifests.
+    #[command(subcommand)]
+    Profile(ProfileCmd),
 }
 
 #[derive(Subcommand)]
@@ -97,6 +101,15 @@ enum InstinctCmd {
         /// or "-" to read from stdin.
         #[arg(short, long)]
         file: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileCmd {
+    /// Validate a capability profile TOML file without applying it.
+    Validate {
+        /// Path to a capability profile TOML file.
+        path: PathBuf,
     },
 }
 
@@ -145,6 +158,26 @@ fn main() -> anyhow::Result<()> {
         Commands::Instinct(cmd) => {
             run_instinct(cmd)?;
         }
+        Commands::Profile(cmd) => {
+            run_profile(cmd)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_profile(cmd: ProfileCmd) -> anyhow::Result<()> {
+    match cmd {
+        ProfileCmd::Validate { path } => match nexus::profile::load_and_validate(&path) {
+            Ok(_) => {
+                println!("profile validation OK: {}", path.display());
+            }
+            Err(error) => {
+                eprintln!("profile validation failed: {}", path.display());
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+        },
     }
 
     Ok(())
