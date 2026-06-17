@@ -6,11 +6,11 @@
 
 > **[adaptiveliquidity.github.io/Nexus](https://adaptiveliquidity.github.io/Nexus/)**
 
-Numbers are measured on GitHub-hosted runners (ubuntu-24.04) and published automatically to:
+Numbers are measured on GitHub-hosted runners (ubuntu-24.04). When the relevant external services are configured and enabled, CI publishes to:
 - [Bencher.dev](https://bencher.dev/perf/nexus-ai) — wall-clock latency and binary size tracking with Student's t-test regression detection
 - [CodSpeed.io](https://codspeed.io/adaptiveliquidity/Nexus) — deterministic CPU simulation (instruction count), heap memory tracking, and bare-metal walltime
 
-PRs are gated by both services — statistical regressions block merge. All benchmark artifacts are cryptographically signed with [Sigstore](https://www.sigstore.dev/) via GitHub OIDC for provenance attestation.
+PR regression gating depends on configured services: Bencher PR uploads require `BENCHER_PROJECT` and `BENCHER_API_TOKEN`, CodSpeed can be disabled with `CODSPEED_ENABLED=false`, and bare-metal walltime is opt-in for non-PR runs via `CODSPEED_WALLTIME_ENABLED=true`. Benchmark artifact signing uses [Sigstore](https://www.sigstore.dev/) via GitHub OIDC as a best-effort provenance step; artifacts are still uploaded if signing fails.
 
 ## Retired Claims
 
@@ -67,10 +67,10 @@ All competitor numbers on the dashboard are from cited third-party sources (vend
 
 ### Provenance
 
-Every CI benchmark run produces:
+Every CI benchmark run uploads:
 - `benchmark_evidence/runner.md` — hardware specs, date, commit SHA
 - `benchmark_evidence/criterion_raw.log` — raw Criterion output
-- `criterion_artifacts.sigstore` — Sigstore signature bundle
+- `criterion_artifacts.sigstore` — Sigstore signature bundle when best-effort signing succeeds
 
 Verify any artifact:
 ```bash

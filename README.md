@@ -116,19 +116,11 @@ let result = hypervisor.execute_tool_wasi(tool, input, &[token]).await?;
 Or use the `WasiToolConfig` builder for multi-mount WASI execution:
 
 ```rust
-use nexus::{WasiToolConfig, WasiMount, WasiAccess};
+use nexus::{WasiAccess, WasiToolConfig};
 
 let config = WasiToolConfig::new()
-    .with_mount(WasiMount {
-        guest_path: "/input".into(),
-        host_path: "/data/input".into(),
-        access: WasiAccess::ReadOnly,
-    })
-    .with_mount(WasiMount {
-        guest_path: "/output".into(),
-        host_path: "/data/output".into(),
-        access: WasiAccess::ReadWrite,
-    });
+    .with_mount("/data/input", "/input", WasiAccess::ReadOnly)
+    .with_mount("/data/output", "/output", WasiAccess::ReadWrite);
 
 let result = hypervisor
     .execute_tool_wasi_with_config(tool, input, &tokens, config)
@@ -300,7 +292,7 @@ nexus/
 │   ├── wasi_capability_demo/    # Multi-file WASI capability + denial demo
 │   ├── capture_error.rs         # Failure-mode capture
 │   └── instinct_ab.rs           # Instinct A/B testing
-├── tests/                       # 184+ integration tests
+├── tests/                       # Integration test suite
 ├── benches/
 │   └── nexus_validation.rs      # Primitive + integrated benchmarks
 ├── scripts/
