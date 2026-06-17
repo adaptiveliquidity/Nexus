@@ -81,7 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Benchmarks**: Criterion + CodSpeed + Bencher pipeline
   - Primitive benchmarks: cold_start, snapshot_create, snapshot_rollback, execute_tool
   - Integrated benchmarks: capability_checked, input_fed, precompiled, full_stack
-  - Signed artifacts via Sigstore, published to Bencher.dev and CodSpeed.io
+  - Conditional publishing to Bencher.dev and CodSpeed.io, with best-effort Sigstore artifact signing
+  - PR benchmark runs intentionally ignore `.github/**` changes, so workflow-only edits do not trigger benchmark PR runs
 
 ### Performance Metrics
 
