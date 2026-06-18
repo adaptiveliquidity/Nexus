@@ -1025,6 +1025,153 @@ async fn profile_enforcement_allows_matching_capability() {
     assert_eq!(parsed["error"], Value::Null, "unexpected error: {parsed}");
 }
 
+/// Write a capability profile (one read_file entry to satisfy the non-empty
+/// requirement) plus the supplied raw `[mcp]` block. Uses TOML literal strings
+/// so Windows backslash paths do not need escaping.
+fn profile_with_mcp_block(dir: &Path, mcp_block: &str) -> std::path::PathBuf {
+    let path = dir.join("mcp-policy-profile.toml");
+    let contents = format!(
+        "name = 'mcp-policy'\n\n[[capabilities]]\ntype = 'read_file'\npath = '{}'\n\n{}\n",
+        dir.display(),
+        mcp_block
+    );
+    fs::write(&path, contents).expect("write mcp policy profile");
+    path
+}
+
+#[tokio::test]
+async fn mcp_tool_allowlist_blocks_disallowed_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile_path =
+        profile_with_mcp_block(tmp.path(), "[mcp]\ntool_allowlist = ['nexus_execute']");
+    let mut client = McpClient::spawn_with_module_dir_allowlist_and_profile(
+        Some(tmp.path()),
+        None,
+        Some(&profile_path),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_snapshot_create", "arguments": {} }),
+        )
+        .await;
+
+    let parsed = tool_json(&resp);
+    assert_eq!(
+        parsed["code"].as_i64(),
+        Some(-32602),
+        "tool-allowlist denial should use MCP invalid-params code: {parsed}"
+    );
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("tool nexus_snapshot_create is not in the MCP tool allowlist"),
+        "expected tool-allowlist rejection, got: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_tool_allowlist_permits_listed_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile_path = profile_with_mcp_block(
+        tmp.path(),
+        "[mcp]\ntool_allowlist = ['nexus_snapshot_create']",
+    );
+    let mut client = McpClient::spawn_with_module_dir_allowlist_and_profile(
+        Some(tmp.path()),
+        None,
+        Some(&profile_path),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_snapshot_create", "arguments": {} }),
+        )
+        .await;
+
+    let parsed = tool_json(&resp);
+    assert_eq!(
+        parsed["success"], true,
+        "an allowlisted tool should be permitted: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_snapshot_disabled_blocks_snapshot_create() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile_path = profile_with_mcp_block(tmp.path(), "[mcp]\nsnapshot_enabled = false");
+    let mut client = McpClient::spawn_with_module_dir_allowlist_and_profile(
+        Some(tmp.path()),
+        None,
+        Some(&profile_path),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_snapshot_create", "arguments": {} }),
+        )
+        .await;
+
+    let parsed = tool_json(&resp);
+    assert_eq!(
+        parsed["code"].as_i64(),
+        Some(-32602),
+        "snapshot-disabled denial should use MCP invalid-params code: {parsed}"
+    );
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("snapshot tools are disabled by the active profile"),
+        "expected snapshot-disabled rejection, got: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_fork_disabled_blocks_fork_and_race() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile_path = profile_with_mcp_block(tmp.path(), "[mcp]\nfork_enabled = false");
+    let mut client = McpClient::spawn_with_module_dir_allowlist_and_profile(
+        Some(tmp.path()),
+        None,
+        Some(&profile_path),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_fork_and_race",
+                "arguments": { "wasm_path": "unused.wasm", "branches": [ {} ] }
+            }),
+        )
+        .await;
+
+    let parsed = tool_json(&resp);
+    assert_eq!(
+        parsed["code"].as_i64(),
+        Some(-32602),
+        "fork-disabled denial should use MCP invalid-params code: {parsed}"
+    );
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("fork_and_race is disabled by the active profile"),
+        "expected fork-disabled rejection, got: {parsed}"
+    );
+}
+
 #[tokio::test]
 async fn no_profile_env_skips_enforcement() {
     let tmp = tempfile::tempdir().unwrap();

@@ -331,6 +331,7 @@ impl NexusMcpServer {
     }
 
     async fn do_execute(&self, params: ExecuteParams) -> Result<ToolOutputResponse> {
+        self.ensure_tool_allowed("nexus_execute")?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -348,6 +349,7 @@ impl NexusMcpServer {
     }
 
     async fn do_execute_wasi(&self, params: ExecuteWasiParams) -> Result<ToolOutputResponse> {
+        self.ensure_tool_allowed("nexus_execute_wasi")?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -377,6 +379,8 @@ impl NexusMcpServer {
     }
 
     fn do_snapshot_create(&self, params: SnapshotCreateParams) -> Result<SnapshotCreateResponse> {
+        self.ensure_tool_allowed("nexus_snapshot_create")?;
+        self.ensure_snapshot_enabled()?;
         let label = params.label.unwrap_or_else(|| "mcp_snapshot".to_string());
         let source = params.source.as_deref().unwrap_or("empty_baseline");
 
@@ -424,6 +428,8 @@ impl NexusMcpServer {
     }
 
     fn do_snapshot_rollback(&self, params: SnapshotRollbackParams) -> Result<RollbackResponse> {
+        self.ensure_tool_allowed("nexus_snapshot_rollback")?;
+        self.ensure_snapshot_enabled()?;
         let id = Uuid::parse_str(&params.snapshot_id)
             .map_err(|e| anyhow::anyhow!("Invalid snapshot UUID: {e}"))?;
 
@@ -443,6 +449,7 @@ impl NexusMcpServer {
     }
 
     fn do_issue_token(&self, params: IssueTokenParams) -> Result<TokenResponse> {
+        self.ensure_tool_allowed("nexus_issue_token")?;
         let capability = parse_capability_from_str(&params.capability, params.path.as_deref())
             .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", params.capability))?;
 
@@ -463,6 +470,8 @@ impl NexusMcpServer {
     }
 
     async fn do_fork_and_race(&self, params: ForkAndRaceParams) -> Result<ForkAndRaceResponse> {
+        self.ensure_tool_allowed("nexus_fork_and_race")?;
+        self.ensure_fork_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -667,6 +676,45 @@ impl NexusMcpServer {
         }
         Ok(())
     }
+
+    /// Deny a tool call when the active profile's `[mcp].tool_allowlist` excludes it.
+    fn ensure_tool_allowed(&self, tool: &str) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().allows_tool(tool) {
+            return Ok(());
+        }
+        Err(profile_denial(format!(
+            "tool {tool} is not in the MCP tool allowlist"
+        )))
+    }
+
+    /// Deny the snapshot tools when the active profile sets `snapshot_enabled = false`.
+    fn ensure_snapshot_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().snapshot_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "snapshot tools are disabled by the active profile".to_string(),
+        ))
+    }
+
+    /// Deny fork-and-race when the active profile sets `fork_enabled = false`.
+    fn ensure_fork_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().fork_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "fork_and_race is disabled by the active profile".to_string(),
+        ))
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -726,6 +774,15 @@ fn check_tokens_against_profile(
     }
 
     Ok(())
+}
+
+/// Build a profile-denial error using the canonical prefix that
+/// [`mcp_error_code`] maps to the MCP `-32602` invalid-params code.
+fn profile_denial(detail: String) -> anyhow::Error {
+    NexusError::CapabilityDenied(format!(
+        "capability not permitted by active profile: {detail}"
+    ))
+    .into()
 }
 
 fn profile_manifest_from_env() -> Result<Option<CapabilityProfileManifest>> {
