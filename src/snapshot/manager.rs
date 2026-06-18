@@ -305,11 +305,18 @@ impl SnapshotRingBuffer {
             if let Some(old) = self.snapshots.pop_front() {
                 self.index.remove(&old.id);
             }
+            // Rebuild all positions: pop_front shifts the VecDeque so every
+            // surviving entry's position decreases by 1.
+            self.index.clear();
+            for (i, s) in self.snapshots.iter().enumerate() {
+                self.index.insert(s.id, i);
+            }
         }
 
         let id = snapshot.id;
+        let pos = self.snapshots.len();
         self.snapshots.push_back(snapshot);
-        self.index.insert(id, self.snapshots.len() - 1);
+        self.index.insert(id, pos);
     }
 
     /// Get a snapshot by ID
@@ -792,7 +799,12 @@ pub fn restore_globals<T>(
                 GlobalValue::F32(v) => wasmtime::Val::F32(v.to_bits()),
                 GlobalValue::F64(v) => wasmtime::Val::F64(v.to_bits()),
             };
-            let _ = global.set(&mut *store, val);
+            global.set(&mut *store, val).map_err(|e| {
+                NexusError::RollbackFailed(format!(
+                    "failed to restore global '{}': {e}",
+                    snap.name
+                ))
+            })?;
         }
     }
     Ok(())

@@ -289,7 +289,10 @@ fn extract_recovery_actions(body: &serde_json::Value) -> Vec<RecoveryAction> {
         });
     let Some(text) = text else { return Vec::new() };
 
-    let parsed: Vec<String> = serde_json::from_str(text).unwrap_or_default();
+    let parsed: Vec<String> = serde_json::from_str(text).unwrap_or_else(|e| {
+        tracing::warn!(target: "nexus.llm", error = %e, "LLM response JSON parse failed; treating as no recovery actions");
+        Vec::new()
+    });
     parsed
         .into_iter()
         .map(|s| RecoveryAction {

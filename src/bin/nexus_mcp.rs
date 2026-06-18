@@ -322,11 +322,27 @@ struct ForkAndRaceResponse {
 
 impl NexusMcpServer {
     fn new(hypervisor: Arc<NexusHypervisor>) -> Result<Self> {
+        let capability_profile = profile_manifest_from_env()?.map(Arc::new);
+
+        // Slice 2: when a profile defines execution.module_dirs, those replace
+        // NEXUS_MCP_MODULE_DIR so the allowed module set is profile-declared and
+        // diffable rather than implicit in the environment.
+        let wasm_module_dirs = if let Some(profile) = &capability_profile {
+            let dirs = &profile.execution_policy().module_dirs;
+            if !dirs.is_empty() {
+                canonicalize_module_dirs(dirs)?
+            } else {
+                allowed_wasm_module_dirs()?
+            }
+        } else {
+            allowed_wasm_module_dirs()?
+        };
+
         Ok(Self {
             hypervisor,
-            wasm_module_dirs: Arc::new(allowed_wasm_module_dirs()?),
+            wasm_module_dirs: Arc::new(wasm_module_dirs),
             capability_allowlist: Arc::new(capability_allowlist_from_env()?),
-            capability_profile: profile_manifest_from_env()?.map(Arc::new),
+            capability_profile,
         })
     }
 
@@ -343,7 +359,8 @@ impl NexusMcpServer {
         }
 
         let input = params.input.unwrap_or(serde_json::json!({}));
-        self.check_tokens_against_active_profile(&[])?;
+        // Pure-compute path carries no capability tokens; profile gating for
+        // this tool is handled by ensure_tool_allowed above (MCP tool allowlist).
         let output = self.hypervisor.execute_tool(tool, input).await?;
         Ok(ToolOutputResponse::from(output))
     }
@@ -885,6 +902,26 @@ fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {
         .collect()
 }
 
+/// Canonicalize profile-declared module directories (Slice 2 path).
+fn canonicalize_module_dirs(dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if dirs.is_empty() {
+        anyhow::bail!("profile execution.module_dirs must contain at least one directory");
+    }
+    dirs.iter()
+        .map(|dir| {
+            let canonical = std::fs::canonicalize(dir)
+                .map_err(|e| anyhow::anyhow!("invalid profile module dir '{}': {e}", dir.display()))?;
+            if !canonical.is_dir() {
+                anyhow::bail!(
+                    "invalid profile module dir '{}': not a directory",
+                    dir.display()
+                );
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
 fn resolve_wasm_path(wasm_path: &Path, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
     let requested_path = absolute_request_path(wasm_path)?;
     if !path_is_lexically_allowed(&requested_path, allowed_dirs) {
@@ -976,22 +1013,36 @@ fn sanitize_token_request(
 }
 
 fn parse_capability(spec: &CapabilitySpec) -> Result<Capability> {
+    let path_required = matches!(
+        spec.r#type.as_str(),
+        "read_file" | "write_file" | "list_dir" | "execute" | "mount_tmpfs"
+    );
+    if path_required && spec.path.is_none() {
+        anyhow::bail!(
+            "capability type '{}' requires a 'path' field",
+            spec.r#type
+        );
+    }
+    let url_required = matches!(spec.r#type.as_str(), "http_get" | "http_post");
+    if url_required && spec.path.is_none() {
+        anyhow::bail!(
+            "capability type '{}' requires a 'path' (URL pattern) field",
+            spec.r#type
+        );
+    }
     parse_capability_from_str(&spec.r#type, spec.path.as_deref())
         .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", spec.r#type))
 }
 
 fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capability> {
-    let p = || PathBuf::from(path.unwrap_or("."));
-    let s = || path.unwrap_or("*").to_string();
-
     match cap_type {
-        "read_file" => Some(Capability::ReadFile(p())),
-        "write_file" => Some(Capability::WriteFile(p())),
-        "list_dir" => Some(Capability::ListDirectory(p())),
-        "http_get" => Some(Capability::HttpGet(s())),
-        "http_post" => Some(Capability::HttpPost(s())),
-        "execute" => Some(Capability::ExecuteBinary(p())),
-        "mount_tmpfs" => Some(Capability::MountTmpfs(p())),
+        "read_file" => Some(Capability::ReadFile(PathBuf::from(path?))),
+        "write_file" => Some(Capability::WriteFile(PathBuf::from(path?))),
+        "list_dir" => Some(Capability::ListDirectory(PathBuf::from(path?))),
+        "http_get" => Some(Capability::HttpGet(path?.to_string())),
+        "http_post" => Some(Capability::HttpPost(path?.to_string())),
+        "execute" => Some(Capability::ExecuteBinary(PathBuf::from(path?))),
+        "mount_tmpfs" => Some(Capability::MountTmpfs(PathBuf::from(path?))),
         "all" => Some(Capability::All),
         _ => None,
     }
