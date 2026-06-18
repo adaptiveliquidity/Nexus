@@ -2,24 +2,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROOF_CAPSULE_VERSION: u32 = 1;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedDigest {
+    pub algorithm: String,
+    pub value: String,
+    pub public_recomputable: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProofCapsule {
-    pub version: u32,
-    pub capsule_id: Uuid,
-    pub subject: ProofSubject,
-    pub tool: ToolIdentity,
-    pub input: InputIdentity,
-    pub policy: PolicyProfileRef,
-    pub capabilities: CapabilityEvidence,
-    pub snapshot: Option<SnapshotEvidence>,
-    pub failure: Option<FailureEvidence>,
-    pub rollback: Option<RollbackEvidence>,
-    pub branches: Option<BranchRaceEvidence>,
-    pub redaction: RedactionReport,
-    pub limitations: Vec<String>,
-    pub signature: Option<SignatureEnvelope>,
+pub enum DigestMode {
+    Sha256Public,
+    HmacSha256Private,
+    RedactedNoDigest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SnapshotKind {
+    LatestRuntime,
+    EmptyBaseline,
+    Diff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,22 +47,22 @@ pub struct InputIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyProfileRef {
-    pub profile_digest: Option<TypedDigest>,
-    pub profile_name: Option<String>,
-    pub mode: PolicyEnforcementMode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyEnforcementMode {
     UnprofiledDev,
     ProfileValidatedOnly,
     ProfileLoadedMcp,
     ProfileEnforcedMcpCapabilitiesOnly,
-    /// RESERVED: never emitted in v1.
+    /// RESERVED: never emitted in v1
     ProfileEnforcedMcpToolAndCapability,
-    /// RESERVED: never emitted in v1.
+    /// RESERVED: never emitted in v1
     ProfileEnforcedRuntime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyProfileRef {
+    pub profile_digest: Option<TypedDigest>,
+    pub profile_name: Option<String>,
+    pub mode: PolicyEnforcementMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,15 +77,8 @@ pub struct SnapshotEvidence {
     pub snapshot_id: Uuid,
     pub snapshot_kind: SnapshotKind,
     pub memory_digest: TypedDigest,
-    pub original_size: usize,
-    pub compressed_size: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SnapshotKind {
-    LatestRuntime,
-    EmptyBaseline,
-    Diff,
+    pub original_size: u64,
+    pub compressed_size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,16 +92,16 @@ pub struct FailureEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RollbackEvidence {
     pub occurred: bool,
-    pub from_snapshot_id: Uuid,
-    pub reason: String,
+    pub from_snapshot_id: Option<Uuid>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchRaceEvidence {
     pub source_snapshot_id: Option<Uuid>,
-    pub winner_branch_id: Uuid,
-    pub branches_tried: usize,
-    pub branches_succeeded: usize,
+    pub winner_branch_id: String,
+    pub branches_tried: u32,
+    pub branches_succeeded: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,15 +121,31 @@ pub struct SignatureEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedDigest {
-    pub algorithm: String,
-    pub value: String,
-    pub public_recomputable: bool,
+pub struct ProofCapsule {
+    pub version: String,
+    pub capsule_id: Uuid,
+    pub subject: ProofSubject,
+    pub tool: ToolIdentity,
+    pub input: InputIdentity,
+    pub policy: PolicyProfileRef,
+    pub capabilities: CapabilityEvidence,
+    pub snapshot: Option<SnapshotEvidence>,
+    pub failure: Option<FailureEvidence>,
+    pub rollback: Option<RollbackEvidence>,
+    pub branches: Option<BranchRaceEvidence>,
+    pub redaction: RedactionReport,
+    pub limitations: Vec<String>,
+    pub signature: Option<SignatureEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DigestMode {
-    Sha256Public,
-    HmacSha256Private,
-    RedactedNoDigest,
+pub struct ProofScorecard {
+    pub capsule_id: Uuid,
+    pub version: String,
+    pub has_signature: bool,
+    pub has_failure: bool,
+    pub has_rollback: bool,
+    pub redaction_count: usize,
+    pub limitations_count: usize,
+    pub scorecard_pass: bool,
 }

@@ -322,15 +322,32 @@ struct ForkAndRaceResponse {
 
 impl NexusMcpServer {
     fn new(hypervisor: Arc<NexusHypervisor>) -> Result<Self> {
+        let capability_profile = profile_manifest_from_env()?.map(Arc::new);
+
+        // Slice 2: when a profile defines execution.module_dirs, those replace
+        // NEXUS_MCP_MODULE_DIR so the allowed module set is profile-declared and
+        // diffable rather than implicit in the environment.
+        let wasm_module_dirs = if let Some(profile) = &capability_profile {
+            let dirs = &profile.execution_policy().module_dirs;
+            if !dirs.is_empty() {
+                canonicalize_module_dirs(dirs)?
+            } else {
+                allowed_wasm_module_dirs()?
+            }
+        } else {
+            allowed_wasm_module_dirs()?
+        };
+
         Ok(Self {
             hypervisor,
-            wasm_module_dirs: Arc::new(allowed_wasm_module_dirs()?),
+            wasm_module_dirs: Arc::new(wasm_module_dirs),
             capability_allowlist: Arc::new(capability_allowlist_from_env()?),
-            capability_profile: profile_manifest_from_env()?.map(Arc::new),
+            capability_profile,
         })
     }
 
     async fn do_execute(&self, params: ExecuteParams) -> Result<ToolOutputResponse> {
+        self.ensure_tool_allowed("nexus_execute")?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -342,12 +359,14 @@ impl NexusMcpServer {
         }
 
         let input = params.input.unwrap_or(serde_json::json!({}));
-        self.check_tokens_against_active_profile(&[])?;
+        // Pure-compute path carries no capability tokens; profile gating for
+        // this tool is handled by ensure_tool_allowed above (MCP tool allowlist).
         let output = self.hypervisor.execute_tool(tool, input).await?;
         Ok(ToolOutputResponse::from(output))
     }
 
     async fn do_execute_wasi(&self, params: ExecuteWasiParams) -> Result<ToolOutputResponse> {
+        self.ensure_tool_allowed("nexus_execute_wasi")?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -377,6 +396,8 @@ impl NexusMcpServer {
     }
 
     fn do_snapshot_create(&self, params: SnapshotCreateParams) -> Result<SnapshotCreateResponse> {
+        self.ensure_tool_allowed("nexus_snapshot_create")?;
+        self.ensure_snapshot_enabled()?;
         let label = params.label.unwrap_or_else(|| "mcp_snapshot".to_string());
         let source = params.source.as_deref().unwrap_or("empty_baseline");
 
@@ -424,6 +445,8 @@ impl NexusMcpServer {
     }
 
     fn do_snapshot_rollback(&self, params: SnapshotRollbackParams) -> Result<RollbackResponse> {
+        self.ensure_tool_allowed("nexus_snapshot_rollback")?;
+        self.ensure_snapshot_enabled()?;
         let id = Uuid::parse_str(&params.snapshot_id)
             .map_err(|e| anyhow::anyhow!("Invalid snapshot UUID: {e}"))?;
 
@@ -443,6 +466,7 @@ impl NexusMcpServer {
     }
 
     fn do_issue_token(&self, params: IssueTokenParams) -> Result<TokenResponse> {
+        self.ensure_tool_allowed("nexus_issue_token")?;
         let capability = parse_capability_from_str(&params.capability, params.path.as_deref())
             .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", params.capability))?;
 
@@ -463,6 +487,8 @@ impl NexusMcpServer {
     }
 
     async fn do_fork_and_race(&self, params: ForkAndRaceParams) -> Result<ForkAndRaceResponse> {
+        self.ensure_tool_allowed("nexus_fork_and_race")?;
+        self.ensure_fork_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -667,6 +693,45 @@ impl NexusMcpServer {
         }
         Ok(())
     }
+
+    /// Deny a tool call when the active profile's `[mcp].tool_allowlist` excludes it.
+    fn ensure_tool_allowed(&self, tool: &str) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().allows_tool(tool) {
+            return Ok(());
+        }
+        Err(profile_denial(format!(
+            "tool {tool} is not in the MCP tool allowlist"
+        )))
+    }
+
+    /// Deny the snapshot tools when the active profile sets `snapshot_enabled = false`.
+    fn ensure_snapshot_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().snapshot_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "snapshot tools are disabled by the active profile".to_string(),
+        ))
+    }
+
+    /// Deny fork-and-race when the active profile sets `fork_enabled = false`.
+    fn ensure_fork_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().fork_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "fork_and_race is disabled by the active profile".to_string(),
+        ))
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -726,6 +791,15 @@ fn check_tokens_against_profile(
     }
 
     Ok(())
+}
+
+/// Build a profile-denial error using the canonical prefix that
+/// [`mcp_error_code`] maps to the MCP `-32602` invalid-params code.
+fn profile_denial(detail: String) -> anyhow::Error {
+    NexusError::CapabilityDenied(format!(
+        "capability not permitted by active profile: {detail}"
+    ))
+    .into()
 }
 
 fn profile_manifest_from_env() -> Result<Option<CapabilityProfileManifest>> {
@@ -828,6 +902,26 @@ fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {
         .collect()
 }
 
+/// Canonicalize profile-declared module directories (Slice 2 path).
+fn canonicalize_module_dirs(dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if dirs.is_empty() {
+        anyhow::bail!("profile execution.module_dirs must contain at least one directory");
+    }
+    dirs.iter()
+        .map(|dir| {
+            let canonical = std::fs::canonicalize(dir)
+                .map_err(|e| anyhow::anyhow!("invalid profile module dir '{}': {e}", dir.display()))?;
+            if !canonical.is_dir() {
+                anyhow::bail!(
+                    "invalid profile module dir '{}': not a directory",
+                    dir.display()
+                );
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
 fn resolve_wasm_path(wasm_path: &Path, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
     let requested_path = absolute_request_path(wasm_path)?;
     if !path_is_lexically_allowed(&requested_path, allowed_dirs) {
@@ -919,22 +1013,36 @@ fn sanitize_token_request(
 }
 
 fn parse_capability(spec: &CapabilitySpec) -> Result<Capability> {
+    let path_required = matches!(
+        spec.r#type.as_str(),
+        "read_file" | "write_file" | "list_dir" | "execute" | "mount_tmpfs"
+    );
+    if path_required && spec.path.is_none() {
+        anyhow::bail!(
+            "capability type '{}' requires a 'path' field",
+            spec.r#type
+        );
+    }
+    let url_required = matches!(spec.r#type.as_str(), "http_get" | "http_post");
+    if url_required && spec.path.is_none() {
+        anyhow::bail!(
+            "capability type '{}' requires a 'path' (URL pattern) field",
+            spec.r#type
+        );
+    }
     parse_capability_from_str(&spec.r#type, spec.path.as_deref())
         .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", spec.r#type))
 }
 
 fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capability> {
-    let p = || PathBuf::from(path.unwrap_or("."));
-    let s = || path.unwrap_or("*").to_string();
-
     match cap_type {
-        "read_file" => Some(Capability::ReadFile(p())),
-        "write_file" => Some(Capability::WriteFile(p())),
-        "list_dir" => Some(Capability::ListDirectory(p())),
-        "http_get" => Some(Capability::HttpGet(s())),
-        "http_post" => Some(Capability::HttpPost(s())),
-        "execute" => Some(Capability::ExecuteBinary(p())),
-        "mount_tmpfs" => Some(Capability::MountTmpfs(p())),
+        "read_file" => Some(Capability::ReadFile(PathBuf::from(path?))),
+        "write_file" => Some(Capability::WriteFile(PathBuf::from(path?))),
+        "list_dir" => Some(Capability::ListDirectory(PathBuf::from(path?))),
+        "http_get" => Some(Capability::HttpGet(path?.to_string())),
+        "http_post" => Some(Capability::HttpPost(path?.to_string())),
+        "execute" => Some(Capability::ExecuteBinary(PathBuf::from(path?))),
+        "mount_tmpfs" => Some(Capability::MountTmpfs(PathBuf::from(path?))),
         "all" => Some(Capability::All),
         _ => None,
     }

@@ -3,3 +3,16 @@ name = "sample"
 [[capabilities]]
 type = "read_file"
 path = "/tmp"
+
+[[capabilities]]
+type = "list_dir"
+path = "/srv/nexus/modules"
+
+[execution]
+module_dirs = ["/srv/nexus/modules"]
+daemon_auth_required = false
+
+[mcp]
+tool_allowlist = ["nexus_execute", "nexus_execute_wasi", "nexus_issue_token"]
+snapshot_enabled = true
+fork_enabled = false

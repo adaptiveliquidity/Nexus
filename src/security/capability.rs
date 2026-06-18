@@ -230,7 +230,12 @@ impl CapabilityToken {
             return false;
         };
 
-        let signature_array: [u8; 64] = self.signature.clone().try_into().unwrap_or([0u8; 64]);
+        let Ok(signature_array) = <[u8; 64]>::try_from(self.signature.as_slice()) else {
+            // Reject tokens with wrong-length signatures immediately — do not
+            // substitute a zero array which could be exploitable if a future
+            // ed25519 implementation changes rejection behaviour for all-zero sigs.
+            return false;
+        };
         let sig = Signature::from_bytes(&signature_array);
 
         verifying_key.verify(&data_to_verify, &sig).is_ok()

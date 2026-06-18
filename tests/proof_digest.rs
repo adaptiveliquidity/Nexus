@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use nexus::proof::{
     canonical_bytes, capsule_digest, digest_with_key, CapabilityEvidence, InputIdentity,
     PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofHmacKey, ProofSubject,
-    RedactionReport, SignatureEnvelope, ToolIdentity, TypedDigest, PROOF_CAPSULE_VERSION,
+    RedactionReport, SignatureEnvelope, ToolIdentity, TypedDigest,
 };
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ fn sample_signature() -> SignatureEnvelope {
 
 fn sample_capsule(signature: Option<SignatureEnvelope>) -> ProofCapsule {
     ProofCapsule {
-        version: PROOF_CAPSULE_VERSION,
+        version: "1".to_string(),
         capsule_id: uuid("55555555-5555-4555-8555-555555555555"),
         subject: ProofSubject {
             run_id: uuid("66666666-6666-4666-8666-666666666666"),

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use nexus::proof::{
     redaction::{RedactionField, RedactionPolicy},
     CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
-    ProofHmacKey, ProofSubject, RedactionReport, ToolIdentity, TypedDigest, PROOF_CAPSULE_VERSION,
+    ProofHmacKey, ProofSubject, RedactionReport, ToolIdentity, TypedDigest,
 };
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ fn typed_digest(algorithm: &str, value: &str, public_recomputable: bool) -> Type
 
 fn sample_capsule(redaction: RedactionReport) -> ProofCapsule {
     ProofCapsule {
-        version: PROOF_CAPSULE_VERSION,
+        version: "1".to_string(),
         capsule_id: uuid("55555555-5555-4555-8555-555555555555"),
         subject: ProofSubject {
             run_id: uuid("66666666-6666-4666-8666-666666666666"),

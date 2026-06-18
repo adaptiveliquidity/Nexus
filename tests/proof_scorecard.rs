@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use nexus::proof::{
     CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
     ProofScorecard, ProofSubject, RedactionReport, RollbackEvidence, ToolIdentity, TypedDigest,
-    PROOF_CAPSULE_VERSION,
 };
 use uuid::Uuid;
 
@@ -24,7 +23,7 @@ fn typed_digest(algorithm: &str, value: &str, public_recomputable: bool) -> Type
 
 fn sample_capsule() -> ProofCapsule {
     ProofCapsule {
-        version: PROOF_CAPSULE_VERSION,
+        version: "1".to_string(),
         capsule_id: uuid("55555555-5555-4555-8555-555555555555"),
         subject: ProofSubject {
             run_id: uuid("66666666-6666-4666-8666-666666666666"),
@@ -84,8 +83,8 @@ fn scorecard_reports_rollback_when_rollback_occurred() {
     let mut capsule = sample_capsule();
     capsule.rollback = Some(RollbackEvidence {
         occurred: true,
-        from_snapshot_id: uuid("22222222-2222-4222-8222-222222222222"),
-        reason: "restore latest runtime state".to_owned(),
+        from_snapshot_id: Some(uuid("22222222-2222-4222-8222-222222222222")),
+        reason: Some("restore latest runtime state".to_owned()),
     });
 
     let scorecard = ProofScorecard::from_capsule(&capsule);
