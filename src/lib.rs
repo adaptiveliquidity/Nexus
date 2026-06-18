@@ -8,6 +8,7 @@ pub mod error;
 pub mod hypervisor;
 pub mod instinct;
 pub mod profile;
+pub mod proof;
 pub mod sandbox;
 pub mod security;
 pub mod snapshot;
