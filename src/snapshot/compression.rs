@@ -8,10 +8,6 @@ pub enum CompressionAlgo {
     /// Zstd compression (good balance of speed and ratio)
     #[default]
     Zstd,
-    /// LZ4 (fastest, lower ratio)
-    Lz4,
-    /// LZMA (slowest, highest ratio)
-    Lzma,
     /// No compression
     None,
 }
@@ -68,10 +64,6 @@ pub fn compress(data: &[u8], config: &CompressionConfig) -> Result<CompressedDat
             algorithm: config.algorithm,
             level: config.level,
         }),
-        _ => Err(format!(
-            "Algorithm {:?} not yet implemented",
-            config.algorithm
-        )),
     }
 }
 
@@ -84,7 +76,6 @@ pub fn decompress(
     match algorithm {
         CompressionAlgo::Zstd => decompress_zstd(data, original_size),
         CompressionAlgo::None => Ok(data.to_vec()),
-        _ => Err(format!("Algorithm {:?} not yet implemented", algorithm)),
     }
 }
 

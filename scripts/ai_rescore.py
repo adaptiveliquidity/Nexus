@@ -130,12 +130,18 @@ def main() -> int:
     prompt = build_prompt(index)
 
     scored = []
-    try:
-        for _ in range(args.samples):
+    last_err: Exception | None = None
+    for _ in range(args.samples):
+        try:
             model, text = score_once(prompt)
-            scored.append((parse_accuracy(text), model, text))
-    except (RuntimeError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
+            accuracy = parse_accuracy(text)
+            scored.append((accuracy, model, text))
+        except (RuntimeError, ValueError) as exc:
+            last_err = exc
+            continue
+
+    if not scored:
+        print(str(last_err), file=sys.stderr)
         return 2
 
     _, model, text = sorted(scored, key=lambda sample: sample[0])[len(scored) // 2]
