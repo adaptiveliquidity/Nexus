@@ -16,6 +16,7 @@ pub use speculative::{
     SpeculativeResult,
 };
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::sync::{Arc, RwLock};
@@ -24,6 +25,12 @@ use std::time::{Duration, Instant};
 use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
+use crate::proof::receipt::{ExecutionReceipt, FailureModeLite};
+use crate::proof::schema::{
+    CapabilityEvidence, FailureEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef,
+    ProofCapsule, ProofSubject, RedactionReport, RollbackEvidence, SnapshotEvidence, SnapshotKind,
+    ToolIdentity, TypedDigest,
+};
 use crate::sandbox::{
     FuelBudgetPolicy, FuelProfile, PoolConfig, RestoredExecutionState, SandboxConfig, SandboxPool,
     WasiToolConfig, WasmSandbox,
@@ -511,6 +518,193 @@ impl NexusHypervisor {
         _input: serde_json::Value,
     ) -> Result<ToolOutput> {
         self.execute_tool_with_tokens(tool, _input, &[]).await
+    }
+
+    /// Execute a tool through the normal sandbox path and return an unsigned
+    /// runtime proof capsule for the observed execution.
+    ///
+    /// This is the opt-in proof path. The existing `execute_tool` method is
+    /// unchanged and does not construct proof artifacts.
+    pub async fn execute_tool_proof(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+    ) -> Result<(ToolOutput, ProofCapsule)> {
+        let run_id = uuid::Uuid::new_v4();
+        let started_at = Utc::now();
+        let input_bytes = serde_json::to_vec(&input).map_err(|e| {
+            NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
+        })?;
+        let module_digest = TypedDigest::sha256_public(&tool.wasm_bytes);
+        let input_digest = TypedDigest::sha256_public(&input_bytes);
+        let required_caps: Vec<String> = tool
+            .required_capabilities
+            .iter()
+            .map(Capability::description)
+            .collect();
+
+        let output = self.execute_tool(tool.clone(), input).await?;
+        let finished_at = Utc::now();
+
+        let snapshot = output
+            .snapshot_id
+            .map(|snapshot_id| self.snapshot_evidence(snapshot_id));
+        let failure = Self::failure_lite(&output);
+        let rollback = match (output.rollback_performed, output.snapshot_id) {
+            (true, Some(snapshot_id)) => Some((
+                true,
+                snapshot_id,
+                "restore latest runtime state after failed execution".to_string(),
+            )),
+            _ => None,
+        };
+
+        let receipt = ExecutionReceipt {
+            run_id,
+            started_at,
+            finished_at,
+            tool_name: tool.name.clone(),
+            entrypoint: tool.entry_point.clone(),
+            module_sha256: module_digest.value.clone(),
+            input_sha256: input_digest.value.clone(),
+            input_bytes_len: input_bytes.len(),
+            required_caps,
+            granted_caps: Vec::new(),
+            policy_mode: PolicyEnforcementMode::UnprofiledDev,
+            profile: None,
+            snapshot,
+            failure,
+            rollback,
+            branches: None,
+        };
+
+        let capsule = Self::capsule_from_receipt(&receipt, &output);
+        Ok((output, capsule))
+    }
+
+    fn snapshot_evidence(&self, snapshot_id: uuid::Uuid) -> SnapshotEvidence {
+        if let Some(snapshot) = self.current_snapshot.read().unwrap().clone() {
+            if snapshot.id == snapshot_id {
+                return SnapshotEvidence {
+                    snapshot_id,
+                    snapshot_kind: SnapshotKind::LatestRuntime,
+                    memory_digest: TypedDigest {
+                        algorithm: "sha256".to_string(),
+                        value: snapshot.memory_checksum,
+                        public_recomputable: true,
+                    },
+                    original_size: snapshot.original_size as u64,
+                    compressed_size: snapshot.compressed_size as u64,
+                };
+            }
+        }
+
+        SnapshotEvidence {
+            snapshot_id,
+            snapshot_kind: SnapshotKind::Diff,
+            memory_digest: TypedDigest::redacted(),
+            original_size: 0,
+            compressed_size: 0,
+        }
+    }
+
+    fn failure_lite(output: &ToolOutput) -> Option<FailureModeLite> {
+        output
+            .error_log
+            .as_ref()
+            .map(|log| FailureModeLite {
+                category: log.failure_mode.category().to_string(),
+                requires_rollback: log.failure_mode.requires_rollback(),
+                is_deterministic: Some(log.failure_mode.is_deterministic()),
+            })
+            .or_else(|| {
+                if output.success {
+                    None
+                } else {
+                    Some(FailureModeLite {
+                        category: "UNKNOWN".to_string(),
+                        requires_rollback: output.rollback_performed,
+                        is_deterministic: None,
+                    })
+                }
+            })
+    }
+
+    fn capsule_from_receipt(receipt: &ExecutionReceipt, output: &ToolOutput) -> ProofCapsule {
+        let required = receipt.required_caps.clone();
+        let granted = receipt.granted_caps.clone();
+        let mismatch = if required.is_empty() || required == granted {
+            None
+        } else {
+            Some(required.clone())
+        };
+
+        ProofCapsule {
+            version: "1".to_string(),
+            capsule_id: uuid::Uuid::new_v4(),
+            subject: ProofSubject {
+                run_id: receipt.run_id,
+                tool_name: receipt.tool_name.clone(),
+                started_at: receipt.started_at,
+                finished_at: receipt.finished_at,
+                duration_ms: output.execution_time_ms,
+            },
+            tool: ToolIdentity {
+                module_digest: TypedDigest {
+                    algorithm: "sha256".to_string(),
+                    value: receipt.module_sha256.clone(),
+                    public_recomputable: true,
+                },
+                module_name: receipt.tool_name.clone(),
+                entrypoint: receipt.entrypoint.clone(),
+            },
+            input: InputIdentity {
+                digest: TypedDigest {
+                    algorithm: "sha256".to_string(),
+                    value: receipt.input_sha256.clone(),
+                    public_recomputable: true,
+                },
+                media_type: "application/json".to_string(),
+                raw_included: false,
+            },
+            policy: PolicyProfileRef {
+                profile_digest: None,
+                profile_name: receipt.profile.as_ref().map(|(name, _)| name.clone()),
+                mode: receipt.policy_mode.clone(),
+            },
+            capabilities: CapabilityEvidence {
+                required,
+                granted,
+                mismatch,
+            },
+            snapshot: receipt.snapshot.clone(),
+            failure: receipt.failure.as_ref().map(|failure| FailureEvidence {
+                failure_category: failure.category.clone(),
+                requires_rollback: failure.requires_rollback,
+                deterministic: failure.is_deterministic,
+                error_summary: output
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| failure.category.clone()),
+            }),
+            rollback: receipt
+                .rollback
+                .as_ref()
+                .map(|(occurred, snapshot_id, reason)| RollbackEvidence {
+                    occurred: *occurred,
+                    from_snapshot_id: Some(*snapshot_id),
+                    reason: Some(reason.clone()),
+                }),
+            branches: receipt.branches.clone(),
+            redaction: RedactionReport {
+                hashed_fields: Vec::new(),
+                truncated_fields: Vec::new(),
+                removed_fields: Vec::new(),
+                hmac_fields: Vec::new(),
+            },
+            limitations: Vec::new(),
+            signature: None,
+        }
     }
 
     /// Execute a tool, validating that `caller_tokens` satisfy the tool's
