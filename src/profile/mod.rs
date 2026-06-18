@@ -17,6 +17,8 @@ pub struct CapabilityProfileManifest {
     pub capabilities: Vec<Capability>,
     /// Policy for the MCP tool surface, from the optional `[mcp]` table.
     pub mcp: McpPolicy,
+    /// Execution environment policy, from the optional `[execution]` table.
+    pub execution: ExecutionPolicy,
 }
 
 impl CapabilityProfileManifest {
@@ -29,6 +31,25 @@ impl CapabilityProfileManifest {
     pub fn mcp_policy(&self) -> &McpPolicy {
         &self.mcp
     }
+
+    /// Return the execution environment policy for this profile.
+    pub fn execution_policy(&self) -> &ExecutionPolicy {
+        &self.execution
+    }
+}
+
+/// Execution environment policy, parsed from the optional `[execution]` table.
+///
+/// An absent `[execution]` table falls back to permissive defaults so existing
+/// profiles keep their current behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExecutionPolicy {
+    /// Allowed WASM module directories. When non-empty these replace
+    /// `NEXUS_MCP_MODULE_DIR`; when empty the env-var fallback applies.
+    pub module_dirs: Vec<PathBuf>,
+    /// Whether daemon/API callers must present an auth token. When `true` the
+    /// daemon refuses to start without `NEXUS_AGENTD_AUTH_TOKEN` configured.
+    pub daemon_auth_required: bool,
 }
 
 /// Policy for the MCP tool surface, parsed from the optional `[mcp]` table.
@@ -185,6 +206,7 @@ pub fn load_and_validate(
                 .unwrap_or_else(|| profile_name_from_path(path)),
             capabilities,
             mcp: mcp_policy_from_raw(raw.mcp),
+            execution: execution_policy_from_raw(raw.execution),
         })
     } else {
         Err(errors)
@@ -196,6 +218,7 @@ struct RawProfile {
     name: Option<String>,
     capabilities: Vec<RawCapability>,
     mcp: Option<RawMcp>,
+    execution: Option<RawExecution>,
 }
 
 /// Active table while walking the manifest line by line.
@@ -203,6 +226,59 @@ enum Section {
     Top,
     Capability(usize),
     Mcp,
+    Execution,
+}
+
+#[derive(Debug, Default)]
+struct RawExecution {
+    module_dirs: Option<Vec<String>>,
+    daemon_auth_required: Option<bool>,
+}
+
+fn parse_execution_assignment(
+    exec: &mut RawExecution,
+    key: &str,
+    rhs: &str,
+    line_number: usize,
+    errors: &mut Vec<ValidationError>,
+) {
+    match key {
+        "module_dirs" => match parse_string_array(rhs) {
+            Ok(values) => exec.module_dirs = Some(values),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "daemon_auth_required" => match parse_bool_value(rhs) {
+            Ok(value) => exec.daemon_auth_required = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        // max_token_validity_secs is a future field; skip unknown keys silently
+        // for forward-compat, but reject anything not in the known set.
+        other => errors.push(ValidationError::Parse {
+            line: line_number,
+            message: format!("unsupported [execution] key \"{other}\""),
+        }),
+    }
+}
+
+fn execution_policy_from_raw(raw: Option<RawExecution>) -> ExecutionPolicy {
+    match raw {
+        None => ExecutionPolicy::default(),
+        Some(raw) => ExecutionPolicy {
+            module_dirs: raw
+                .module_dirs
+                .unwrap_or_default()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            daemon_auth_required: raw.daemon_auth_required.unwrap_or(false),
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -354,10 +430,17 @@ fn parse_profile(contents: &str, errors: &mut Vec<ValidationError>) -> RawProfil
             continue;
         }
 
+        if line == "[execution]" {
+            profile.execution.get_or_insert_with(RawExecution::default);
+            section = Section::Execution;
+            continue;
+        }
+
         if line.starts_with('[') {
             errors.push(ValidationError::Parse {
                 line: line_number,
-                message: "only [[capabilities]] and [mcp] tables are supported".to_string(),
+                message: "only [[capabilities]], [mcp], and [execution] tables are supported"
+                    .to_string(),
             });
             continue;
         }
@@ -384,6 +467,12 @@ fn parse_profile(contents: &str, errors: &mut Vec<ValidationError>) -> RawProfil
         if let Section::Mcp = section {
             let mcp = profile.mcp.get_or_insert_with(RawMcp::new);
             parse_mcp_assignment(mcp, key, rhs, line_number, errors);
+            continue;
+        }
+
+        if let Section::Execution = section {
+            let exec = profile.execution.get_or_insert_with(RawExecution::default);
+            parse_execution_assignment(exec, key, rhs, line_number, errors);
             continue;
         }
 
@@ -415,7 +504,7 @@ fn parse_profile(contents: &str, errors: &mut Vec<ValidationError>) -> RawProfil
                     profile.name = Some(parsed.value);
                 }
             }
-            Section::Mcp => unreachable!("mcp section handled above"),
+            Section::Mcp | Section::Execution => unreachable!("handled above"),
         }
     }
 
@@ -906,6 +995,99 @@ snapshot_enabled = "yes"
         assert!(errors.iter().any(|error| matches!(
             error,
             ValidationError::Parse { message, .. } if message.contains("boolean")
+        )));
+    }
+
+    #[test]
+    fn parses_execution_module_dirs() {
+        let path = write_profile(
+            r#"
+name = "module-dirs"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[execution]
+module_dirs = ["/srv/nexus/modules", "/opt/modules"]
+"#,
+        );
+
+        let manifest = load_and_validate(&path).expect("valid profile");
+        std::fs::remove_file(path).ok();
+
+        assert_eq!(
+            manifest.execution_policy().module_dirs,
+            vec![
+                std::path::PathBuf::from("/srv/nexus/modules"),
+                std::path::PathBuf::from("/opt/modules"),
+            ]
+        );
+        assert!(!manifest.execution_policy().daemon_auth_required);
+    }
+
+    #[test]
+    fn parses_execution_daemon_auth_required() {
+        let path = write_profile(
+            r#"
+name = "auth-required"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[execution]
+daemon_auth_required = true
+"#,
+        );
+
+        let manifest = load_and_validate(&path).expect("valid profile");
+        std::fs::remove_file(path).ok();
+
+        assert!(manifest.execution_policy().daemon_auth_required);
+        assert!(manifest.execution_policy().module_dirs.is_empty());
+    }
+
+    #[test]
+    fn execution_defaults_to_permissive_when_absent() {
+        let path = write_profile(
+            r#"
+name = "no-execution"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+"#,
+        );
+
+        let manifest = load_and_validate(&path).expect("valid profile");
+        std::fs::remove_file(path).ok();
+
+        assert!(manifest.execution_policy().module_dirs.is_empty());
+        assert!(!manifest.execution_policy().daemon_auth_required);
+    }
+
+    #[test]
+    fn execution_rejects_unknown_key() {
+        let path = write_profile(
+            r#"
+name = "bad-exec"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[execution]
+unknown_field = "oops"
+"#,
+        );
+
+        let errors = load_and_validate(&path).expect_err("should reject unknown execution key");
+        std::fs::remove_file(path).ok();
+
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::Parse { message, .. } if message.contains("unsupported [execution] key")
         )));
     }
 }

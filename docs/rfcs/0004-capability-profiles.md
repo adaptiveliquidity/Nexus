@@ -1,6 +1,6 @@
 # RFC 0004 - Capability Profile Manifests
 
-- **Status:** Accepted — Slice 1 shipped (validator + `[mcp]` enforcement); Slices 2–3 in progress
+- **Status:** Accepted — Slices 1–3 shipped (validator, `[mcp]` enforcement, `[execution]` module_dirs + daemon_auth_required)
 - **Roadmap:** Secure MCP Runtime
 - **Author:** Nexus
 

@@ -322,11 +322,27 @@ struct ForkAndRaceResponse {
 
 impl NexusMcpServer {
     fn new(hypervisor: Arc<NexusHypervisor>) -> Result<Self> {
+        let capability_profile = profile_manifest_from_env()?.map(Arc::new);
+
+        // Slice 2: when a profile defines execution.module_dirs, those replace
+        // NEXUS_MCP_MODULE_DIR so the allowed module set is profile-declared and
+        // diffable rather than implicit in the environment.
+        let wasm_module_dirs = if let Some(profile) = &capability_profile {
+            let dirs = &profile.execution_policy().module_dirs;
+            if !dirs.is_empty() {
+                canonicalize_module_dirs(dirs)?
+            } else {
+                allowed_wasm_module_dirs()?
+            }
+        } else {
+            allowed_wasm_module_dirs()?
+        };
+
         Ok(Self {
             hypervisor,
-            wasm_module_dirs: Arc::new(allowed_wasm_module_dirs()?),
+            wasm_module_dirs: Arc::new(wasm_module_dirs),
             capability_allowlist: Arc::new(capability_allowlist_from_env()?),
-            capability_profile: profile_manifest_from_env()?.map(Arc::new),
+            capability_profile,
         })
     }
 
@@ -878,6 +894,26 @@ fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {
             if !canonical.is_dir() {
                 anyhow::bail!(
                     "invalid MCP module dir '{}': resolved path is not a directory",
+                    dir.display()
+                );
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
+/// Canonicalize profile-declared module directories (Slice 2 path).
+fn canonicalize_module_dirs(dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if dirs.is_empty() {
+        anyhow::bail!("profile execution.module_dirs must contain at least one directory");
+    }
+    dirs.iter()
+        .map(|dir| {
+            let canonical = std::fs::canonicalize(dir)
+                .map_err(|e| anyhow::anyhow!("invalid profile module dir '{}': {e}", dir.display()))?;
+            if !canonical.is_dir() {
+                anyhow::bail!(
+                    "invalid profile module dir '{}': not a directory",
                     dir.display()
                 );
             }
