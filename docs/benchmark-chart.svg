@@ -57,15 +57,15 @@
   <text x="131" y="112" text-anchor="start" font-size="12" class="metric-unit">µs</text>
   <rect class="metric-card" x="225" y="64" width="195" height="62" rx="8" stroke-width="1"/>
   <text x="322" y="86" text-anchor="middle" font-size="10" class="metric-label">Rollback (1 MiB)</text>
-  <text x="312" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">116</text>
+  <text x="312" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">121</text>
   <text x="336" y="112" text-anchor="start" font-size="12" class="metric-unit">µs</text>
   <rect class="metric-card" x="430" y="64" width="195" height="62" rx="8" stroke-width="1"/>
   <text x="527" y="86" text-anchor="middle" font-size="10" class="metric-label">Cap-checked exec</text>
-  <text x="517" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">933</text>
+  <text x="517" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">938</text>
   <text x="541" y="112" text-anchor="start" font-size="12" class="metric-unit">µs</text>
   <rect class="metric-card" x="635" y="64" width="195" height="62" rx="8" stroke-width="1"/>
   <text x="732" y="86" text-anchor="middle" font-size="10" class="metric-label">Full-stack</text>
-  <text x="722" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">209</text>
+  <text x="722" y="112" text-anchor="middle" font-size="24" font-weight="600" class="metric-value">216</text>
   <text x="746" y="112" text-anchor="start" font-size="12" class="metric-unit">µs</text>
 
   <!-- Grid lines -->
@@ -89,38 +89,38 @@
 
   <!-- Bars -->
   <text x="202" y="168" text-anchor="end" font-size="11" class="label">Cold start (sandbox)</text>
-  <rect class="bar-cold" x="210" y="154" width="28" height="24" rx="3"/>
-  <text x="244" y="171" text-anchor="start" font-size="10" font-weight="500" class="value">1.8 µs</text>
+  <rect class="bar-cold" x="210" y="154" width="27" height="24" rx="3"/>
+  <text x="243" y="171" text-anchor="start" font-size="10" font-weight="500" class="value">1.8 µs</text>
   <text x="202" y="208" text-anchor="end" font-size="11" class="label">Cold start (hypervisor)</text>
   <rect class="bar-cold" x="210" y="194" width="419" height="24" rx="3"/>
-  <text x="635" y="211" text-anchor="start" font-size="10" font-weight="500" class="value">6.58 ms</text>
+  <text x="635" y="211" text-anchor="start" font-size="10" font-weight="500" class="value">6.52 ms</text>
   <text x="202" y="248" text-anchor="end" font-size="11" class="label">Rollback 1 MiB</text>
-  <rect class="bar-rollback" x="210" y="234" width="227" height="24" rx="3"/>
-  <text x="443" y="251" text-anchor="start" font-size="10" font-weight="500" class="value">116 µs</text>
+  <rect class="bar-rollback" x="210" y="234" width="228" height="24" rx="3"/>
+  <text x="444" y="251" text-anchor="start" font-size="10" font-weight="500" class="value">121 µs</text>
   <text x="202" y="288" text-anchor="end" font-size="11" class="label">Rollback 10 MiB</text>
   <rect class="bar-rollback" x="210" y="274" width="339" height="24" rx="3"/>
-  <text x="555" y="291" text-anchor="start" font-size="10" font-weight="500" class="value">1.23 ms</text>
+  <text x="555" y="291" text-anchor="start" font-size="10" font-weight="500" class="value">1.22 ms</text>
   <text x="202" y="328" text-anchor="end" font-size="11" class="label">Execute tool</text>
-  <rect class="bar-execute" x="210" y="314" width="314" height="24" rx="3"/>
-  <text x="530" y="331" text-anchor="start" font-size="10" font-weight="500" class="value">729 µs</text>
+  <rect class="bar-execute" x="210" y="314" width="315" height="24" rx="3"/>
+  <text x="531" y="331" text-anchor="start" font-size="10" font-weight="500" class="value">733 µs</text>
   <text x="202" y="368" text-anchor="end" font-size="11" class="label">Capability-checked exec</text>
   <rect class="bar-integrated" x="210" y="354" width="326" height="24" rx="3"/>
-  <text x="542" y="371" text-anchor="start" font-size="10" font-weight="500" class="value">933 µs</text>
+  <text x="542" y="371" text-anchor="start" font-size="10" font-weight="500" class="value">938 µs</text>
   <text x="202" y="408" text-anchor="end" font-size="11" class="label">Cached precompiled</text>
-  <rect class="bar-integrated" x="210" y="394" width="243" height="24" rx="3"/>
-  <text x="459" y="411" text-anchor="start" font-size="10" font-weight="500" class="value">164 µs</text>
+  <rect class="bar-integrated" x="210" y="394" width="244" height="24" rx="3"/>
+  <text x="460" y="411" text-anchor="start" font-size="10" font-weight="500" class="value">167 µs</text>
   <text x="202" y="448" text-anchor="end" font-size="11" class="label">Full-stack integrated</text>
-  <rect class="bar-integrated" x="210" y="434" width="255" height="24" rx="3"/>
-  <text x="471" y="451" text-anchor="start" font-size="10" font-weight="500" class="value">209 µs</text>
+  <rect class="bar-integrated" x="210" y="434" width="256" height="24" rx="3"/>
+  <text x="472" y="451" text-anchor="start" font-size="10" font-weight="500" class="value">216 µs</text>
   <text x="202" y="488" text-anchor="end" font-size="11" class="label">Snapshot 1 MiB</text>
-  <rect class="bar-snapshot" x="210" y="474" width="348" height="24" rx="3"/>
-  <text x="564" y="491" text-anchor="start" font-size="10" font-weight="500" class="value">1.46 ms</text>
+  <rect class="bar-snapshot" x="210" y="474" width="346" height="24" rx="3"/>
+  <text x="562" y="491" text-anchor="start" font-size="10" font-weight="500" class="value">1.41 ms</text>
   <text x="202" y="528" text-anchor="end" font-size="11" class="label">Execute real mem 1 MiB</text>
   <rect class="bar-execute" x="210" y="514" width="335" height="24" rx="3"/>
   <text x="551" y="531" text-anchor="start" font-size="10" font-weight="500" class="value">1.11 ms</text>
   <text x="202" y="568" text-anchor="end" font-size="11" class="label">Rollback 100 MiB</text>
-  <rect class="bar-rollback" x="210" y="554" width="478" height="24" rx="3"/>
-  <text x="694" y="571" text-anchor="start" font-size="10" font-weight="500" class="value">22.4 ms</text>
+  <rect class="bar-rollback" x="210" y="554" width="477" height="24" rx="3"/>
+  <text x="693" y="571" text-anchor="start" font-size="10" font-weight="500" class="value">21.7 ms</text>
   <text x="202" y="608" text-anchor="end" font-size="11" class="label">Snapshot 100 MiB</text>
   <rect class="bar-snapshot" x="210" y="594" width="565" height="24" rx="3"/>
   <text x="781" y="611" text-anchor="start" font-size="10" font-weight="500" class="value">137 ms</text>
@@ -136,5 +136,5 @@
   <text x="474" y="653" font-size="10" class="legend-text">Snapshot</text>
   <rect class="bar-integrated" x="540" y="644" width="10" height="10" rx="2"/>
   <text x="554" y="653" font-size="10" class="legend-text">Integrated</text>
-  <text x="830" y="653" text-anchor="end" font-size="9" class="note">Log scale · 2026-06-17</text>
+  <text x="830" y="653" text-anchor="end" font-size="9" class="note">Log scale · 2026-06-18</text>
 </svg>
