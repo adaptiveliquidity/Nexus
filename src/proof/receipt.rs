@@ -28,7 +28,7 @@ pub struct McpProofReference {
 }
 
 /// Proof HMAC key source. `FromEnv` holds the env-var NAME, not the value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProofHmacKey {
     Disabled,
     FromEnv(String),
