@@ -2,6 +2,7 @@
 
 pub mod canonical;
 pub mod digest;
+pub mod redaction;
 pub mod receipt {
     include!("receipt.rs");
 
