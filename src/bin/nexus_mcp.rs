@@ -343,7 +343,8 @@ impl NexusMcpServer {
         }
 
         let input = params.input.unwrap_or(serde_json::json!({}));
-        self.check_tokens_against_active_profile(&[])?;
+        // Pure-compute path carries no capability tokens; profile gating for
+        // this tool is handled by ensure_tool_allowed above (MCP tool allowlist).
         let output = self.hypervisor.execute_tool(tool, input).await?;
         Ok(ToolOutputResponse::from(output))
     }
@@ -976,22 +977,39 @@ fn sanitize_token_request(
 }
 
 fn parse_capability(spec: &CapabilitySpec) -> Result<Capability> {
+    let path_required = matches!(
+        spec.r#type.as_str(),
+        "read_file" | "write_file" | "list_dir" | "execute" | "mount_tmpfs"
+    );
+    if path_required && spec.path.is_none() {
+        anyhow::bail!(
+            "capability type '{}' requires a 'path' field",
+            spec.r#type
+        );
+    }
+    let url_required = matches!(spec.r#type.as_str(), "http_get" | "http_post");
+    if url_required && spec.path.is_none() {
+        anyhow::bail!(
+            "capability type '{}' requires a 'path' (URL pattern) field",
+            spec.r#type
+        );
+    }
     parse_capability_from_str(&spec.r#type, spec.path.as_deref())
         .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", spec.r#type))
 }
 
 fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capability> {
-    let p = || PathBuf::from(path.unwrap_or("."));
-    let s = || path.unwrap_or("*").to_string();
+    let p = || PathBuf::from(path?);
+    let s = || path?.to_string();
 
     match cap_type {
-        "read_file" => Some(Capability::ReadFile(p())),
-        "write_file" => Some(Capability::WriteFile(p())),
-        "list_dir" => Some(Capability::ListDirectory(p())),
-        "http_get" => Some(Capability::HttpGet(s())),
-        "http_post" => Some(Capability::HttpPost(s())),
-        "execute" => Some(Capability::ExecuteBinary(p())),
-        "mount_tmpfs" => Some(Capability::MountTmpfs(p())),
+        "read_file" => Some(Capability::ReadFile(p()?)),
+        "write_file" => Some(Capability::WriteFile(p()?)),
+        "list_dir" => Some(Capability::ListDirectory(p()?)),
+        "http_get" => Some(Capability::HttpGet(s()?)),
+        "http_post" => Some(Capability::HttpPost(s()?)),
+        "execute" => Some(Capability::ExecuteBinary(p()?)),
+        "mount_tmpfs" => Some(Capability::MountTmpfs(p()?)),
         "all" => Some(Capability::All),
         _ => None,
     }

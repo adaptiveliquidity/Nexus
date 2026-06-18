@@ -1,7 +1,7 @@
 # RFC 0004 - Capability Profile Manifests
 
-- **Status:** Draft (validator-only first slice)
-- **Roadmap:** Secure MCP Runtime, Task 3
+- **Status:** Accepted — Slice 1 shipped (validator + `[mcp]` enforcement); Slices 2–3 in progress
+- **Roadmap:** Secure MCP Runtime
 - **Author:** Nexus
 
 ## 1. Summary

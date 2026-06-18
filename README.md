@@ -165,6 +165,7 @@ nexus demo --demo all
 | Module cache | Shipped | SHA-256-keyed `Arc<Module>` reuse avoids recompilation |
 | Daemon mode | Shipped | `nexus-agentd` with Unix socket + Windows named pipes, hypervisor pool |
 | MCP server | Shipped | `nexus-mcp` exposes execute, WASI execute, issue-token, snapshot, and fork-and-race tools over stdio |
+| Capability profiles | Shipped (Slice 1) | TOML manifest (`NEXUS_MCP_PROFILE`) enforces MCP tool allowlist, snapshot and fork-and-race gates, and capability scopes; `nexus profile validate` parses + validates; Slices 2–3 (module-dir allowlist, daemon auth) in progress |
 | Warm sandbox pool | Shipped | Opt-in `SandboxPool` / `PoolConfig` with semaphore backpressure and module-cache reuse |
 | Density benchmark harness | Shipped (manual) | `cargo bench --bench density_validation --features bench-density`; intentionally excluded from normal PR gates |
 | WASM call-stack capture | Shipped (diagnostic) | Trap call stacks flow into `ErrorLog` as telemetry metadata without changing snapshot digests |
@@ -281,6 +282,8 @@ nexus/
 │   │   ├── mod.rs           # TelemetrySink, patterns
 │   │   ├── trace.rs         # Execution replay / time-travel debugging
 │   │   └── learning.rs
+│   ├── profile/
+│   │   └── mod.rs           # Capability profile manifest parser + McpPolicy enforcement
 │   ├── daemon/              # nexus-agentd support
 │   │   ├── pool.rs          # HypervisorPool
 │   │   ├── protocol.rs      # Length-prefixed JSON framing
