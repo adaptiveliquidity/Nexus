@@ -1035,17 +1035,14 @@ fn parse_capability(spec: &CapabilitySpec) -> Result<Capability> {
 }
 
 fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capability> {
-    let p = || PathBuf::from(path?);
-    let s = || path?.to_string();
-
     match cap_type {
-        "read_file" => Some(Capability::ReadFile(p()?)),
-        "write_file" => Some(Capability::WriteFile(p()?)),
-        "list_dir" => Some(Capability::ListDirectory(p()?)),
-        "http_get" => Some(Capability::HttpGet(s()?)),
-        "http_post" => Some(Capability::HttpPost(s()?)),
-        "execute" => Some(Capability::ExecuteBinary(p()?)),
-        "mount_tmpfs" => Some(Capability::MountTmpfs(p()?)),
+        "read_file" => Some(Capability::ReadFile(PathBuf::from(path?))),
+        "write_file" => Some(Capability::WriteFile(PathBuf::from(path?))),
+        "list_dir" => Some(Capability::ListDirectory(PathBuf::from(path?))),
+        "http_get" => Some(Capability::HttpGet(path?.to_string())),
+        "http_post" => Some(Capability::HttpPost(path?.to_string())),
+        "execute" => Some(Capability::ExecuteBinary(PathBuf::from(path?))),
+        "mount_tmpfs" => Some(Capability::MountTmpfs(PathBuf::from(path?))),
         "all" => Some(Capability::All),
         _ => None,
     }
