@@ -3,17 +3,7 @@
 pub mod canonical;
 pub mod digest;
 pub mod redaction;
-pub mod receipt {
-    include!("receipt.rs");
-
-    /// Controls how low-entropy sensitive values are digested. See RFC 0005 §6.
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub enum ProofHmacKey {
-        Disabled,
-        FromEnv(String),
-        EphemeralTestOnly,
-    }
-}
+pub mod receipt;
 pub mod schema;
 pub mod scorecard;
 
