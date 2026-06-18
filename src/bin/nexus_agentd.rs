@@ -24,10 +24,13 @@ use nexus::daemon::module_cache::ModuleCache;
 use nexus::daemon::pool::HypervisorPool;
 use nexus::daemon::protocol::{read_frame, write_frame};
 use nexus::daemon::{default_socket_path, DaemonRequest, DaemonResponse};
+use nexus::profile::load_and_validate as load_profile;
 use nexus::{HypervisorConfig, ToolDefinition};
 
 const AUTH_TOKEN_ENV: &str = "NEXUS_AGENTD_AUTH_TOKEN";
 const MODULE_DIR_ENV: &str = "NEXUS_AGENTD_MODULE_DIR";
+/// Profile env var for the daemon (Slice 3 — daemon_auth_required enforcement).
+const AGENTD_PROFILE_ENV: &str = "NEXUS_AGENTD_PROFILE";
 const UNAUTHORIZED_MESSAGE: &str = "Unauthorized: daemon request authentication failed";
 const WASM_PATH_REJECTED_MESSAGE: &str =
     "wasm_path rejected: configure an allowed module directory";
@@ -80,6 +83,11 @@ async fn main() -> anyhow::Result<()> {
     let module_cache = Arc::new(ModuleCache::new());
     let auth_token = configured_auth_token()?;
 
+    // Slice 3: if a profile is configured and it requires daemon authentication,
+    // refuse to start without an auth token — fail loudly rather than silently
+    // running unauthenticated against a posture that requires it.
+    enforce_profile_auth_requirement(&auth_token)?;
+
     run(socket_path, pool, module_cache, auth_token).await
 }
 
@@ -91,6 +99,38 @@ fn configured_auth_token() -> anyhow::Result<AuthToken> {
             anyhow::bail!("{AUTH_TOKEN_ENV} must be valid Unicode")
         }
     }
+}
+
+fn enforce_profile_auth_requirement(auth_token: &AuthToken) -> anyhow::Result<()> {
+    let Some(profile_path) = std::env::var_os(AGENTD_PROFILE_ENV) else {
+        return Ok(());
+    };
+    let manifest = load_profile(&profile_path).map_err(|errors| {
+        let joined = errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::anyhow!(
+            "invalid {AGENTD_PROFILE_ENV} '{}': {joined}",
+            std::path::Path::new(&profile_path).display()
+        )
+    })?;
+
+    if manifest.execution_policy().daemon_auth_required && auth_token.is_none() {
+        anyhow::bail!(
+            "profile '{}' requires daemon authentication ({AUTH_TOKEN_ENV} must be set)",
+            manifest.name
+        );
+    }
+
+    info!(
+        target: "nexus.agentd",
+        profile = %manifest.name,
+        daemon_auth_required = %manifest.execution_policy().daemon_auth_required,
+        "Loaded agentd capability profile"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]

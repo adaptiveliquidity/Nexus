@@ -165,10 +165,13 @@ nexus demo --demo all
 | Module cache | Shipped | SHA-256-keyed `Arc<Module>` reuse avoids recompilation |
 | Daemon mode | Shipped | `nexus-agentd` with Unix socket + Windows named pipes, hypervisor pool |
 | MCP server | Shipped | `nexus-mcp` exposes execute, WASI execute, issue-token, snapshot, and fork-and-race tools over stdio |
+| Capability profiles | Shipped (Slices 1–3) | TOML manifest (`NEXUS_MCP_PROFILE`) enforces MCP tool allowlist, snapshot and fork-and-race gates, capability scopes, `[execution]` module-dir allowlist (`NEXUS_MCP_PROFILE`-driven `module_dirs`), and daemon auth enforcement (`daemon_auth_required` via `NEXUS_AGENTD_PROFILE`); `nexus profile validate` parses + validates |
 | Warm sandbox pool | Shipped | Opt-in `SandboxPool` / `PoolConfig` with semaphore backpressure and module-cache reuse |
 | Density benchmark harness | Shipped (manual) | `cargo bench --bench density_validation --features bench-density`; intentionally excluded from normal PR gates |
 | WASM call-stack capture | Shipped (diagnostic) | Trap call stacks flow into `ErrorLog` as telemetry metadata without changing snapshot digests |
 | Snapshot sync protocol | Shipped (local/tested) | Digest, framed transport, lineage, and protocol tests are in-tree; distributed deployment remains RFC work |
+| Capability profiles | Shipped (Slices 1-3) | TOML manifest (NEXUS_MCP_PROFILE env) enforces MCP tool allowlist, snapshot/fork gates, capability scopes, module-dir allowlist (execution.module_dirs), and daemon auth enforcement (daemon_auth_required); nexus profile validate parses + validates |
+| Runtime proof capsules | Shipped (Wave 2) | ProofCapsule schema + ExecutionReceipt; TypedDigest (SHA-256/HMAC/redacted), canonical JSON signing payload, ProofScorecard; RedactionPolicy applies RFC 0005 redaction model (host paths HMACd, secrets removed, error strings truncated, preview_base64 excluded); cargo-deny CI gate |
 | Live benchmarks | Shipped | Always-on wall-clock, binary size, CPU-simulation, and heap-memory checks; bare-metal walltime is opt-in; dashboard auto-updates from main |
 
 ### Roadmap
@@ -281,6 +284,8 @@ nexus/
 │   │   ├── mod.rs           # TelemetrySink, patterns
 │   │   ├── trace.rs         # Execution replay / time-travel debugging
 │   │   └── learning.rs
+│   ├── profile/
+│   │   └── mod.rs           # Capability profile manifest parser + McpPolicy enforcement
 │   ├── daemon/              # nexus-agentd support
 │   │   ├── pool.rs          # HypervisorPool
 │   │   ├── protocol.rs      # Length-prefixed JSON framing
