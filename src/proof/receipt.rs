@@ -25,3 +25,11 @@ pub struct ExecutionReceipt {
     pub rollback: Option<RollbackEvidence>,
     pub branches: Option<BranchRaceEvidence>,
 }
+
+/// Controls how low-entropy sensitive values are digested. See RFC 0005 §6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProofHmacKey {
+    Disabled,
+    FromEnv(String),
+    EphemeralTestOnly,
+}
