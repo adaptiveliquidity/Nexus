@@ -824,6 +824,7 @@ impl NexusMcpServer {
 
     fn do_instinct_stats(&self, _params: InstinctStatsParams) -> Result<InstinctStatsResponse> {
         self.ensure_tool_allowed("nexus_instinct_stats")?;
+        self.ensure_instinct_enabled()?;
         let Some(store) = self.hypervisor.instinct_store() else {
             anyhow::bail!("instinct store not initialised");
         };
@@ -848,6 +849,7 @@ impl NexusMcpServer {
 
     fn do_instinct_query(&self, params: InstinctQueryParams) -> Result<InstinctQueryResponse> {
         self.ensure_tool_allowed("nexus_instinct_query")?;
+        self.ensure_instinct_enabled()?;
         let Some(store) = self.hypervisor.instinct_store() else {
             anyhow::bail!("instinct store not initialised");
         };
@@ -876,6 +878,7 @@ impl NexusMcpServer {
         params: InstinctRegisterParams,
     ) -> Result<InstinctRegisterResponse> {
         self.ensure_tool_allowed("nexus_instinct_register")?;
+        self.ensure_instinct_enabled()?;
         let Some(store) = self.hypervisor.instinct_store() else {
             anyhow::bail!("instinct store not initialised");
         };
@@ -918,6 +921,7 @@ impl NexusMcpServer {
         params: InstinctRecordOutcomeParams,
     ) -> Result<InstinctRecordOutcomeResponse> {
         self.ensure_tool_allowed("nexus_instinct_record_outcome")?;
+        self.ensure_instinct_enabled()?;
         let Some(store) = self.hypervisor.instinct_store() else {
             anyhow::bail!("instinct store not initialised");
         };
@@ -939,6 +943,7 @@ impl NexusMcpServer {
 
     fn do_instinct_export(&self, _params: InstinctExportParams) -> Result<InstinctExportResponse> {
         self.ensure_tool_allowed("nexus_instinct_export")?;
+        self.ensure_instinct_enabled()?;
         let Some(store) = self.hypervisor.instinct_store() else {
             anyhow::bail!("instinct store not initialised");
         };
@@ -1190,6 +1195,18 @@ impl NexusMcpServer {
         }
         Err(profile_denial(
             "nexus_execute_wasi is disabled by the active profile".to_string(),
+        ))
+    }
+
+    fn ensure_instinct_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().instinct_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "instinct tools are disabled by the active profile".to_string(),
         ))
     }
 }
