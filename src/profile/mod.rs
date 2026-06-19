@@ -66,8 +66,15 @@ pub struct McpPolicy {
     pub snapshot_enabled: bool,
     /// Whether the fork-and-race tool is permitted.
     pub fork_enabled: bool,
+    /// Whether the nexus_execute_proof tool is permitted.
+    pub proof_enabled: bool,
+    /// Whether the nexus_execute_wasi tool is permitted.
+    pub wasi_enabled: bool,
+    /// Whether the instinct tools are permitted.
+    pub instinct_enabled: bool,
+    /// Whether the nexus_execute_retry tool is permitted.
+    pub retry_enabled: bool,
 }
-
 
 impl McpPolicy {
     /// Whether `tool` may be invoked under this policy's tool allowlist.
@@ -278,6 +285,10 @@ struct RawMcp {
     tool_allowlist: Option<Vec<String>>,
     snapshot_enabled: Option<bool>,
     fork_enabled: Option<bool>,
+    proof_enabled: Option<bool>,
+    wasi_enabled: Option<bool>,
+    instinct_enabled: Option<bool>,
+    retry_enabled: Option<bool>,
 }
 
 impl RawMcp {
@@ -286,6 +297,10 @@ impl RawMcp {
             tool_allowlist: None,
             snapshot_enabled: None,
             fork_enabled: None,
+            proof_enabled: None,
+            wasi_enabled: None,
+            instinct_enabled: None,
+            retry_enabled: None,
         }
     }
 }
@@ -297,6 +312,10 @@ fn mcp_policy_from_raw(raw: Option<RawMcp>) -> McpPolicy {
             tool_allowlist: raw.tool_allowlist,
             snapshot_enabled: raw.snapshot_enabled.unwrap_or(false),
             fork_enabled: raw.fork_enabled.unwrap_or(false),
+            proof_enabled: raw.proof_enabled.unwrap_or(false),
+            wasi_enabled: raw.wasi_enabled.unwrap_or(false),
+            instinct_enabled: raw.instinct_enabled.unwrap_or(false),
+            retry_enabled: raw.retry_enabled.unwrap_or(false),
         },
     }
 }
@@ -325,6 +344,34 @@ fn parse_mcp_assignment(
         },
         "fork_enabled" => match parse_bool_value(rhs) {
             Ok(value) => mcp.fork_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "proof_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.proof_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "wasi_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.wasi_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "instinct_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.instinct_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "retry_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.retry_enabled = Some(value),
             Err(message) => errors.push(ValidationError::Parse {
                 line: line_number,
                 message,
@@ -745,6 +792,31 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    type CapabilityProfile = CapabilityProfileManifest;
+
+    impl CapabilityProfileManifest {
+        fn from_str_for_test(contents: &str) -> Result<Self, Vec<ValidationError>> {
+            let mut errors = Vec::new();
+            let raw = parse_profile(contents, &mut errors);
+            let capabilities = if raw.capabilities.is_empty() {
+                Vec::new()
+            } else {
+                validate_capabilities(&raw.capabilities, &mut errors)
+            };
+
+            if errors.is_empty() {
+                Ok(CapabilityProfileManifest {
+                    name: raw.name.unwrap_or_else(|| "test-profile".to_string()),
+                    mcp: mcp_policy_from_raw(raw.mcp),
+                    execution: execution_policy_from_raw(raw.execution),
+                    capabilities,
+                })
+            } else {
+                Err(errors)
+            }
+        }
+    }
+
     static NEXT_PROFILE_ID: AtomicUsize = AtomicUsize::new(0);
 
     fn write_profile(contents: &str) -> PathBuf {
@@ -927,6 +999,67 @@ fork_enabled = false
         assert!(!mcp.snapshot_enabled);
         assert!(!mcp.fork_enabled);
         assert!(mcp.tool_allowlist.is_none());
+    }
+
+    #[test]
+    fn parse_proof_disabled() {
+        let path = write_profile(
+            r#"
+name = "no-proof"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[mcp]
+proof_enabled = false
+"#,
+        );
+        let manifest = load_and_validate(&path).expect("valid profile");
+        std::fs::remove_file(path).ok();
+        assert!(!manifest.mcp_policy().proof_enabled);
+    }
+
+    #[test]
+    fn default_proof_enabled_is_true() {
+        let mcp = McpPolicy::default();
+        assert!(mcp.proof_enabled);
+    }
+
+    #[test]
+    fn parse_wasi_disabled() {
+        let input = "[mcp]\nwasi_enabled = false";
+        let profile = CapabilityProfile::from_str_for_test(input).unwrap();
+        assert!(!profile.mcp_policy().wasi_enabled);
+    }
+
+    #[test]
+    fn default_wasi_enabled_is_true() {
+        assert!(McpPolicy::default().wasi_enabled);
+    }
+
+    #[test]
+    fn parse_instinct_disabled() {
+        let input = "[mcp]\ninstinct_enabled = false";
+        let profile = CapabilityProfile::from_str_for_test(input).unwrap();
+        assert!(!profile.mcp_policy().instinct_enabled);
+    }
+
+    #[test]
+    fn default_instinct_enabled_is_true() {
+        assert!(McpPolicy::default().instinct_enabled);
+    }
+
+    #[test]
+    fn parse_retry_disabled() {
+        let input = "[mcp]\nretry_enabled = false";
+        let profile = CapabilityProfile::from_str_for_test(input).unwrap();
+        assert!(!profile.mcp_policy().retry_enabled);
+    }
+
+    #[test]
+    fn default_retry_enabled_is_true() {
+        assert!(McpPolicy::default().retry_enabled);
     }
 
     #[test]

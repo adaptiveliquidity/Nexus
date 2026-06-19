@@ -26,6 +26,7 @@ use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
 use crate::proof::receipt::{ExecutionReceipt, FailureModeLite};
+use crate::proof::sign_capsule;
 use crate::proof::schema::{
     CapabilityEvidence, FailureEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef,
     ProofCapsule, ProofSubject, RedactionReport, RollbackEvidence, SnapshotEvidence, SnapshotKind,
@@ -579,6 +580,8 @@ impl NexusHypervisor {
         };
 
         let capsule = Self::capsule_from_receipt(&receipt, &output);
+        let capability_manager = self.capability_manager.read().unwrap();
+        let capsule = sign_capsule(capsule, capability_manager.signing_key());
         Ok((output, capsule))
     }
 

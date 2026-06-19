@@ -21,9 +21,11 @@ use nexus::hypervisor::{
     fork_and_race, HypervisorConfig, NexusHypervisor, RecoveryAction, RecoverySource,
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
+use nexus::hypervisor::failure_mode::FailureMode;
 use nexus::profile::{load_and_validate, CapabilityProfileManifest};
 use nexus::security::{Capability, CapabilityToken};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
+use nexus::telemetry::{ExecutionRecord, TelemetryStats};
 use nexus::NexusError;
 
 // ─── MCP Tool Parameter Types ────────────────────────────────────────────────
@@ -34,6 +36,24 @@ pub struct ExecuteParams {
     pub wasm_path: String,
     #[schemars(description = "Entry point function name (default: _start)")]
     pub entry: Option<String>,
+    #[schemars(description = "JSON input to pass to the WASM module")]
+    pub input: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExecuteRetryParams {
+    #[schemars(description = "Path to the .wasm file to execute")]
+    pub wasm_path: String,
+    #[schemars(description = "Entry point function name (default: _start)")]
+    pub entry: Option<String>,
+    #[schemars(description = "JSON input to pass to the WASM module")]
+    pub input: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ExecuteProofParams {
+    #[schemars(description = "Path to the WASM module file to execute")]
+    pub wasm_path: String,
     #[schemars(description = "JSON input to pass to the WASM module")]
     pub input: Option<serde_json::Value>,
 }
@@ -99,6 +119,20 @@ pub struct IssueTokenParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AttenuateTokenParams {
+    #[schemars(description = "UUID of the parent token")]
+    pub parent_token_id: String,
+    #[schemars(
+        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+    )]
+    pub capability: String,
+    #[schemars(description = "Path or URL pattern for the capability")]
+    pub path: Option<String>,
+    #[schemars(description = "Token validity in seconds (default: 3600)")]
+    pub validity_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ForkAndRaceParams {
     #[schemars(description = "Path to the .wasm file to execute in each branch")]
     pub wasm_path: String,
@@ -124,6 +158,152 @@ pub struct BranchSpec {
     pub input: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctStatsParams {}
+
+#[derive(Debug, Serialize)]
+struct InstinctStatsResponse {
+    pub total_instincts: u64,
+    pub categories: HashMap<String, u64>,
+    pub avg_confidence: f32,
+    pub highest_confidence_description: Option<String>,
+    pub highest_confidence_value: Option<f32>,
+    pub total_support: u64,
+    pub total_failures: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctQueryParams {
+    #[schemars(description = "Failure category to search against (e.g. TRAP_DIV_BY_ZERO)")]
+    pub failure_category: String,
+    #[schemars(
+        description = "Operation pattern to match (exact name or * for all operations)"
+    )]
+    pub operation: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstinctQueryResponse {
+    pub suggestions: Vec<InstinctSuggestion>,
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InstinctSuggestion {
+    #[schemars(with = "String")]
+    pub instinct_id: Uuid,
+    pub recovery_description: String,
+    pub confidence: f32,
+    pub operation_pattern: String,
+    pub failure_category: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctRegisterParams {
+    #[schemars(description = "Failure category to learn against (e.g. TRAP_DIV_BY_ZERO)")]
+    pub failure_category: String,
+    #[schemars(
+        description = "Operation pattern (exact match or * for all operations)"
+    )]
+    pub operation_pattern: String,
+    #[schemars(description = "Human-readable recovery advice")]
+    pub recovery_description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstinctRegisterResponse {
+    pub instinct_id: Uuid,
+    pub failure_category: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctRecordOutcomeParams {
+    #[schemars(description = "Instinct UUID to reinforce or erode")]
+    pub instinct_id: String,
+    #[schemars(description = "Whether the retry outcome was successful")]
+    pub success: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct InstinctRecordOutcomeResponse {
+    pub instinct_id: String,
+    pub reinforced: bool,
+    pub success: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctExportParams {}
+
+#[derive(Debug, Serialize)]
+struct InstinctExportResponse {
+    pub json: String,
+    pub instinct_count: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct InstinctImportParams {
+    #[schemars(description = "JSON payload exported by nexus_instinct_export")]
+    pub json: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+struct InstinctImportResponse {
+    pub imported: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetHistoryParams {
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct GetHistoryResponse {
+    pub records: Vec<ExecutionRecordSummary>,
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExecutionRecordSummary {
+    pub id: String,
+    pub timestamp: String,
+    pub operation: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub fuel_consumed: u64,
+    pub has_error: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetStatsParams {}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct GetStatsResponse {
+    pub telemetry: TelemetryStatsDto,
+    pub snapshots: SnapshotStatsDto,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct TelemetryStatsDto {
+    pub total_executions: u64,
+    pub successful_executions: u64,
+    pub failed_executions: u64,
+    pub total_rollbacks: u64,
+    pub avg_duration_ms: f64,
+    pub avg_fuel_per_execution: f64,
+    pub success_rate: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct SnapshotStatsDto {
+    pub total_snapshots: u64,
+    pub total_rollbacks: u64,
+    pub total_memory_saved_mb: f64,
+    pub avg_compression_ratio: f64,
+    pub last_snapshot_time_us: u64,
+}
+
 // ─── MCP Server Handler ──────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -142,6 +322,29 @@ impl NexusMcpServer {
     async fn nexus_execute(&self, Parameters(params): Parameters<ExecuteParams>) -> String {
         match self.do_execute(params).await {
             Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Execute a WASM tool in the Nexus sandbox with instinct-guided retry, and return structured output including success/failure, result bytes, execution time, fuel consumed, and the runtime snapshot id when WASM memory was captured."
+    )]
+    async fn nexus_execute_retry(&self, Parameters(params): Parameters<ExecuteRetryParams>) -> String {
+        match self.do_execute_retry(params).await {
+            Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Execute a WASM module and return a proof capsule alongside the output")]
+    async fn nexus_execute_proof(
+        &self,
+        Parameters(params): Parameters<ExecuteProofParams>,
+    ) -> String {
+        match self.do_execute_proof(params).await {
+            Ok(response) => {
+                serde_json::to_string_pretty(&response).unwrap_or_else(tool_error_response)
+            }
             Err(e) => tool_anyhow_error_response(e),
         }
     }
@@ -196,6 +399,19 @@ impl NexusMcpServer {
     }
 
     #[tool(
+        description = "Create a restricted child capability token attenuated from an existing parent token."
+    )]
+    async fn nexus_attenuate_token(
+        &self,
+        Parameters(params): Parameters<AttenuateTokenParams>,
+    ) -> String {
+        match self.do_attenuate_token(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
         description = "Race multiple WASM branches. Pass base_snapshot_id or source:\"latest_runtime\" to restore a real captured runtime snapshot into each branch before execution; omit both for an explicitly from-scratch race."
     )]
     async fn nexus_fork_and_race(
@@ -203,6 +419,94 @@ impl NexusMcpServer {
         Parameters(params): Parameters<ForkAndRaceParams>,
     ) -> String {
         match self.do_fork_and_race(params).await {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Read instinct store summary statistics such as category totals, confidence, support, and failures."
+    )]
+    async fn nexus_instinct_stats(
+        &self,
+        Parameters(params): Parameters<InstinctStatsParams>,
+    ) -> String {
+        match self.do_instinct_stats(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Query ranked instinct recovery suggestions by failure category and operation.")]
+    async fn nexus_instinct_query(
+        &self,
+        Parameters(params): Parameters<InstinctQueryParams>,
+    ) -> String {
+        match self.do_instinct_query(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Register a new recovery instinct for a failure category and operation pattern."
+    )]
+    async fn nexus_instinct_register(
+        &self,
+        Parameters(params): Parameters<InstinctRegisterParams>,
+    ) -> String {
+        match self.do_instinct_register(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Record instinct outcome success or failure for a UUID.")]
+    async fn nexus_instinct_record_outcome(
+        &self,
+        Parameters(params): Parameters<InstinctRecordOutcomeParams>,
+    ) -> String {
+        match self.do_instinct_record_outcome(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Export all instincts as JSON.")]
+    async fn nexus_instinct_export(
+        &self,
+        Parameters(params): Parameters<InstinctExportParams>,
+    ) -> String {
+        match self.do_instinct_export(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Import instincts from JSON payload.")]
+    async fn nexus_instinct_import(
+        &self,
+        Parameters(params): Parameters<InstinctImportParams>,
+    ) -> String {
+        match self.do_instinct_import(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Get recent execution history entries for troubleshooting and observability."
+    )]
+    async fn nexus_get_history(&self, Parameters(params): Parameters<GetHistoryParams>) -> String {
+        match self.do_get_history(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Get aggregate telemetry and snapshot statistics for the hypervisor.")]
+    async fn nexus_get_stats(&self, Parameters(params): Parameters<GetStatsParams>) -> String {
+        match self.do_get_stats(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
         }
@@ -221,6 +525,12 @@ struct ToolOutputResponse {
     rollback_performed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExecuteProofResponse {
+    output: ToolOutputResponse,
+    proof_capsule: nexus::proof::ProofCapsule,
 }
 
 impl From<ToolOutput> for ToolOutputResponse {
@@ -365,8 +675,44 @@ impl NexusMcpServer {
         Ok(ToolOutputResponse::from(output))
     }
 
+    async fn do_execute_retry(&self, params: ExecuteRetryParams) -> Result<ToolOutputResponse> {
+        self.ensure_tool_allowed("nexus_execute_retry")?;
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
+
+        let mut tool = ToolDefinition::new("mcp_tool".to_string(), wasm_bytes);
+        if let Some(entry) = params.entry {
+            tool = tool.with_entry(&entry);
+        }
+
+        let input = params.input.unwrap_or(serde_json::json!({}));
+        let output = self.hypervisor.execute_with_retry(tool, input).await?;
+        Ok(ToolOutputResponse::from(output))
+    }
+
+    async fn do_execute_proof(&self, params: ExecuteProofParams) -> Result<ExecuteProofResponse> {
+        self.ensure_tool_allowed("nexus_execute_proof")?;
+        self.ensure_proof_enabled()?;
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
+
+        let tool = ToolDefinition::new("mcp_tool_proof".to_string(), wasm_bytes);
+        let input = params.input.unwrap_or(serde_json::json!({}));
+        let (output, proof_capsule) = self.hypervisor.execute_tool_proof(tool, input).await?;
+
+        Ok(ExecuteProofResponse {
+            output: ToolOutputResponse::from(output),
+            proof_capsule,
+        })
+    }
+
     async fn do_execute_wasi(&self, params: ExecuteWasiParams) -> Result<ToolOutputResponse> {
         self.ensure_tool_allowed("nexus_execute_wasi")?;
+        self.ensure_wasi_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -486,6 +832,31 @@ impl NexusMcpServer {
         })
     }
 
+    fn do_attenuate_token(&self, params: AttenuateTokenParams) -> Result<TokenResponse> {
+        self.ensure_tool_allowed("nexus_attenuate_token")?;
+        let parent_id = Uuid::parse_str(&params.parent_token_id)
+            .map_err(|e| anyhow::anyhow!("invalid parent_token_id UUID: {e}"))?;
+        let capability = parse_capability_from_str(&params.capability, params.path.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", params.capability))?;
+
+        // Security: reject the unrestricted `All` capability and clamp the
+        // caller-supplied validity to a bounded maximum (see SECURITY.md).
+        let (capability, validity_secs) = sanitize_token_request(capability, params.validity_secs)?;
+        let validity = Duration::from_secs(validity_secs);
+        let token = self.hypervisor.attenuate_token(
+            parent_id,
+            capability.clone(),
+            "mcp_client",
+            validity,
+        )?;
+
+        Ok(TokenResponse {
+            token_id: token.id.to_string(),
+            capability: format!("{:?}", capability),
+            expires_in_secs: validity_secs,
+        })
+    }
+
     async fn do_fork_and_race(&self, params: ForkAndRaceParams) -> Result<ForkAndRaceResponse> {
         self.ensure_tool_allowed("nexus_fork_and_race")?;
         self.ensure_fork_enabled()?;
@@ -560,6 +931,202 @@ impl NexusMcpServer {
             base_snapshot_id: base_snapshot_id.map(|id| id.to_string()),
             base_snapshot_source,
             semantics,
+        })
+    }
+
+    fn do_instinct_stats(&self, _params: InstinctStatsParams) -> Result<InstinctStatsResponse> {
+        self.ensure_tool_allowed("nexus_instinct_stats")?;
+        self.ensure_instinct_enabled()?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let stats = store.stats();
+        let (highest_confidence_description, highest_confidence_value) =
+            match stats.highest_confidence {
+                Some((description, value)) => (Some(description), Some(value)),
+                None => (None, None),
+            };
+
+        Ok(InstinctStatsResponse {
+            total_instincts: stats.total_instincts,
+            categories: stats.categories,
+            avg_confidence: stats.avg_confidence,
+            highest_confidence_description,
+            highest_confidence_value,
+            total_support: stats.total_support,
+            total_failures: stats.total_failures,
+        })
+    }
+
+    fn do_instinct_query(&self, params: InstinctQueryParams) -> Result<InstinctQueryResponse> {
+        self.ensure_tool_allowed("nexus_instinct_query")?;
+        self.ensure_instinct_enabled()?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let mode = failure_mode_from_category(&params.failure_category)?;
+        let instincts = store.query(&mode, &params.operation);
+        let suggestions = instincts
+            .into_iter()
+            .map(|instinct| InstinctSuggestion {
+                instinct_id: instinct.id,
+                recovery_description: instinct.recovery_description,
+                confidence: instinct.confidence,
+                operation_pattern: instinct.operation_pattern,
+                failure_category: instinct.failure_category,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(InstinctQueryResponse {
+            total: suggestions.len(),
+            suggestions,
+        })
+    }
+
+    fn do_instinct_register(
+        &self,
+        params: InstinctRegisterParams,
+    ) -> Result<InstinctRegisterResponse> {
+        self.ensure_tool_allowed("nexus_instinct_register")?;
+        self.ensure_instinct_enabled()?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        // Validate inputs before touching the on-disk store.
+        const MAX_DESC_LEN: usize = 1024;
+        if params.recovery_description.len() > MAX_DESC_LEN {
+            anyhow::bail!(
+                "recovery_description exceeds {MAX_DESC_LEN} characters"
+            );
+        }
+        let valid_pattern = params.operation_pattern == "*"
+            || params.operation_pattern
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && params.operation_pattern.len() <= 128;
+        if !valid_pattern {
+            anyhow::bail!(
+                "operation_pattern must be '*' or a name containing only alphanumerics, underscores, and hyphens (max 128 chars)"
+            );
+        }
+
+        let mode = failure_mode_from_category(&params.failure_category)
+            .map_err(|e| anyhow::anyhow!("unknown failure_category: {e}"))?;
+        let instinct_id = store.register(
+            &mode,
+            &params.operation_pattern,
+            &params.recovery_description,
+        )?;
+
+        Ok(InstinctRegisterResponse {
+            instinct_id,
+            failure_category: params.failure_category,
+            confidence: 0.5,
+        })
+    }
+
+    fn do_instinct_record_outcome(
+        &self,
+        params: InstinctRecordOutcomeParams,
+    ) -> Result<InstinctRecordOutcomeResponse> {
+        self.ensure_tool_allowed("nexus_instinct_record_outcome")?;
+        self.ensure_instinct_enabled()?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let instinct_id = Uuid::parse_str(&params.instinct_id)
+            .map_err(|e| anyhow::anyhow!("invalid instinct UUID: {e}"))?;
+        let reinforced = if params.success {
+            store.record_success(&instinct_id)?
+        } else {
+            store.record_failure(&instinct_id)?
+        };
+
+        Ok(InstinctRecordOutcomeResponse {
+            instinct_id: params.instinct_id,
+            reinforced,
+            success: params.success,
+        })
+    }
+
+    fn do_instinct_export(&self, _params: InstinctExportParams) -> Result<InstinctExportResponse> {
+        self.ensure_tool_allowed("nexus_instinct_export")?;
+        self.ensure_instinct_enabled()?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let json = store.export_all()?;
+        let parsed: serde_json::Value = serde_json::from_str(&json)?;
+        let instinct_count = parsed.as_array().map(|array| array.len()).unwrap_or(0);
+
+        Ok(InstinctExportResponse { json, instinct_count })
+    }
+
+    fn do_instinct_import(&self, params: InstinctImportParams) -> Result<InstinctImportResponse> {
+        self.ensure_tool_allowed("nexus_instinct_import")?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        if params.json.len() > 10_485_760 {
+            anyhow::bail!("json payload exceeds 10 MiB limit");
+        }
+
+        let (imported, skipped) = store.import_all(&params.json)?;
+        Ok(InstinctImportResponse { imported, skipped })
+    }
+
+    fn do_get_history(&self, params: GetHistoryParams) -> Result<GetHistoryResponse> {
+        self.ensure_tool_allowed("nexus_get_history")?;
+
+        let limit = params.limit.map(|l| l as usize).or(Some(50));
+        let records: Vec<ExecutionRecordSummary> = self
+            .hypervisor
+            .get_history(limit)
+            .into_iter()
+            .map(|record: ExecutionRecord| ExecutionRecordSummary {
+                id: record.id,
+                timestamp: record.timestamp.to_rfc3339(),
+                operation: record.operation,
+                success: record.success,
+                duration_ms: record.duration_ms,
+                fuel_consumed: record.fuel_consumed,
+                has_error: record.error.is_some(),
+            })
+            .collect();
+
+        let total = records.len();
+        Ok(GetHistoryResponse { records, total })
+    }
+
+    fn do_get_stats(&self, _params: GetStatsParams) -> Result<GetStatsResponse> {
+        self.ensure_tool_allowed("nexus_get_stats")?;
+
+        let telemetry: TelemetryStats = self.hypervisor.get_stats();
+        let snapshots = self.hypervisor.get_snapshot_stats();
+
+        Ok(GetStatsResponse {
+            telemetry: TelemetryStatsDto {
+                total_executions: telemetry.total_executions,
+                successful_executions: telemetry.successful_executions,
+                failed_executions: telemetry.failed_executions,
+                total_rollbacks: telemetry.total_rollbacks,
+                avg_duration_ms: telemetry.avg_duration_ms,
+                avg_fuel_per_execution: telemetry.avg_fuel_per_execution,
+                success_rate: telemetry.success_rate,
+            },
+            snapshots: SnapshotStatsDto {
+                total_snapshots: snapshots.total_snapshots,
+                total_rollbacks: snapshots.total_rollbacks,
+                total_memory_saved_mb: snapshots.total_memory_saved_mb,
+                avg_compression_ratio: snapshots.avg_compression_ratio,
+                last_snapshot_time_us: snapshots.last_snapshot_time_us,
+            },
         })
     }
 
@@ -732,6 +1299,55 @@ impl NexusMcpServer {
             "fork_and_race is disabled by the active profile".to_string(),
         ))
     }
+
+    fn ensure_proof_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().proof_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "nexus_execute_proof is disabled by the active profile".to_string(),
+        ))
+    }
+
+    fn ensure_wasi_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().wasi_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "nexus_execute_wasi is disabled by the active profile".to_string(),
+        ))
+    }
+
+    fn ensure_instinct_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().instinct_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "instinct tools are disabled by the active profile".to_string(),
+        ))
+    }
+
+    #[allow(dead_code)]
+    fn ensure_retry_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().retry_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "nexus_execute_retry is disabled by the active profile".to_string(),
+        ))
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -764,6 +1380,39 @@ fn restored_state_summary(result: &nexus::snapshot::RollbackResult) -> RestoredS
             captured_globals: result.execution_state.captured_globals.len(),
             captured_tables: result.execution_state.captured_tables.len(),
         },
+    }
+}
+
+fn failure_mode_from_category(category: &str) -> anyhow::Result<FailureMode> {
+    match category {
+        "TIMEOUT" => Ok(FailureMode::Timeout {
+            limit_ms: 0,
+            observed_ms: 0,
+        }),
+        "FUEL_EXHAUSTED" => Ok(FailureMode::FuelExhausted { limit: 0 }),
+        "TRAP_UNREACHABLE" => Ok(FailureMode::TrapUnreachable),
+        "TRAP_DIV_BY_ZERO" => Ok(FailureMode::TrapDivByZero),
+        "TRAP_INTEGER_OVERFLOW" => Ok(FailureMode::TrapIntegerOverflow),
+        "TRAP_BAD_FLOAT_TO_INT" => Ok(FailureMode::TrapBadConversionToInteger),
+        "TRAP_STACK_OVERFLOW" => Ok(FailureMode::TrapStackOverflow),
+        "TRAP_MEMORY_OOB" => Ok(FailureMode::TrapMemoryOutOfBounds),
+        "TRAP_HEAP_MISALIGNED" => Ok(FailureMode::TrapHeapMisaligned),
+        "TRAP_TABLE_OOB" => Ok(FailureMode::TrapTableOutOfBounds),
+        "TRAP_INDIRECT_NULL" => Ok(FailureMode::TrapIndirectCallToNull),
+        "TRAP_BAD_SIGNATURE" => Ok(FailureMode::TrapBadSignature),
+        "TRAP_NULL_REFERENCE" => Ok(FailureMode::TrapNullReference),
+        "TRAP_CAST_FAILURE" => Ok(FailureMode::TrapCastFailure),
+        "TRAP_OTHER" => Ok(FailureMode::TrapOther("TRAP_OTHER".to_string())),
+        "MEMORY_LIMIT_EXCEEDED" => Ok(FailureMode::MemoryLimitExceeded {
+            pages: 0,
+            limit_pages: 0,
+        }),
+        "INVALID_MODULE" => Ok(FailureMode::InvalidModule(String::new())),
+        "MISSING_ENTRYPOINT" => Ok(FailureMode::MissingEntrypoint {
+            expected: String::new(),
+        }),
+        "HOST_ERROR" => Ok(FailureMode::HostError(String::new())),
+        _ => Err(anyhow::anyhow!("unrecognised failure category '{category}'")),
     }
 }
 
@@ -1103,6 +1752,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn get_history_returns_empty_for_fresh_hypervisor() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let response = server.do_get_history(GetHistoryParams { limit: None }).unwrap();
+
+        assert!(response.records.is_empty());
+    }
+
+    #[test]
+    fn get_stats_returns_zero_for_fresh_hypervisor() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let response = server.do_get_stats(GetStatsParams {}).unwrap();
+
+        assert_eq!(response.telemetry.total_executions, 0);
+    }
+
+    #[test]
+    fn instinct_stats_errors_when_store_not_initialised() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = server
+            .do_instinct_stats(InstinctStatsParams {})
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not initialised"));
+    }
+
+    #[test]
+    fn instinct_import_errors_when_store_not_initialised() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = server
+            .do_instinct_import(InstinctImportParams {
+                json: "[]".to_string(),
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not initialised"));
+    }
+
+    #[test]
+    fn instinct_query_errors_when_store_not_initialised() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = server
+            .do_instinct_query(InstinctQueryParams {
+                failure_category: "TIMEOUT".to_string(),
+                operation: "*".to_string(),
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not initialised"));
+    }
+
+    #[test]
+    fn instinct_query_rejects_unknown_category() {
+        assert!(failure_mode_from_category("NOT_A_REAL_CATEGORY").is_err());
+    }
+
+    #[test]
     fn rejects_all_capability_for_mcp_clients() {
         let r = sanitize_token_request(Capability::All, Some(60));
         assert!(
@@ -1132,6 +1845,26 @@ mod tests {
         let (_, secs) =
             sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), None).unwrap();
         assert_eq!(secs, MAX_TOKEN_VALIDITY_SECS);
+    }
+
+    #[test]
+    fn attenuate_token_rejects_invalid_uuid() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = match server.do_attenuate_token(AttenuateTokenParams {
+            parent_token_id: "not-a-uuid".to_string(),
+            capability: "read_file".to_string(),
+            path: Some("/tmp".to_string()),
+            validity_secs: None,
+        }) {
+            Ok(_) => panic!("expected invalid parent_token_id UUID error"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(
+            error.contains("invalid parent_token_id UUID"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -300,15 +300,45 @@ async fn initialize_and_list_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 6, "expected 6 tools, got: {:?}", tools);
 
+    // Adaptive check: verify all essential tools are present
+    // without asserting on exact count (allows graceful addition of new tools)
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(tool_names.contains(&"nexus_execute"));
-    assert!(tool_names.contains(&"nexus_execute_wasi"));
-    assert!(tool_names.contains(&"nexus_snapshot_create"));
-    assert!(tool_names.contains(&"nexus_snapshot_rollback"));
-    assert!(tool_names.contains(&"nexus_issue_token"));
-    assert!(tool_names.contains(&"nexus_fork_and_race"));
+
+    // Define the set of tools that must always exist
+    let required_tools = [
+        "nexus_execute",
+        "nexus_execute_proof",
+        "nexus_execute_wasi",
+        "nexus_snapshot_create",
+        "nexus_snapshot_rollback",
+        "nexus_issue_token",
+        "nexus_attenuate_token",
+        "nexus_fork_and_race",
+        "nexus_instinct_stats",
+        "nexus_instinct_query",
+        "nexus_instinct_register",
+        "nexus_instinct_record_outcome",
+        "nexus_instinct_export",
+        "nexus_instinct_import",
+        "nexus_get_history",
+        "nexus_get_stats",
+    ];
+
+    for required_tool in &required_tools {
+        assert!(
+            tool_names.contains(required_tool),
+            "required tool is missing from available tools: {:?}",
+            tool_names
+        );
+    }
+
+    assert!(
+        tools.len() >= required_tools.len(),
+        "expected at least {} tools, got {}",
+        required_tools.len(),
+        tools.len()
+    );
 }
 
 #[tokio::test]
@@ -358,6 +388,42 @@ async fn snapshot_create_returns_uuid() {
     // Verify the snapshot_id is a valid UUID
     let snap_id = parsed["snapshot_id"].as_str().unwrap();
     uuid::Uuid::parse_str(snap_id).expect("snapshot_id should be a valid UUID");
+}
+
+#[tokio::test]
+async fn execute_proof_returns_output_and_capsule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("proof_noop.wasm");
+    write_noop_wasm(&wasm_path);
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_proof",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "input": { "message": "hello" }
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    assert_eq!(parsed["output"]["success"], true);
+    assert!(
+        parsed["proof_capsule"]["capsule_id"].is_string(),
+        "proof response should include a capsule_id: {parsed}"
+    );
+    assert!(
+        parsed.to_string().contains("success"),
+        "proof response should include output success: {parsed}"
+    );
 }
 
 #[tokio::test]
