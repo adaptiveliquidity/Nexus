@@ -300,7 +300,7 @@ async fn initialize_and_list_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 7, "expected 7 tools, got: {:?}", tools);
+    assert_eq!(tools.len(), 11, "expected 11 tools, got: {:?}", tools);
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tool_names.contains(&"nexus_execute"));
@@ -310,6 +310,10 @@ async fn initialize_and_list_tools() {
     assert!(tool_names.contains(&"nexus_snapshot_rollback"));
     assert!(tool_names.contains(&"nexus_issue_token"));
     assert!(tool_names.contains(&"nexus_fork_and_race"));
+    assert!(tool_names.contains(&"nexus_instinct_stats"));
+    assert!(tool_names.contains(&"nexus_instinct_register"));
+    assert!(tool_names.contains(&"nexus_instinct_record_outcome"));
+    assert!(tool_names.contains(&"nexus_instinct_export"));
 }
 
 #[tokio::test]

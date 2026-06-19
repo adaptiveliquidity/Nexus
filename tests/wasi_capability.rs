@@ -34,6 +34,7 @@ fn pure_compute_module() -> Vec<u8> {
     .unwrap()
 }
 
+#[allow(dead_code)]
 fn wasi_symlink_escape_probe_module() -> Vec<u8> {
     wat::parse_str(
         r#"(module
