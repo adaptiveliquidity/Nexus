@@ -300,10 +300,11 @@ async fn initialize_and_list_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 6, "expected 6 tools, got: {:?}", tools);
+    assert_eq!(tools.len(), 7, "expected 7 tools, got: {:?}", tools);
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tool_names.contains(&"nexus_execute"));
+    assert!(tool_names.contains(&"nexus_execute_proof"));
     assert!(tool_names.contains(&"nexus_execute_wasi"));
     assert!(tool_names.contains(&"nexus_snapshot_create"));
     assert!(tool_names.contains(&"nexus_snapshot_rollback"));
@@ -358,6 +359,42 @@ async fn snapshot_create_returns_uuid() {
     // Verify the snapshot_id is a valid UUID
     let snap_id = parsed["snapshot_id"].as_str().unwrap();
     uuid::Uuid::parse_str(snap_id).expect("snapshot_id should be a valid UUID");
+}
+
+#[tokio::test]
+async fn execute_proof_returns_output_and_capsule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("proof_noop.wasm");
+    write_noop_wasm(&wasm_path);
+
+    let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_proof",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "input": { "message": "hello" }
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    assert_eq!(parsed["output"]["success"], true);
+    assert!(
+        parsed["proof_capsule"]["capsule_id"].is_string(),
+        "proof response should include a capsule_id: {parsed}"
+    );
+    assert!(
+        parsed.to_string().contains("success"),
+        "proof response should include output success: {parsed}"
+    );
 }
 
 #[tokio::test]

@@ -38,6 +38,14 @@ pub struct ExecuteParams {
     pub input: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ExecuteProofParams {
+    #[schemars(description = "Path to the WASM module file to execute")]
+    pub wasm_path: String,
+    #[schemars(description = "JSON input to pass to the WASM module")]
+    pub input: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteWasiParams {
     #[schemars(description = "Path to the .wasm file to execute")]
@@ -146,6 +154,19 @@ impl NexusMcpServer {
         }
     }
 
+    #[tool(description = "Execute a WASM module and return a proof capsule alongside the output")]
+    async fn nexus_execute_proof(
+        &self,
+        Parameters(params): Parameters<ExecuteProofParams>,
+    ) -> String {
+        match self.do_execute_proof(params).await {
+            Ok(response) => {
+                serde_json::to_string_pretty(&response).unwrap_or_else(tool_error_response)
+            }
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
     #[tool(
         description = "Execute a WASM tool with WASI support (filesystem, env, stdio access). Grants specified capabilities for the duration of execution."
     )]
@@ -221,6 +242,12 @@ struct ToolOutputResponse {
     rollback_performed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExecuteProofResponse {
+    output: ToolOutputResponse,
+    proof_capsule: nexus::proof::ProofCapsule,
 }
 
 impl From<ToolOutput> for ToolOutputResponse {
@@ -363,6 +390,23 @@ impl NexusMcpServer {
         // this tool is handled by ensure_tool_allowed above (MCP tool allowlist).
         let output = self.hypervisor.execute_tool(tool, input).await?;
         Ok(ToolOutputResponse::from(output))
+    }
+
+    async fn do_execute_proof(&self, params: ExecuteProofParams) -> Result<ExecuteProofResponse> {
+        self.ensure_tool_allowed("nexus_execute_proof")?;
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
+
+        let tool = ToolDefinition::new("mcp_tool_proof".to_string(), wasm_bytes);
+        let input = params.input.unwrap_or(serde_json::json!({}));
+        let (output, proof_capsule) = self.hypervisor.execute_tool_proof(tool, input).await?;
+
+        Ok(ExecuteProofResponse {
+            output: ToolOutputResponse::from(output),
+            proof_capsule,
+        })
     }
 
     async fn do_execute_wasi(&self, params: ExecuteWasiParams) -> Result<ToolOutputResponse> {
