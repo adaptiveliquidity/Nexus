@@ -11,6 +11,7 @@ pub mod profile;
 pub mod proof;
 pub mod sandbox;
 pub mod security;
+pub mod signing;
 pub mod snapshot;
 pub mod telemetry;
 
