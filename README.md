@@ -171,7 +171,7 @@ nexus demo --demo all
 | WASM call-stack capture | Shipped (diagnostic) | Trap call stacks flow into `ErrorLog` as telemetry metadata without changing snapshot digests |
 | Snapshot sync protocol | Shipped (local/tested) | Digest, framed transport, lineage, and protocol tests are in-tree; distributed deployment remains RFC work |
 | Capability profiles | Shipped (Slices 1-3) | TOML manifest (NEXUS_MCP_PROFILE env) enforces MCP tool allowlist, snapshot/fork gates, capability scopes, module-dir allowlist (execution.module_dirs), and daemon auth enforcement (daemon_auth_required); nexus profile validate parses + validates |
-| Runtime proof capsules | Shipped (Wave 2) | ProofCapsule schema + ExecutionReceipt; TypedDigest (SHA-256/HMAC/redacted), canonical JSON signing payload, ProofScorecard; RedactionPolicy applies RFC 0005 redaction model (host paths HMACd, secrets removed, error strings truncated, preview_base64 excluded); cargo-deny CI gate |
+| Proof capsule | Shipped (Wave 3) | ExecutionReceipt wired to execute_tool_proof; signing (Wave 4) pending |
 | Live benchmarks | Shipped | Always-on wall-clock, binary size, CPU-simulation, and heap-memory checks; bare-metal walltime is opt-in; dashboard auto-updates from main |
 
 ### Roadmap
