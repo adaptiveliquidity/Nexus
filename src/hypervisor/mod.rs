@@ -26,12 +26,12 @@ use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
 use crate::proof::receipt::{ExecutionReceipt, FailureModeLite};
-use crate::proof::sign_capsule;
 use crate::proof::schema::{
     CapabilityEvidence, FailureEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef,
     ProofCapsule, ProofSubject, RedactionReport, RollbackEvidence, SnapshotEvidence, SnapshotKind,
     ToolIdentity, TypedDigest,
 };
+use crate::proof::sign_capsule;
 use crate::sandbox::{
     FuelBudgetPolicy, FuelProfile, PoolConfig, RestoredExecutionState, SandboxConfig, SandboxPool,
     WasiToolConfig, WasmSandbox,

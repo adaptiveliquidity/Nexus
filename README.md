@@ -170,8 +170,7 @@ nexus demo --demo all
 | Density benchmark harness | Shipped (manual) | `cargo bench --bench density_validation --features bench-density`; intentionally excluded from normal PR gates |
 | WASM call-stack capture | Shipped (diagnostic) | Trap call stacks flow into `ErrorLog` as telemetry metadata without changing snapshot digests |
 | Snapshot sync protocol | Shipped (local/tested) | Digest, framed transport, lineage, and protocol tests are in-tree; distributed deployment remains RFC work |
-| Capability profiles | Shipped (Slices 1-3) | TOML manifest (NEXUS_MCP_PROFILE env) enforces MCP tool allowlist, snapshot/fork gates, capability scopes, module-dir allowlist (execution.module_dirs), and daemon auth enforcement (daemon_auth_required); nexus profile validate parses + validates |
-| Proof capsule | Shipped (Wave 3) | ExecutionReceipt wired to execute_tool_proof; signing (Wave 4) pending |
+| Proof capsule | Shipped (Waves 3–4) | ExecutionReceipt wired to execute_tool_proof with opt-in Ed25519 capsule signing |
 | Live benchmarks | Shipped | Always-on wall-clock, binary size, CPU-simulation, and heap-memory checks; bare-metal walltime is opt-in; dashboard auto-updates from main |
 
 ### Roadmap

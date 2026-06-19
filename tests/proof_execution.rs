@@ -66,7 +66,10 @@ async fn rollback_after_trap_populates_rollback_evidence() {
         .unwrap();
 
     assert!(!trap_output.success);
-    assert!(trap_output.rollback_performed, "hypervisor must roll back after trap");
+    assert!(
+        trap_output.rollback_performed,
+        "hypervisor must roll back after trap"
+    );
 
     let rollback = capsule
         .rollback

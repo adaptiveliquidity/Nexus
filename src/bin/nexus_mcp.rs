@@ -17,11 +17,11 @@ use sha2::Digest;
 use tracing_subscriber::{self, EnvFilter};
 use uuid::Uuid;
 
+use nexus::hypervisor::failure_mode::FailureMode;
 use nexus::hypervisor::{
     fork_and_race, HypervisorConfig, NexusHypervisor, RecoveryAction, RecoverySource,
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
-use nexus::hypervisor::failure_mode::FailureMode;
 use nexus::profile::{load_and_validate, CapabilityProfileManifest};
 use nexus::security::{Capability, CapabilityToken};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
@@ -176,9 +176,7 @@ struct InstinctStatsResponse {
 pub struct InstinctQueryParams {
     #[schemars(description = "Failure category to search against (e.g. TRAP_DIV_BY_ZERO)")]
     pub failure_category: String,
-    #[schemars(
-        description = "Operation pattern to match (exact name or * for all operations)"
-    )]
+    #[schemars(description = "Operation pattern to match (exact name or * for all operations)")]
     pub operation: String,
 }
 
@@ -202,9 +200,7 @@ pub struct InstinctSuggestion {
 pub struct InstinctRegisterParams {
     #[schemars(description = "Failure category to learn against (e.g. TRAP_DIV_BY_ZERO)")]
     pub failure_category: String,
-    #[schemars(
-        description = "Operation pattern (exact match or * for all operations)"
-    )]
+    #[schemars(description = "Operation pattern (exact match or * for all operations)")]
     pub operation_pattern: String,
     #[schemars(description = "Human-readable recovery advice")]
     pub recovery_description: String,
@@ -329,7 +325,10 @@ impl NexusMcpServer {
     #[tool(
         description = "Execute a WASM tool in the Nexus sandbox with instinct-guided retry, and return structured output including success/failure, result bytes, execution time, fuel consumed, and the runtime snapshot id when WASM memory was captured."
     )]
-    async fn nexus_execute_retry(&self, Parameters(params): Parameters<ExecuteRetryParams>) -> String {
+    async fn nexus_execute_retry(
+        &self,
+        Parameters(params): Parameters<ExecuteRetryParams>,
+    ) -> String {
         match self.do_execute_retry(params).await {
             Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
@@ -437,7 +436,9 @@ impl NexusMcpServer {
         }
     }
 
-    #[tool(description = "Query ranked instinct recovery suggestions by failure category and operation.")]
+    #[tool(
+        description = "Query ranked instinct recovery suggestions by failure category and operation."
+    )]
     async fn nexus_instinct_query(
         &self,
         Parameters(params): Parameters<InstinctQueryParams>,
@@ -998,12 +999,11 @@ impl NexusMcpServer {
         // Validate inputs before touching the on-disk store.
         const MAX_DESC_LEN: usize = 1024;
         if params.recovery_description.len() > MAX_DESC_LEN {
-            anyhow::bail!(
-                "recovery_description exceeds {MAX_DESC_LEN} characters"
-            );
+            anyhow::bail!("recovery_description exceeds {MAX_DESC_LEN} characters");
         }
         let valid_pattern = params.operation_pattern == "*"
-            || params.operation_pattern
+            || params
+                .operation_pattern
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
                 && params.operation_pattern.len() <= 128;
@@ -1064,7 +1064,10 @@ impl NexusMcpServer {
         let parsed: serde_json::Value = serde_json::from_str(&json)?;
         let instinct_count = parsed.as_array().map(|array| array.len()).unwrap_or(0);
 
-        Ok(InstinctExportResponse { json, instinct_count })
+        Ok(InstinctExportResponse {
+            json,
+            instinct_count,
+        })
     }
 
     fn do_instinct_import(&self, params: InstinctImportParams) -> Result<InstinctImportResponse> {
@@ -1412,7 +1415,9 @@ fn failure_mode_from_category(category: &str) -> anyhow::Result<FailureMode> {
             expected: String::new(),
         }),
         "HOST_ERROR" => Ok(FailureMode::HostError(String::new())),
-        _ => Err(anyhow::anyhow!("unrecognised failure category '{category}'")),
+        _ => Err(anyhow::anyhow!(
+            "unrecognised failure category '{category}'"
+        )),
     }
 }
 
@@ -1558,8 +1563,9 @@ fn canonicalize_module_dirs(dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     }
     dirs.iter()
         .map(|dir| {
-            let canonical = std::fs::canonicalize(dir)
-                .map_err(|e| anyhow::anyhow!("invalid profile module dir '{}': {e}", dir.display()))?;
+            let canonical = std::fs::canonicalize(dir).map_err(|e| {
+                anyhow::anyhow!("invalid profile module dir '{}': {e}", dir.display())
+            })?;
             if !canonical.is_dir() {
                 anyhow::bail!(
                     "invalid profile module dir '{}': not a directory",
@@ -1689,10 +1695,7 @@ fn parse_capability(spec: &CapabilitySpec) -> Result<Capability> {
         "read_file" | "write_file" | "list_dir" | "execute" | "mount_tmpfs"
     );
     if path_required && spec.path.is_none() {
-        anyhow::bail!(
-            "capability type '{}' requires a 'path' field",
-            spec.r#type
-        );
+        anyhow::bail!("capability type '{}' requires a 'path' field", spec.r#type);
     }
     let url_required = matches!(spec.r#type.as_str(), "http_get" | "http_post");
     if url_required && spec.path.is_none() {
@@ -1752,7 +1755,9 @@ mod tests {
     fn get_history_returns_empty_for_fresh_hypervisor() {
         let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
         let server = NexusMcpServer::new(hypervisor).unwrap();
-        let response = server.do_get_history(GetHistoryParams { limit: None }).unwrap();
+        let response = server
+            .do_get_history(GetHistoryParams { limit: None })
+            .unwrap();
 
         assert!(response.records.is_empty());
     }
