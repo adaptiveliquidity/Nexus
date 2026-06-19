@@ -6,6 +6,7 @@ pub mod receipt;
 pub mod redaction;
 pub mod schema;
 pub mod scorecard;
+pub mod signing;
 
 pub use canonical::{canonical_bytes, capsule_digest};
 pub use digest::digest_with_key;
