@@ -89,13 +89,15 @@ scope `All` is rejected by validation.
 
 ### 3.4 `[mcp]`
 
-The MCP section is optional. When present, all fields are required.
+The MCP section is optional. **When the section is absent entirely, all
+MCP feature gates default to disabled (fail-closed).** When the section is
+present, omitted boolean fields also default to `false`.
 
-| Field | Type | Required | Meaning |
+| Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `tool_allowlist` | array of strings | yes | MCP tool names allowed by this profile. |
-| `snapshot_enabled` | bool | yes | Whether snapshot MCP tools are available under this profile. |
-| `fork_enabled` | bool | yes | Whether fork/race MCP tools are available under this profile. |
+| `tool_allowlist` | array of strings | absent (all tools allowed) | MCP tool names allowed by this profile. |
+| `snapshot_enabled` | bool | `false` | Whether snapshot MCP tools are available under this profile. |
+| `fork_enabled` | bool | `false` | Whether fork/race MCP tools are available under this profile. |
 
 ## 4. Validation Rules
 

@@ -433,6 +433,15 @@ async fn serve(
             ..
         } => {
             let bytes = match (wasm_bytes, wasm_path) {
+                (Some(_), _) if auth_token.is_none() => {
+                    // Raw bytes bypass the path allowlist. Require configured auth
+                    // so that unauthenticated callers cannot submit arbitrary WASM.
+                    return DaemonResponse::Error {
+                        message:
+                            "wasm_bytes submission requires daemon authentication to be configured"
+                                .into(),
+                    };
+                }
                 (Some(b), _) => b,
                 (None, Some(p)) => match read_allowlisted_wasm_path(&p) {
                     Ok(b) => b,

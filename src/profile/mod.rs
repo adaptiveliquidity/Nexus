@@ -54,9 +54,10 @@ pub struct ExecutionPolicy {
 
 /// Policy for the MCP tool surface, parsed from the optional `[mcp]` table.
 ///
-/// An absent table — or absent individual fields — falls back to permissive
-/// defaults so existing capability-only profiles keep their current behaviour.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// **Fail-closed by default**: an absent table, or absent individual fields,
+/// disables the corresponding tools. Profiles must explicitly set
+/// `snapshot_enabled = true` / `fork_enabled = true` to expose those surfaces.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpPolicy {
     /// When `Some`, only these MCP tool names may be invoked. `None` leaves all
     /// registered tools callable (no tool-level gating).
@@ -73,20 +74,6 @@ pub struct McpPolicy {
     pub instinct_enabled: bool,
     /// Whether the nexus_execute_retry tool is permitted.
     pub retry_enabled: bool,
-}
-
-impl Default for McpPolicy {
-    fn default() -> Self {
-        Self {
-            tool_allowlist: None,
-            snapshot_enabled: true,
-            fork_enabled: true,
-            proof_enabled: true,
-            wasi_enabled: true,
-            instinct_enabled: true,
-            retry_enabled: true,
-        }
-    }
 }
 
 impl McpPolicy {
@@ -323,12 +310,12 @@ fn mcp_policy_from_raw(raw: Option<RawMcp>) -> McpPolicy {
         None => McpPolicy::default(),
         Some(raw) => McpPolicy {
             tool_allowlist: raw.tool_allowlist,
-            snapshot_enabled: raw.snapshot_enabled.unwrap_or(true),
-            fork_enabled: raw.fork_enabled.unwrap_or(true),
-            proof_enabled: raw.proof_enabled.unwrap_or(true),
-            wasi_enabled: raw.wasi_enabled.unwrap_or(true),
-            instinct_enabled: raw.instinct_enabled.unwrap_or(true),
-            retry_enabled: raw.retry_enabled.unwrap_or(true),
+            snapshot_enabled: raw.snapshot_enabled.unwrap_or(false),
+            fork_enabled: raw.fork_enabled.unwrap_or(false),
+            proof_enabled: raw.proof_enabled.unwrap_or(false),
+            wasi_enabled: raw.wasi_enabled.unwrap_or(false),
+            instinct_enabled: raw.instinct_enabled.unwrap_or(false),
+            retry_enabled: raw.retry_enabled.unwrap_or(false),
         },
     }
 }
@@ -600,8 +587,19 @@ fn validate_capabilities(
             "mount_tmpfs" => {
                 required_path(raw, original_type, "path", errors).map(Capability::MountTmpfs)
             }
-            "all" => Some(Capability::All),
-            "none" => Some(Capability::None),
+            "all" | "none" => {
+                // `Capability::All` and `Capability::None` are runtime sentinels,
+                // not valid profile entries. Allowing "all" in a profile would
+                // defeat capability confinement entirely.
+                errors.push(ValidationError::UnknownCapabilityType {
+                    line: capability_type.line,
+                    capability_type: format!(
+                        "\"{}\" is a reserved sentinel and may not appear in profile manifests",
+                        original_type
+                    ),
+                });
+                None
+            }
             _ => {
                 errors.push(ValidationError::UnknownCapabilityType {
                     line: capability_type.line,
@@ -955,7 +953,7 @@ fork_enabled = true
     }
 
     #[test]
-    fn mcp_policy_defaults_to_permissive_when_absent() {
+    fn mcp_policy_defaults_to_fail_closed_when_absent() {
         let path = write_profile(
             r#"
 name = "no-mcp"
@@ -971,14 +969,15 @@ path = "/tmp"
 
         let mcp = manifest.mcp_policy();
         assert_eq!(mcp, &McpPolicy::default());
-        assert!(mcp.snapshot_enabled);
-        assert!(mcp.fork_enabled);
+        // Absent [mcp] table means fail-closed: snapshot and fork are disabled.
+        assert!(!mcp.snapshot_enabled);
+        assert!(!mcp.fork_enabled);
         assert!(mcp.tool_allowlist.is_none());
         assert!(mcp.allows_tool("anything"));
     }
 
     #[test]
-    fn mcp_policy_partial_table_keeps_field_defaults() {
+    fn mcp_policy_partial_table_keeps_field_defaults_fail_closed() {
         let path = write_profile(
             r#"
 name = "partial"
@@ -996,7 +995,8 @@ fork_enabled = false
         std::fs::remove_file(path).ok();
 
         let mcp = manifest.mcp_policy();
-        assert!(mcp.snapshot_enabled);
+        // snapshot_enabled omitted → defaults to false (fail-closed).
+        assert!(!mcp.snapshot_enabled);
         assert!(!mcp.fork_enabled);
         assert!(mcp.tool_allowlist.is_none());
     }
@@ -1021,9 +1021,9 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_proof_enabled_is_true() {
+    fn default_proof_enabled_is_false() {
         let mcp = McpPolicy::default();
-        assert!(mcp.proof_enabled);
+        assert!(!mcp.proof_enabled);
     }
 
     #[test]
@@ -1034,8 +1034,8 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_wasi_enabled_is_true() {
-        assert!(McpPolicy::default().wasi_enabled);
+    fn default_wasi_enabled_is_false() {
+        assert!(!McpPolicy::default().wasi_enabled);
     }
 
     #[test]
@@ -1046,8 +1046,8 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_instinct_enabled_is_true() {
-        assert!(McpPolicy::default().instinct_enabled);
+    fn default_instinct_enabled_is_false() {
+        assert!(!McpPolicy::default().instinct_enabled);
     }
 
     #[test]
@@ -1058,8 +1058,8 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_retry_enabled_is_true() {
-        assert!(McpPolicy::default().retry_enabled);
+    fn default_retry_enabled_is_false() {
+        assert!(!McpPolicy::default().retry_enabled);
     }
 
     #[test]

@@ -153,6 +153,12 @@ pub(crate) fn normalize_lexical_path(path: &Path) -> PathBuf {
         }
     }
 
+    // Capability paths are semantically POSIX (WASI). On Windows, PathBuf uses
+    // `\` separators which breaks equality and `starts_with` comparisons against
+    // `/`-prefixed inputs from capability tokens. Normalize to `/`.
+    #[cfg(windows)]
+    let normalized = PathBuf::from(normalized.to_string_lossy().replace('\\', "/"));
+
     normalized
 }
 

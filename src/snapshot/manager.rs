@@ -700,7 +700,14 @@ impl SnapshotManager {
 
         let base_memory = {
             let buffer = self.buffer.read().unwrap();
-            buffer.get(&current_base).unwrap().decompress_memory()?
+            buffer
+                .get(&current_base)
+                .ok_or_else(|| {
+                    NexusError::RollbackFailed(format!(
+                        "base snapshot {current_base} was evicted before diff reconstruction completed"
+                    ))
+                })?
+                .decompress_memory()?
         };
 
         let chain_refs: Vec<&DiffSnapshot> = chain.iter().collect();
@@ -740,6 +747,16 @@ impl SnapshotManager {
 
         let bytes = std::fs::read(&path)
             .map_err(|e| NexusError::FilesystemError(format!("Failed to read: {}", e)))?;
+
+        // Guard against crafted oversized files that would exhaust memory
+        // before bincode's recursive deserializer can produce an error.
+        const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(NexusError::SerializationError(format!(
+                "snapshot file too large ({} bytes; max {MAX_SNAPSHOT_BYTES})",
+                bytes.len()
+            )));
+        }
 
         let snapshot: Snapshot = bincode::deserialize(&bytes)
             .map_err(|e| NexusError::SerializationError(format!("Failed to deserialize: {}", e)))?;

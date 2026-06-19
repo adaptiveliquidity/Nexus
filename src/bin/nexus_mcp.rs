@@ -1622,6 +1622,28 @@ fn path_is_lexically_allowed(path: &Path, allowed_dirs: &[PathBuf]) -> bool {
 }
 
 fn lexical_normalize_path(path: &Path) -> PathBuf {
+    // On Windows, `std::fs::canonicalize` returns verbatim (extended-length)
+    // paths with a `\\?\` prefix, while paths built from `tempdir` or user
+    // input do not carry that prefix.  Strip it so that `starts_with`
+    // comparisons between canonicalized allowed-dirs and ordinary input paths
+    // agree on the prefix form.
+    #[cfg(windows)]
+    let path: std::borrow::Cow<Path> = {
+        use std::path::Component;
+        if let Some(Component::Prefix(p)) = path.components().next() {
+            use std::path::Prefix;
+            if matches!(p.kind(), Prefix::VerbatimDisk(_)) {
+                // \\?\C:\... -> C:\...
+                let s = path.to_string_lossy();
+                let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
+                std::borrow::Cow::Owned(PathBuf::from(stripped.to_string()))
+            } else {
+                std::borrow::Cow::Borrowed(path)
+            }
+        } else {
+            std::borrow::Cow::Borrowed(path)
+        }
+    };
     let is_absolute = path.is_absolute();
     let mut normalized = PathBuf::new();
 
