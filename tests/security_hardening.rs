@@ -203,7 +203,6 @@ async fn wasi_mount_path_traversal_is_rejected() {
 }
 
 #[test]
-#[ignore = "H4 fix is on security/h4-auth-ordering; run with -- --ignored to verify that branch"]
 fn required_capabilities_does_not_create_dirs() {
     let tmp = tempfile::tempdir().unwrap();
     let missing_mount = tmp.path().join("nexus_test_dir_that_should_not_exist");
