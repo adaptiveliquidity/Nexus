@@ -45,3 +45,36 @@ async fn wasm_trap_populates_failure_evidence() {
     assert!(!failure.failure_category.is_empty());
     assert!(!failure.error_summary.is_empty());
 }
+
+#[tokio::test]
+async fn rollback_after_trap_populates_rollback_evidence() {
+    let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+
+    // First execution: establishes a snapshot for rollback testing.
+    let good = ToolDefinition::new("rollback_good".to_string(), trivial_wasm());
+    let (first_output, _) = hypervisor
+        .execute_tool_proof(good, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(first_output.success);
+
+    // Second execution: traps and should roll back to the first snapshot.
+    let bad = ToolDefinition::new("rollback_bad".to_string(), trap_wasm());
+    let (trap_output, capsule) = hypervisor
+        .execute_tool_proof(bad, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(!trap_output.success);
+    assert!(trap_output.rollback_performed, "hypervisor must roll back after trap");
+
+    let rollback = capsule
+        .rollback
+        .as_ref()
+        .expect("capsule must have RollbackEvidence");
+    assert!(rollback.occurred);
+    assert!(rollback.from_snapshot_id.is_some());
+
+    let scorecard = ProofScorecard::from_capsule(&capsule);
+    assert!(scorecard.has_rollback);
+}
