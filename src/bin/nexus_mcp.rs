@@ -747,7 +747,26 @@ impl NexusMcpServer {
             anyhow::bail!("instinct store not initialised");
         };
 
-        let mode = failure_mode_from_category(&params.failure_category);
+        // Validate inputs before touching the on-disk store.
+        const MAX_DESC_LEN: usize = 1024;
+        if params.recovery_description.len() > MAX_DESC_LEN {
+            anyhow::bail!(
+                "recovery_description exceeds {MAX_DESC_LEN} characters"
+            );
+        }
+        let valid_pattern = params.operation_pattern == "*"
+            || params.operation_pattern
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && params.operation_pattern.len() <= 128;
+        if !valid_pattern {
+            anyhow::bail!(
+                "operation_pattern must be '*' or a name containing only alphanumerics, underscores, and hyphens (max 128 chars)"
+            );
+        }
+
+        let mode = failure_mode_from_category(&params.failure_category)
+            .map_err(|e| anyhow::anyhow!("unknown failure_category: {e}"))?;
         let instinct_id = store.register(
             &mode,
             &params.operation_pattern,
@@ -1014,36 +1033,36 @@ fn restored_state_summary(result: &nexus::snapshot::RollbackResult) -> RestoredS
     }
 }
 
-fn failure_mode_from_category(category: &str) -> FailureMode {
+fn failure_mode_from_category(category: &str) -> anyhow::Result<FailureMode> {
     match category {
-        "TIMEOUT" => FailureMode::Timeout {
+        "TIMEOUT" => Ok(FailureMode::Timeout {
             limit_ms: 0,
             observed_ms: 0,
-        },
-        "FUEL_EXHAUSTED" => FailureMode::FuelExhausted { limit: 0 },
-        "TRAP_UNREACHABLE" => FailureMode::TrapUnreachable,
-        "TRAP_DIV_BY_ZERO" => FailureMode::TrapDivByZero,
-        "TRAP_INTEGER_OVERFLOW" => FailureMode::TrapIntegerOverflow,
-        "TRAP_BAD_FLOAT_TO_INT" => FailureMode::TrapBadConversionToInteger,
-        "TRAP_STACK_OVERFLOW" => FailureMode::TrapStackOverflow,
-        "TRAP_MEMORY_OOB" => FailureMode::TrapMemoryOutOfBounds,
-        "TRAP_HEAP_MISALIGNED" => FailureMode::TrapHeapMisaligned,
-        "TRAP_TABLE_OOB" => FailureMode::TrapTableOutOfBounds,
-        "TRAP_INDIRECT_NULL" => FailureMode::TrapIndirectCallToNull,
-        "TRAP_BAD_SIGNATURE" => FailureMode::TrapBadSignature,
-        "TRAP_NULL_REFERENCE" => FailureMode::TrapNullReference,
-        "TRAP_CAST_FAILURE" => FailureMode::TrapCastFailure,
-        "TRAP_OTHER" => FailureMode::TrapOther(category.to_string()),
-        "MEMORY_LIMIT_EXCEEDED" => FailureMode::MemoryLimitExceeded {
+        }),
+        "FUEL_EXHAUSTED" => Ok(FailureMode::FuelExhausted { limit: 0 }),
+        "TRAP_UNREACHABLE" => Ok(FailureMode::TrapUnreachable),
+        "TRAP_DIV_BY_ZERO" => Ok(FailureMode::TrapDivByZero),
+        "TRAP_INTEGER_OVERFLOW" => Ok(FailureMode::TrapIntegerOverflow),
+        "TRAP_BAD_FLOAT_TO_INT" => Ok(FailureMode::TrapBadConversionToInteger),
+        "TRAP_STACK_OVERFLOW" => Ok(FailureMode::TrapStackOverflow),
+        "TRAP_MEMORY_OOB" => Ok(FailureMode::TrapMemoryOutOfBounds),
+        "TRAP_HEAP_MISALIGNED" => Ok(FailureMode::TrapHeapMisaligned),
+        "TRAP_TABLE_OOB" => Ok(FailureMode::TrapTableOutOfBounds),
+        "TRAP_INDIRECT_NULL" => Ok(FailureMode::TrapIndirectCallToNull),
+        "TRAP_BAD_SIGNATURE" => Ok(FailureMode::TrapBadSignature),
+        "TRAP_NULL_REFERENCE" => Ok(FailureMode::TrapNullReference),
+        "TRAP_CAST_FAILURE" => Ok(FailureMode::TrapCastFailure),
+        "TRAP_OTHER" => Ok(FailureMode::TrapOther("TRAP_OTHER".to_string())),
+        "MEMORY_LIMIT_EXCEEDED" => Ok(FailureMode::MemoryLimitExceeded {
             pages: 0,
             limit_pages: 0,
-        },
-        "INVALID_MODULE" => FailureMode::InvalidModule(String::new()),
-        "MISSING_ENTRYPOINT" => FailureMode::MissingEntrypoint {
+        }),
+        "INVALID_MODULE" => Ok(FailureMode::InvalidModule(String::new())),
+        "MISSING_ENTRYPOINT" => Ok(FailureMode::MissingEntrypoint {
             expected: String::new(),
-        },
-        "HOST_ERROR" => FailureMode::HostError(String::new()),
-        _ => FailureMode::HostError(category.to_string()),
+        }),
+        "HOST_ERROR" => Ok(FailureMode::HostError(String::new())),
+        _ => Err(anyhow::anyhow!("unrecognised failure category '{category}'")),
     }
 }
 
