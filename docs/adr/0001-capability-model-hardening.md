@@ -1,7 +1,8 @@
 # ADR 0001: Capability Model Hardening for WASI and MCP
 
-Status: Draft
+Status: Accepted — H2, H3, and H4 implemented and covered by passing tests
 Date: 2026-06-16
+Updated: 2026-06-19
 
 ## Context
 
@@ -56,10 +57,10 @@ Risk and back-compat notes:
 
 Expected-behavior test:
 
-- `tests/mcp_server.rs:307`
+- `tests/mcp_server.rs`
   `execute_wasi_rejects_caller_chosen_capability_without_parent_token_or_allowlist`
-  is ignored with `#[ignore = "C4 ADR: pending design approval"]`. It should pass
-  once MCP delegated mode rejects self-granted caller-chosen capabilities.
+  is enabled and passing: `nexus_execute_wasi` now denies caller-chosen
+  capabilities that are not authorized by a caller-provided `parent_token_id`.
 
 ## H3: Path Attenuation Used Raw Lexical Prefix Checks
 
@@ -158,7 +159,9 @@ Evidence:
 
 For `security/h4-auth-ordering`:
 
-- H2 is documented only. Runtime behavior is unchanged pending human approval.
+- H2 is implemented: `nexus_execute_wasi` denies inline caller-chosen
+  capabilities unless authorized by a caller-provided `parent_token_id`, verified
+  by an enabled regression test (no longer `#[ignore]`).
 - H3 receives a mechanical, pure lexical normalization fix with passing tests.
 - H4 is fixed: required-capability derivation is side-effect free, and WASI
   mount creation is post-authorization.

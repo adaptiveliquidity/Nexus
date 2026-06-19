@@ -96,7 +96,10 @@ fn redact_token_does_not_leak_prefix() {
     // Token must be fully opaque — no leading characters exposed.
     assert_eq!(redacted, "[TOKEN_REDACTED]");
     assert_eq!(field, RedactionField::HmacOrPlaceholder);
-    assert!(!redacted.contains("abcdefgh"), "token prefix must not appear in redacted output");
+    assert!(
+        !redacted.contains("abcdefgh"),
+        "token prefix must not appear in redacted output"
+    );
 }
 
 #[test]
