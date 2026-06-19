@@ -71,6 +71,8 @@ pub struct McpPolicy {
     pub wasi_enabled: bool,
     /// Whether the instinct tools are permitted.
     pub instinct_enabled: bool,
+    /// Whether the nexus_execute_retry tool is permitted.
+    pub retry_enabled: bool,
 }
 
 impl Default for McpPolicy {
@@ -82,6 +84,7 @@ impl Default for McpPolicy {
             proof_enabled: true,
             wasi_enabled: true,
             instinct_enabled: true,
+            retry_enabled: true,
         }
     }
 }
@@ -298,6 +301,7 @@ struct RawMcp {
     proof_enabled: Option<bool>,
     wasi_enabled: Option<bool>,
     instinct_enabled: Option<bool>,
+    retry_enabled: Option<bool>,
 }
 
 impl RawMcp {
@@ -309,6 +313,7 @@ impl RawMcp {
             proof_enabled: None,
             wasi_enabled: None,
             instinct_enabled: None,
+            retry_enabled: None,
         }
     }
 }
@@ -323,6 +328,7 @@ fn mcp_policy_from_raw(raw: Option<RawMcp>) -> McpPolicy {
             proof_enabled: raw.proof_enabled.unwrap_or(true),
             wasi_enabled: raw.wasi_enabled.unwrap_or(true),
             instinct_enabled: raw.instinct_enabled.unwrap_or(true),
+            retry_enabled: raw.retry_enabled.unwrap_or(true),
         },
     }
 }
@@ -372,6 +378,13 @@ fn parse_mcp_assignment(
         },
         "instinct_enabled" => match parse_bool_value(rhs) {
             Ok(value) => mcp.instinct_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "retry_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.retry_enabled = Some(value),
             Err(message) => errors.push(ValidationError::Parse {
                 line: line_number,
                 message,
@@ -1035,6 +1048,18 @@ proof_enabled = false
     #[test]
     fn default_instinct_enabled_is_true() {
         assert!(McpPolicy::default().instinct_enabled);
+    }
+
+    #[test]
+    fn parse_retry_disabled() {
+        let input = "[mcp]\nretry_enabled = false";
+        let profile = CapabilityProfile::from_str_for_test(input).unwrap();
+        assert!(!profile.mcp_policy().retry_enabled);
+    }
+
+    #[test]
+    fn default_retry_enabled_is_true() {
+        assert!(McpPolicy::default().retry_enabled);
     }
 
     #[test]
