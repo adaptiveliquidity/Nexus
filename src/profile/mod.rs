@@ -890,7 +890,7 @@ fork_enabled = true
     }
 
     #[test]
-    fn mcp_policy_defaults_to_permissive_when_absent() {
+    fn mcp_policy_defaults_to_fail_closed_when_absent() {
         let path = write_profile(
             r#"
 name = "no-mcp"
@@ -906,14 +906,15 @@ path = "/tmp"
 
         let mcp = manifest.mcp_policy();
         assert_eq!(mcp, &McpPolicy::default());
-        assert!(mcp.snapshot_enabled);
-        assert!(mcp.fork_enabled);
+        // Absent [mcp] table means fail-closed: snapshot and fork are disabled.
+        assert!(!mcp.snapshot_enabled);
+        assert!(!mcp.fork_enabled);
         assert!(mcp.tool_allowlist.is_none());
         assert!(mcp.allows_tool("anything"));
     }
 
     #[test]
-    fn mcp_policy_partial_table_keeps_field_defaults() {
+    fn mcp_policy_partial_table_keeps_field_defaults_fail_closed() {
         let path = write_profile(
             r#"
 name = "partial"
@@ -931,7 +932,8 @@ fork_enabled = false
         std::fs::remove_file(path).ok();
 
         let mcp = manifest.mcp_policy();
-        assert!(mcp.snapshot_enabled);
+        // snapshot_enabled omitted → defaults to false (fail-closed).
+        assert!(!mcp.snapshot_enabled);
         assert!(!mcp.fork_enabled);
         assert!(mcp.tool_allowlist.is_none());
     }
