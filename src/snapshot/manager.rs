@@ -800,10 +800,7 @@ pub fn restore_globals<T>(
                 GlobalValue::F64(v) => wasmtime::Val::F64(v.to_bits()),
             };
             global.set(&mut *store, val).map_err(|e| {
-                NexusError::RollbackFailed(format!(
-                    "failed to restore global '{}': {e}",
-                    snap.name
-                ))
+                NexusError::RollbackFailed(format!("failed to restore global '{}': {e}", snap.name))
             })?;
         }
     }
