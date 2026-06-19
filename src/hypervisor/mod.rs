@@ -31,6 +31,7 @@ use crate::proof::schema::{
     ProofCapsule, ProofSubject, RedactionReport, RollbackEvidence, SnapshotEvidence, SnapshotKind,
     ToolIdentity, TypedDigest,
 };
+use crate::proof::sign_capsule;
 use crate::sandbox::{
     FuelBudgetPolicy, FuelProfile, PoolConfig, RestoredExecutionState, SandboxConfig, SandboxPool,
     WasiToolConfig, WasmSandbox,
@@ -579,6 +580,8 @@ impl NexusHypervisor {
         };
 
         let capsule = Self::capsule_from_receipt(&receipt, &output);
+        let capability_manager = self.capability_manager.read().unwrap();
+        let capsule = sign_capsule(capsule, capability_manager.signing_key());
         Ok((output, capsule))
     }
 
