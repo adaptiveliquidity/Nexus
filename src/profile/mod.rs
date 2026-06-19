@@ -57,7 +57,7 @@ pub struct ExecutionPolicy {
 /// **Fail-closed by default**: an absent table, or absent individual fields,
 /// disables the corresponding tools. Profiles must explicitly set
 /// `snapshot_enabled = true` / `fork_enabled = true` to expose those surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpPolicy {
     /// When `Some`, only these MCP tool names may be invoked. `None` leaves all
     /// registered tools callable (no tool-level gating).
@@ -68,15 +68,6 @@ pub struct McpPolicy {
     pub fork_enabled: bool,
 }
 
-impl Default for McpPolicy {
-    fn default() -> Self {
-        Self {
-            tool_allowlist: None,
-            snapshot_enabled: false,
-            fork_enabled: false,
-        }
-    }
-}
 
 impl McpPolicy {
     /// Whether `tool` may be invoked under this policy's tool allowlist.
