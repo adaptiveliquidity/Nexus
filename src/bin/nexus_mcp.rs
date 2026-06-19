@@ -25,6 +25,7 @@ use nexus::hypervisor::failure_mode::FailureMode;
 use nexus::profile::{load_and_validate, CapabilityProfileManifest};
 use nexus::security::{Capability, CapabilityToken};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
+use nexus::telemetry::{ExecutionRecord, TelemetryStats};
 use nexus::NexusError;
 
 // ─── MCP Tool Parameter Types ────────────────────────────────────────────────
@@ -216,6 +217,57 @@ struct InstinctExportResponse {
     pub instinct_count: usize,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetHistoryParams {
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct GetHistoryResponse {
+    pub records: Vec<ExecutionRecordSummary>,
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExecutionRecordSummary {
+    pub id: String,
+    pub timestamp: String,
+    pub operation: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub fuel_consumed: u64,
+    pub has_error: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetStatsParams {}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct GetStatsResponse {
+    pub telemetry: TelemetryStatsDto,
+    pub snapshots: SnapshotStatsDto,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct TelemetryStatsDto {
+    pub total_executions: u64,
+    pub successful_executions: u64,
+    pub failed_executions: u64,
+    pub total_rollbacks: u64,
+    pub avg_duration_ms: f64,
+    pub avg_fuel_per_execution: f64,
+    pub success_rate: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct SnapshotStatsDto {
+    pub total_snapshots: u64,
+    pub total_rollbacks: u64,
+    pub total_memory_saved_mb: f64,
+    pub avg_compression_ratio: f64,
+    pub last_snapshot_time_us: u64,
+}
+
 // ─── MCP Server Handler ──────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -367,6 +419,24 @@ impl NexusMcpServer {
         Parameters(params): Parameters<InstinctExportParams>,
     ) -> String {
         match self.do_instinct_export(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Get recent execution history entries for troubleshooting and observability."
+    )]
+    async fn nexus_get_history(&self, Parameters(params): Parameters<GetHistoryParams>) -> String {
+        match self.do_get_history(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Get aggregate telemetry and snapshot statistics for the hypervisor.")]
+    async fn nexus_get_stats(&self, Parameters(params): Parameters<GetStatsParams>) -> String {
+        match self.do_get_stats(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
         }
@@ -878,6 +948,55 @@ impl NexusMcpServer {
         let instinct_count = parsed.as_array().map(|array| array.len()).unwrap_or(0);
 
         Ok(InstinctExportResponse { json, instinct_count })
+    }
+
+    fn do_get_history(&self, params: GetHistoryParams) -> Result<GetHistoryResponse> {
+        self.ensure_tool_allowed("nexus_get_history")?;
+
+        let limit = params.limit.map(|l| l as usize).or(Some(50));
+        let records: Vec<ExecutionRecordSummary> = self
+            .hypervisor
+            .get_history(limit)
+            .into_iter()
+            .map(|record: ExecutionRecord| ExecutionRecordSummary {
+                id: record.id,
+                timestamp: record.timestamp.to_rfc3339(),
+                operation: record.operation,
+                success: record.success,
+                duration_ms: record.duration_ms,
+                fuel_consumed: record.fuel_consumed,
+                has_error: record.error.is_some(),
+            })
+            .collect();
+
+        let total = records.len();
+        Ok(GetHistoryResponse { records, total })
+    }
+
+    fn do_get_stats(&self, _params: GetStatsParams) -> Result<GetStatsResponse> {
+        self.ensure_tool_allowed("nexus_get_stats")?;
+
+        let telemetry: TelemetryStats = self.hypervisor.get_stats();
+        let snapshots = self.hypervisor.get_snapshot_stats();
+
+        Ok(GetStatsResponse {
+            telemetry: TelemetryStatsDto {
+                total_executions: telemetry.total_executions,
+                successful_executions: telemetry.successful_executions,
+                failed_executions: telemetry.failed_executions,
+                total_rollbacks: telemetry.total_rollbacks,
+                avg_duration_ms: telemetry.avg_duration_ms,
+                avg_fuel_per_execution: telemetry.avg_fuel_per_execution,
+                success_rate: telemetry.success_rate,
+            },
+            snapshots: SnapshotStatsDto {
+                total_snapshots: snapshots.total_snapshots,
+                total_rollbacks: snapshots.total_rollbacks,
+                total_memory_saved_mb: snapshots.total_memory_saved_mb,
+                avg_compression_ratio: snapshots.avg_compression_ratio,
+                last_snapshot_time_us: snapshots.last_snapshot_time_us,
+            },
+        })
     }
 
     fn resolve_fork_base_snapshot(
@@ -1450,6 +1569,24 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_history_returns_empty_for_fresh_hypervisor() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let response = server.do_get_history(GetHistoryParams { limit: None }).unwrap();
+
+        assert!(response.records.is_empty());
+    }
+
+    #[test]
+    fn get_stats_returns_zero_for_fresh_hypervisor() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let response = server.do_get_stats(GetStatsParams {}).unwrap();
+
+        assert_eq!(response.telemetry.total_executions, 0);
+    }
 
     #[test]
     fn instinct_stats_errors_when_store_not_initialised() {

@@ -300,7 +300,7 @@ async fn initialize_and_list_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 12, "expected 12 tools, got: {:?}", tools);
+    assert_eq!(tools.len(), 14, "expected 14 tools, got: {:?}", tools);
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tool_names.contains(&"nexus_execute"));
@@ -312,6 +312,8 @@ async fn initialize_and_list_tools() {
     assert!(tool_names.contains(&"nexus_fork_and_race"));
     assert!(tool_names.contains(&"nexus_instinct_stats"));
     assert!(tool_names.contains(&"nexus_instinct_register"));
+    assert!(tool_names.contains(&"nexus_get_history"));
+    assert!(tool_names.contains(&"nexus_get_stats"));
     assert!(tool_names.contains(&"nexus_instinct_record_outcome"));
     assert!(tool_names.contains(&"nexus_instinct_export"));
 }
