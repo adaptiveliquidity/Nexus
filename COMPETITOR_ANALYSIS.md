@@ -1,3 +1,7 @@
+> **Historical document — performance figures are retired and should not be cited.**
+> The numbers in this file were collected at an earlier point in development and may not reflect current behaviour.
+> See `BENCHMARKS.md` for current authoritative performance numbers.
+
 # Nexus Architecture Analysis & Competitive Comparison
 
 ## 🏗️ Nexus Architectural Deep Dive

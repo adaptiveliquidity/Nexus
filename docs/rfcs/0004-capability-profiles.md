@@ -95,9 +95,13 @@ present, omitted boolean fields also default to `false`.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `tool_allowlist` | array of strings | absent (all tools allowed) | MCP tool names allowed by this profile. |
-| `snapshot_enabled` | bool | `false` | Whether snapshot MCP tools are available under this profile. |
-| `fork_enabled` | bool | `false` | Whether fork/race MCP tools are available under this profile. |
+| `tool_allowlist` | array of strings | absent (all tools allowed) | MCP tool names allowed by this profile. When present and empty, all tools are denied. |
+| `snapshot_enabled` | bool | `false` | Whether `nexus_snapshot_create` and `nexus_snapshot_rollback` are available under this profile. |
+| `fork_enabled` | bool | `false` | Whether `nexus_fork_and_race` is available under this profile. |
+| `proof_enabled` | bool | `false` | Whether `nexus_execute_proof` is available under this profile. |
+| `wasi_enabled` | bool | `false` | Whether `nexus_execute_wasi` is available under this profile. |
+| `instinct_enabled` | bool | `false` | Whether the instinct tools (`nexus_instinct_stats`, `nexus_instinct_query`, `nexus_instinct_register`, `nexus_instinct_record_outcome`, `nexus_instinct_export`) are available under this profile. |
+| `retry_enabled` | bool | `false` | Whether `nexus_execute_retry` is available under this profile. |
 
 ## 4. Validation Rules
 

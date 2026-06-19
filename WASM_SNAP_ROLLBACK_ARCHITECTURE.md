@@ -1,3 +1,8 @@
+> **Early architecture concept document — does not describe the current implementation.**
+> This file captures design thinking from before the codebase reached its current state.
+> For the actual implementation see `src/` (entry points: `src/bin/nexus_mcp.rs`, `src/bin/nexus_agentd.rs`, `src/profile/mod.rs`).
+> For current performance numbers see `BENCHMARKS.md`. For accepted design decisions see `docs/rfcs/`.
+
 # ⚡ NEXUS: AI-Native WASM Snap-Rollback Sandbox
 
 ## Executive Summary
@@ -553,7 +558,7 @@ const result = await nexus.executeTool(
 2. Compare cold start times: Nexus 5ms vs Docker 15s
 3. Show infinite loop prevention with fuel metering
 
-**Open source strategy:** Release core as Apache 2.0, monetize enterprise features (audit logs, persistence, multi-tenancy).
+**Open source strategy:** Release core as MIT, monetize enterprise features (audit logs, persistence, multi-tenancy).
 
 ---
 
@@ -632,4 +637,4 @@ async fn main() {
 
 ---
 
-*Design by Nexus AI Infrastructure Team | Apache 2.0 License*
+*Design by Nexus AI Infrastructure Team | MIT License*
