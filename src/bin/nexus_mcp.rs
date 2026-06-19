@@ -1335,6 +1335,19 @@ impl NexusMcpServer {
             "instinct tools are disabled by the active profile".to_string(),
         ))
     }
+
+    #[allow(dead_code)]
+    fn ensure_retry_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().retry_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "nexus_execute_retry is disabled by the active profile".to_string(),
+        ))
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
