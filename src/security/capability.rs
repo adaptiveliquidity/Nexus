@@ -503,6 +503,10 @@ impl CapabilityManager {
     pub fn public_key(&self) -> Vec<u8> {
         self.verifying_key.as_bytes().to_vec()
     }
+
+    pub(crate) fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
 }
 
 #[cfg(test)]
