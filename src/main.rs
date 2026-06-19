@@ -462,9 +462,53 @@ fn demo_corruption() -> anyhow::Result<()> {
     println!("📍 Demo: State Corruption Detection");
     println!("--------------------------------------");
 
-    // Would normally detect corruption - placeholder
-    println!("⚠️  Demo not yet implemented");
-    println!("   (Would demonstrate corruption detection and rollback)");
+    let config = HypervisorConfig {
+        snapshot_capacity: 2,
+        ..HypervisorConfig::default()
+    };
+    let hypervisor = NexusHypervisor::new(config)?;
+
+    let good_state_wasm = wat::parse_str(
+        r#"
+        (module
+            (memory (export "mem") 1)
+            (func (export "_start")
+                i32.const 0
+                i32.const 0x44454647
+                i32.store
+            )
+        )
+    "#,
+    )?;
+
+    let rollback_tool = ToolDefinition::new("state_writer".to_string(), good_state_wasm);
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let good_result = rt.block_on(hypervisor.execute_tool(rollback_tool, serde_json::json!({})));
+    println!("Good execution result: {:?}", good_result);
+
+    let snapshot_id = good_result?
+        .snapshot_id
+        .ok_or_else(|| anyhow::anyhow!("no snapshot was produced for good execution"))?;
+
+    let corrupt_wasm = wat::parse_str(
+        r#"
+        (module
+            (func (export "_start")
+                unreachable
+            )
+        )
+    "#,
+    )?;
+
+    let corrupt_tool = ToolDefinition::new("corruptor".to_string(), corrupt_wasm);
+
+    let bad_result = rt.block_on(hypervisor.execute_tool(corrupt_tool, serde_json::json!({})));
+    println!("Corrupt execution result: {:?}", bad_result);
+
+    let rollback = hypervisor.rollback_snapshot(snapshot_id)?;
+    println!("Rollback status: true");
+    println!("Snapshot ID: {}", rollback.snapshot_id);
 
     Ok(())
 }
