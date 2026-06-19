@@ -310,35 +310,27 @@ async fn initialize_and_list_tools() {
         "nexus_execute",
         "nexus_execute_proof",
         "nexus_execute_wasi",
-        "nexus_execute_retry",
         "nexus_snapshot_create",
         "nexus_snapshot_rollback",
         "nexus_issue_token",
         "nexus_fork_and_race",
         "nexus_instinct_stats",
+        "nexus_instinct_query",
         "nexus_instinct_register",
-        "nexus_get_history",
-        "nexus_get_stats",
         "nexus_instinct_record_outcome",
         "nexus_instinct_export",
+        "nexus_instinct_import",
+        "nexus_get_history",
+        "nexus_get_stats",
     ];
 
-    // Verify all required tools are present
     for required_tool in &required_tools {
         assert!(
             tool_names.contains(required_tool),
-            "required tool '{}' is missing from available tools: {:?}",
-            required_tool,
+            "required tool is missing from available tools: {:?}",
             tool_names
         );
     }
-
-    // Log actual tool count for visibility (helps track when tools are added/removed)
-    println!(
-        "MCP tools available: {} (expected minimum: {})",
-        tools.len(),
-        required_tools.len()
-    );
 
     assert!(
         tools.len() >= required_tools.len(),

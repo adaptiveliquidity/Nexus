@@ -217,6 +217,18 @@ struct InstinctExportResponse {
     pub instinct_count: usize,
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct InstinctImportParams {
+    #[schemars(description = "JSON payload exported by nexus_instinct_export")]
+    pub json: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+struct InstinctImportResponse {
+    pub imported: usize,
+    pub skipped: usize,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetHistoryParams {
     pub limit: Option<u64>,
@@ -419,6 +431,17 @@ impl NexusMcpServer {
         Parameters(params): Parameters<InstinctExportParams>,
     ) -> String {
         match self.do_instinct_export(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Import instincts from JSON payload.")]
+    async fn nexus_instinct_import(
+        &self,
+        Parameters(params): Parameters<InstinctImportParams>,
+    ) -> String {
+        match self.do_instinct_import(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
         }
@@ -953,6 +976,20 @@ impl NexusMcpServer {
         let instinct_count = parsed.as_array().map(|array| array.len()).unwrap_or(0);
 
         Ok(InstinctExportResponse { json, instinct_count })
+    }
+
+    fn do_instinct_import(&self, params: InstinctImportParams) -> Result<InstinctImportResponse> {
+        self.ensure_tool_allowed("nexus_instinct_import")?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        if params.json.len() > 10_485_760 {
+            anyhow::bail!("json payload exceeds 10 MiB limit");
+        }
+
+        let (imported, skipped) = store.import_all(&params.json)?;
+        Ok(InstinctImportResponse { imported, skipped })
     }
 
     fn do_get_history(&self, params: GetHistoryParams) -> Result<GetHistoryResponse> {
@@ -1611,6 +1648,20 @@ mod tests {
         let server = NexusMcpServer::new(hypervisor).unwrap();
         let error = server
             .do_instinct_stats(InstinctStatsParams {})
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not initialised"));
+    }
+
+    #[test]
+    fn instinct_import_errors_when_store_not_initialised() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = server
+            .do_instinct_import(InstinctImportParams {
+                json: "[]".to_string(),
+            })
             .unwrap_err()
             .to_string();
 
