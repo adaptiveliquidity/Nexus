@@ -17,6 +17,7 @@ pub use speculative::{
 };
 
 use chrono::Utc;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::sync::{Arc, RwLock};
@@ -32,6 +33,8 @@ use crate::proof::schema::{
     ToolIdentity, TypedDigest,
 };
 use crate::proof::sign_capsule;
+use crate::proof::signing::verifying_key_id;
+use crate::proof::ProofSigningConfig;
 use crate::sandbox::{
     FuelBudgetPolicy, FuelProfile, PoolConfig, RestoredExecutionState, SandboxConfig, SandboxPool,
     WasiToolConfig, WasmSandbox,
@@ -140,6 +143,9 @@ pub struct HypervisorConfig {
     pub snapshot_strategy: SnapshotStrategy,
     /// Opt-in recovery policy stack. Defaults to `StaticPolicy`.
     pub recovery_config: RecoveryConfig,
+    /// Dedicated proof-capsule signing key source. Defaults to a fresh
+    /// ephemeral key that is independent of the capability-token authority.
+    pub proof_signing: ProofSigningConfig,
 }
 
 impl Default for HypervisorConfig {
@@ -155,6 +161,7 @@ impl Default for HypervisorConfig {
             pool_config: None,
             snapshot_strategy: SnapshotStrategy::Full,
             recovery_config: RecoveryConfig::Static,
+            proof_signing: ProofSigningConfig::default(),
         }
     }
 }
@@ -215,6 +222,9 @@ pub struct NexusHypervisor {
     pool: Option<Arc<SandboxPool>>,
     /// Latest full-or-diff snapshot id used as the next differential base.
     latest_runtime_snapshot: RwLock<Option<RuntimeSnapshot>>,
+    /// Dedicated key for proof-capsule attestation, separate from capability
+    /// token authorization.
+    proof_signing_key: SigningKey,
 }
 
 impl NexusHypervisor {
@@ -256,6 +266,7 @@ impl NexusHypervisor {
         };
 
         let capability_manager = CapabilityManager::new();
+        let proof_signing_key = config.proof_signing.signing_key()?;
 
         let fuel_policy = FuelBudgetPolicy::new(sandbox_config.max_fuel);
 
@@ -281,6 +292,7 @@ impl NexusHypervisor {
             last_rollback_execution_state: RwLock::new(None),
             pool,
             latest_runtime_snapshot: RwLock::new(None),
+            proof_signing_key,
         })
     }
 
@@ -362,6 +374,21 @@ impl NexusHypervisor {
 
     pub fn snapshot_manager(&self) -> &Arc<SnapshotManager> {
         &self.snapshot_manager
+    }
+
+    /// Public verifying key for proof-capsule attestation.
+    pub fn proof_verifying_key(&self) -> VerifyingKey {
+        VerifyingKey::from(&self.proof_signing_key)
+    }
+
+    /// Hex key id for the public proof-capsule verifying key.
+    pub fn proof_key_id(&self) -> String {
+        verifying_key_id(&self.proof_verifying_key())
+    }
+
+    /// Public key bytes for the capability-token authority.
+    pub fn capability_public_key(&self) -> Vec<u8> {
+        self.capability_manager.read().unwrap().public_key()
     }
 
     fn create_runtime_snapshot(
@@ -580,8 +607,7 @@ impl NexusHypervisor {
         };
 
         let capsule = Self::capsule_from_receipt(&receipt, &output);
-        let capability_manager = self.capability_manager.read().unwrap();
-        let capsule = sign_capsule(capsule, capability_manager.signing_key());
+        let capsule = sign_capsule(capsule, &self.proof_signing_key);
         Ok((output, capsule))
     }
 

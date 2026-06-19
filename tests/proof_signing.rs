@@ -1,10 +1,12 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use nexus::proof::{
     sign_capsule, verify_capsule, CapabilityEvidence, InputIdentity, PolicyEnforcementMode,
-    PolicyProfileRef, ProofCapsule, ProofScorecard, ProofSubject, RedactionReport, ToolIdentity,
-    TypedDigest,
+    PolicyProfileRef, ProofCapsule, ProofScorecard, ProofSigningConfig, ProofSubject,
+    RedactionReport, ToolIdentity, TypedDigest,
 };
+use nexus::{HypervisorConfig, NexusHypervisor, ToolDefinition};
 use rand::rngs::OsRng;
 use uuid::Uuid;
 
@@ -70,6 +72,21 @@ fn sample_capsule() -> ProofCapsule {
     }
 }
 
+fn trivial_wasm() -> Vec<u8> {
+    wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#).unwrap()
+}
+
+fn proof_config(proof_signing: ProofSigningConfig) -> HypervisorConfig {
+    HypervisorConfig {
+        proof_signing,
+        ..HypervisorConfig::default()
+    }
+}
+
+fn unique_env_var(label: &str) -> String {
+    format!("NEXUS_TEST_{label}_{}", Uuid::new_v4().simple())
+}
+
 #[test]
 fn sign_roundtrip_verifies_with_public_key() {
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -99,4 +116,107 @@ fn scorecard_has_signature_after_signing() {
     let scorecard = ProofScorecard::from_capsule(&signed);
 
     assert!(scorecard.has_signature);
+}
+
+#[tokio::test]
+async fn ephemeral_proof_key_signs_and_verifies() {
+    let hypervisor =
+        NexusHypervisor::new(proof_config(ProofSigningConfig::EphemeralDedicated)).unwrap();
+    let tool = ToolDefinition::new("proof_ephemeral".to_string(), trivial_wasm());
+
+    let (_, capsule) = hypervisor
+        .execute_tool_proof(tool, serde_json::json!({ "message": "hello" }))
+        .await
+        .unwrap();
+
+    verify_capsule(&capsule, &hypervisor.proof_verifying_key()).unwrap();
+    assert_eq!(
+        capsule.signature.as_ref().unwrap().key_id,
+        hypervisor.proof_key_id()
+    );
+}
+
+#[tokio::test]
+async fn proof_key_is_separate_from_capability_key() {
+    let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+    let capability_key_bytes: [u8; 32] = hypervisor.capability_public_key().try_into().unwrap();
+    let capability_verifying_key = VerifyingKey::from_bytes(&capability_key_bytes).unwrap();
+
+    assert_ne!(
+        hypervisor.proof_verifying_key().as_bytes(),
+        &capability_key_bytes
+    );
+
+    let tool = ToolDefinition::new("proof_separate".to_string(), trivial_wasm());
+    let (_, capsule) = hypervisor
+        .execute_tool_proof(tool, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    verify_capsule(&capsule, &hypervisor.proof_verifying_key()).unwrap();
+    assert!(verify_capsule(&capsule, &capability_verifying_key).is_err());
+}
+
+#[tokio::test]
+async fn from_env_seed_is_deterministic() {
+    let env_var = unique_env_var("PROOF_SIGNING_SEED");
+    let seed = [7_u8; 32];
+    std::env::set_var(&env_var, STANDARD.encode(seed.as_slice()));
+
+    let first =
+        NexusHypervisor::new(proof_config(ProofSigningConfig::FromEnv(env_var.clone()))).unwrap();
+    let second =
+        NexusHypervisor::new(proof_config(ProofSigningConfig::FromEnv(env_var.clone()))).unwrap();
+
+    std::env::remove_var(&env_var);
+
+    assert_eq!(first.proof_verifying_key(), second.proof_verifying_key());
+
+    let tool = ToolDefinition::new("proof_deterministic".to_string(), trivial_wasm());
+    let (_, capsule) = first
+        .execute_tool_proof(tool, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    verify_capsule(&capsule, &second.proof_verifying_key()).unwrap();
+}
+
+#[test]
+fn from_env_missing_or_malformed_fails_closed() {
+    let missing_env = unique_env_var("PROOF_SIGNING_MISSING");
+    std::env::remove_var(&missing_env);
+    let missing = NexusHypervisor::new(proof_config(ProofSigningConfig::FromEnv(
+        missing_env.clone(),
+    )));
+    assert!(missing.is_err());
+
+    let malformed_env = unique_env_var("PROOF_SIGNING_MALFORMED");
+    let malformed_value = "not-a-valid-proof-signing-seed";
+    std::env::set_var(&malformed_env, malformed_value);
+    let malformed = NexusHypervisor::new(proof_config(ProofSigningConfig::FromEnv(
+        malformed_env.clone(),
+    )));
+    std::env::remove_var(&malformed_env);
+
+    let Err(malformed) = malformed else {
+        panic!("expected construction error");
+    };
+    let error = malformed.to_string();
+    assert!(error.contains(&malformed_env));
+    assert!(!error.contains(malformed_value));
+
+    let short_seed_env = unique_env_var("PROOF_SIGNING_SHORT");
+    let short_seed_value = STANDARD.encode([1_u8; 31].as_slice());
+    std::env::set_var(&short_seed_env, &short_seed_value);
+    let short_seed = NexusHypervisor::new(proof_config(ProofSigningConfig::FromEnv(
+        short_seed_env.clone(),
+    )));
+    std::env::remove_var(&short_seed_env);
+
+    let Err(short_seed) = short_seed else {
+        panic!("expected construction error");
+    };
+    let error = short_seed.to_string();
+    assert!(error.contains(&short_seed_env));
+    assert!(!error.contains(&short_seed_value));
 }
