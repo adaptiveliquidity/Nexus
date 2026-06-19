@@ -300,7 +300,7 @@ async fn initialize_and_list_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 11, "expected 11 tools, got: {:?}", tools);
+    assert_eq!(tools.len(), 12, "expected 12 tools, got: {:?}", tools);
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tool_names.contains(&"nexus_execute"));

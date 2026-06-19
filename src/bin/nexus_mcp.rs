@@ -148,6 +148,32 @@ struct InstinctStatsResponse {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctQueryParams {
+    #[schemars(description = "Failure category to search against (e.g. TRAP_DIV_BY_ZERO)")]
+    pub failure_category: String,
+    #[schemars(
+        description = "Operation pattern to match (exact name or * for all operations)"
+    )]
+    pub operation: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstinctQueryResponse {
+    pub suggestions: Vec<InstinctSuggestion>,
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InstinctSuggestion {
+    #[schemars(with = "String")]
+    pub instinct_id: Uuid,
+    pub recovery_description: String,
+    pub confidence: f32,
+    pub operation_pattern: String,
+    pub failure_category: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct InstinctRegisterParams {
     #[schemars(description = "Failure category to learn against (e.g. TRAP_DIV_BY_ZERO)")]
     pub failure_category: String,
@@ -295,6 +321,17 @@ impl NexusMcpServer {
         Parameters(params): Parameters<InstinctStatsParams>,
     ) -> String {
         match self.do_instinct_stats(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Query ranked instinct recovery suggestions by failure category and operation.")]
+    async fn nexus_instinct_query(
+        &self,
+        Parameters(params): Parameters<InstinctQueryParams>,
+    ) -> String {
+        match self.do_instinct_query(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
         }
@@ -735,6 +772,31 @@ impl NexusMcpServer {
             highest_confidence_value,
             total_support: stats.total_support,
             total_failures: stats.total_failures,
+        })
+    }
+
+    fn do_instinct_query(&self, params: InstinctQueryParams) -> Result<InstinctQueryResponse> {
+        self.ensure_tool_allowed("nexus_instinct_query")?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let mode = failure_mode_from_category(&params.failure_category)?;
+        let instincts = store.query(&mode, &params.operation);
+        let suggestions = instincts
+            .into_iter()
+            .map(|instinct| InstinctSuggestion {
+                instinct_id: instinct.id,
+                recovery_description: instinct.recovery_description,
+                confidence: instinct.confidence,
+                operation_pattern: instinct.operation_pattern,
+                failure_category: instinct.failure_category,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(InstinctQueryResponse {
+            total: suggestions.len(),
+            suggestions,
         })
     }
 
@@ -1386,6 +1448,26 @@ mod tests {
             .to_string();
 
         assert!(error.contains("not initialised"));
+    }
+
+    #[test]
+    fn instinct_query_errors_when_store_not_initialised() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = server
+            .do_instinct_query(InstinctQueryParams {
+                failure_category: "TIMEOUT".to_string(),
+                operation: "*".to_string(),
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not initialised"));
+    }
+
+    #[test]
+    fn instinct_query_rejects_unknown_category() {
+        assert!(failure_mode_from_category("NOT_A_REAL_CATEGORY").is_err());
     }
 
     #[test]
