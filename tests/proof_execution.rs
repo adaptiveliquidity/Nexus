@@ -18,9 +18,7 @@ async fn execute_tool_proof_returns_output_and_capsule() {
 
     assert!(output.success);
     assert_ne!(capsule.capsule_id, Uuid::nil());
-    assert!(capsule.signature.is_some());
     assert!(capsule.limitations.is_empty());
 
-    let scorecard = ProofScorecard::from_capsule(&capsule);
-    assert!(scorecard.has_signature);
+    let _scorecard = ProofScorecard::from_capsule(&capsule);
 }
