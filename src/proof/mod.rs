@@ -20,4 +20,4 @@ pub use schema::{
     RedactionReport, RollbackEvidence, SignatureEnvelope, SnapshotEvidence, SnapshotKind,
     ToolIdentity, TypedDigest,
 };
-pub use signing::{sign_capsule, verify_capsule};
+pub use signing::{sign_capsule, verify_capsule, ProofSigningConfig};

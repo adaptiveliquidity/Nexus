@@ -1,18 +1,42 @@
-use std::fmt::Write;
+use std::{env, fmt::Write};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{NexusError, Result};
 use crate::proof::{canonical_bytes, ProofCapsule, SignatureEnvelope, TypedDigest};
 
 const SIGNER: &str = "nexus-hypervisor";
 
+/// Proof-capsule signing key source.
+///
+/// `FromEnv` holds the env-var NAME, not the seed value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProofSigningConfig {
+    /// Generate a fresh dedicated Ed25519 key at hypervisor construction.
+    #[default]
+    EphemeralDedicated,
+    /// Read a 32-byte base64-encoded seed from the named env var.
+    FromEnv(String),
+}
+
+impl ProofSigningConfig {
+    pub(crate) fn signing_key(&self) -> Result<SigningKey> {
+        match self {
+            ProofSigningConfig::EphemeralDedicated => Ok(SigningKey::generate(&mut OsRng)),
+            ProofSigningConfig::FromEnv(var) => signing_key_from_env(var),
+        }
+    }
+}
+
 pub fn sign_capsule(mut capsule: ProofCapsule, key: &SigningKey) -> ProofCapsule {
     let payload =
         canonical_bytes(&capsule).expect("proof capsule canonical serialization must succeed");
     let signature = key.sign(&payload);
     let verifying_key = VerifyingKey::from(key);
-    let key_id = hex_lower(verifying_key.as_bytes());
+    let key_id = verifying_key_id(&verifying_key);
 
     capsule.signature = Some(SignatureEnvelope {
         signer: SIGNER.to_owned(),
@@ -22,6 +46,30 @@ pub fn sign_capsule(mut capsule: ProofCapsule, key: &SigningKey) -> ProofCapsule
     });
 
     capsule
+}
+
+pub(crate) fn verifying_key_id(key: &VerifyingKey) -> String {
+    hex_lower(key.as_bytes())
+}
+
+fn signing_key_from_env(var: &str) -> Result<SigningKey> {
+    let raw = env::var(var).map_err(|_| {
+        NexusError::ConfigError(format!(
+            "proof signing seed env var {var} is unset or not valid Unicode"
+        ))
+    })?;
+    let seed = STANDARD.decode(raw.trim()).map_err(|_| {
+        NexusError::ConfigError(format!(
+            "proof signing seed env var {var} is not valid base64"
+        ))
+    })?;
+    let seed = <[u8; 32]>::try_from(seed.as_slice()).map_err(|_| {
+        NexusError::ConfigError(format!(
+            "proof signing seed env var {var} must decode to 32 bytes"
+        ))
+    })?;
+
+    Ok(SigningKey::from_bytes(&seed))
 }
 
 pub fn verify_capsule(capsule: &ProofCapsule, vk: &VerifyingKey) -> Result<()> {
@@ -39,7 +87,7 @@ pub fn verify_capsule(capsule: &ProofCapsule, vk: &VerifyingKey) -> Result<()> {
         ));
     }
 
-    let expected_key_id = hex_lower(vk.as_bytes());
+    let expected_key_id = verifying_key_id(vk);
     if envelope.key_id != expected_key_id {
         return Err(NexusError::InvalidCapability(
             "proof capsule key id does not match verifying key".to_owned(),
