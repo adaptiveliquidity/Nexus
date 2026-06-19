@@ -21,6 +21,7 @@ use nexus::hypervisor::{
     fork_and_race, HypervisorConfig, NexusHypervisor, RecoveryAction, RecoverySource,
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
+use nexus::hypervisor::failure_mode::FailureMode;
 use nexus::profile::{load_and_validate, CapabilityProfileManifest};
 use nexus::security::{Capability, CapabilityToken};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
@@ -132,6 +133,63 @@ pub struct BranchSpec {
     pub input: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctStatsParams {}
+
+#[derive(Debug, Serialize)]
+struct InstinctStatsResponse {
+    pub total_instincts: u64,
+    pub categories: HashMap<String, u64>,
+    pub avg_confidence: f32,
+    pub highest_confidence_description: Option<String>,
+    pub highest_confidence_value: Option<f32>,
+    pub total_support: u64,
+    pub total_failures: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctRegisterParams {
+    #[schemars(description = "Failure category to learn against (e.g. TRAP_DIV_BY_ZERO)")]
+    pub failure_category: String,
+    #[schemars(
+        description = "Operation pattern (exact match or * for all operations)"
+    )]
+    pub operation_pattern: String,
+    #[schemars(description = "Human-readable recovery advice")]
+    pub recovery_description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstinctRegisterResponse {
+    pub instinct_id: Uuid,
+    pub failure_category: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctRecordOutcomeParams {
+    #[schemars(description = "Instinct UUID to reinforce or erode")]
+    pub instinct_id: String,
+    #[schemars(description = "Whether the retry outcome was successful")]
+    pub success: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct InstinctRecordOutcomeResponse {
+    pub instinct_id: String,
+    pub reinforced: bool,
+    pub success: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InstinctExportParams {}
+
+#[derive(Debug, Serialize)]
+struct InstinctExportResponse {
+    pub json: String,
+    pub instinct_count: usize,
+}
+
 // ─── MCP Server Handler ──────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -224,6 +282,54 @@ impl NexusMcpServer {
         Parameters(params): Parameters<ForkAndRaceParams>,
     ) -> String {
         match self.do_fork_and_race(params).await {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Read instinct store summary statistics such as category totals, confidence, support, and failures."
+    )]
+    async fn nexus_instinct_stats(
+        &self,
+        Parameters(params): Parameters<InstinctStatsParams>,
+    ) -> String {
+        match self.do_instinct_stats(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Register a new recovery instinct for a failure category and operation pattern."
+    )]
+    async fn nexus_instinct_register(
+        &self,
+        Parameters(params): Parameters<InstinctRegisterParams>,
+    ) -> String {
+        match self.do_instinct_register(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Record instinct outcome success or failure for a UUID.")]
+    async fn nexus_instinct_record_outcome(
+        &self,
+        Parameters(params): Parameters<InstinctRecordOutcomeParams>,
+    ) -> String {
+        match self.do_instinct_record_outcome(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(description = "Export all instincts as JSON.")]
+    async fn nexus_instinct_export(
+        &self,
+        Parameters(params): Parameters<InstinctExportParams>,
+    ) -> String {
+        match self.do_instinct_export(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
         }
@@ -608,6 +714,109 @@ impl NexusMcpServer {
         })
     }
 
+    fn do_instinct_stats(&self, _params: InstinctStatsParams) -> Result<InstinctStatsResponse> {
+        self.ensure_tool_allowed("nexus_instinct_stats")?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let stats = store.stats();
+        let (highest_confidence_description, highest_confidence_value) =
+            match stats.highest_confidence {
+                Some((description, value)) => (Some(description), Some(value)),
+                None => (None, None),
+            };
+
+        Ok(InstinctStatsResponse {
+            total_instincts: stats.total_instincts,
+            categories: stats.categories,
+            avg_confidence: stats.avg_confidence,
+            highest_confidence_description,
+            highest_confidence_value,
+            total_support: stats.total_support,
+            total_failures: stats.total_failures,
+        })
+    }
+
+    fn do_instinct_register(
+        &self,
+        params: InstinctRegisterParams,
+    ) -> Result<InstinctRegisterResponse> {
+        self.ensure_tool_allowed("nexus_instinct_register")?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        // Validate inputs before touching the on-disk store.
+        const MAX_DESC_LEN: usize = 1024;
+        if params.recovery_description.len() > MAX_DESC_LEN {
+            anyhow::bail!(
+                "recovery_description exceeds {MAX_DESC_LEN} characters"
+            );
+        }
+        let valid_pattern = params.operation_pattern == "*"
+            || params.operation_pattern
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && params.operation_pattern.len() <= 128;
+        if !valid_pattern {
+            anyhow::bail!(
+                "operation_pattern must be '*' or a name containing only alphanumerics, underscores, and hyphens (max 128 chars)"
+            );
+        }
+
+        let mode = failure_mode_from_category(&params.failure_category)
+            .map_err(|e| anyhow::anyhow!("unknown failure_category: {e}"))?;
+        let instinct_id = store.register(
+            &mode,
+            &params.operation_pattern,
+            &params.recovery_description,
+        )?;
+
+        Ok(InstinctRegisterResponse {
+            instinct_id,
+            failure_category: params.failure_category,
+            confidence: 0.5,
+        })
+    }
+
+    fn do_instinct_record_outcome(
+        &self,
+        params: InstinctRecordOutcomeParams,
+    ) -> Result<InstinctRecordOutcomeResponse> {
+        self.ensure_tool_allowed("nexus_instinct_record_outcome")?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let instinct_id = Uuid::parse_str(&params.instinct_id)
+            .map_err(|e| anyhow::anyhow!("invalid instinct UUID: {e}"))?;
+        let reinforced = if params.success {
+            store.record_success(&instinct_id)?
+        } else {
+            store.record_failure(&instinct_id)?
+        };
+
+        Ok(InstinctRecordOutcomeResponse {
+            instinct_id: params.instinct_id,
+            reinforced,
+            success: params.success,
+        })
+    }
+
+    fn do_instinct_export(&self, _params: InstinctExportParams) -> Result<InstinctExportResponse> {
+        self.ensure_tool_allowed("nexus_instinct_export")?;
+        let Some(store) = self.hypervisor.instinct_store() else {
+            anyhow::bail!("instinct store not initialised");
+        };
+
+        let json = store.export_all()?;
+        let parsed: serde_json::Value = serde_json::from_str(&json)?;
+        let instinct_count = parsed.as_array().map(|array| array.len()).unwrap_or(0);
+
+        Ok(InstinctExportResponse { json, instinct_count })
+    }
+
     fn resolve_fork_base_snapshot(
         &self,
         params: &ForkAndRaceParams,
@@ -821,6 +1030,39 @@ fn restored_state_summary(result: &nexus::snapshot::RollbackResult) -> RestoredS
             captured_globals: result.execution_state.captured_globals.len(),
             captured_tables: result.execution_state.captured_tables.len(),
         },
+    }
+}
+
+fn failure_mode_from_category(category: &str) -> anyhow::Result<FailureMode> {
+    match category {
+        "TIMEOUT" => Ok(FailureMode::Timeout {
+            limit_ms: 0,
+            observed_ms: 0,
+        }),
+        "FUEL_EXHAUSTED" => Ok(FailureMode::FuelExhausted { limit: 0 }),
+        "TRAP_UNREACHABLE" => Ok(FailureMode::TrapUnreachable),
+        "TRAP_DIV_BY_ZERO" => Ok(FailureMode::TrapDivByZero),
+        "TRAP_INTEGER_OVERFLOW" => Ok(FailureMode::TrapIntegerOverflow),
+        "TRAP_BAD_FLOAT_TO_INT" => Ok(FailureMode::TrapBadConversionToInteger),
+        "TRAP_STACK_OVERFLOW" => Ok(FailureMode::TrapStackOverflow),
+        "TRAP_MEMORY_OOB" => Ok(FailureMode::TrapMemoryOutOfBounds),
+        "TRAP_HEAP_MISALIGNED" => Ok(FailureMode::TrapHeapMisaligned),
+        "TRAP_TABLE_OOB" => Ok(FailureMode::TrapTableOutOfBounds),
+        "TRAP_INDIRECT_NULL" => Ok(FailureMode::TrapIndirectCallToNull),
+        "TRAP_BAD_SIGNATURE" => Ok(FailureMode::TrapBadSignature),
+        "TRAP_NULL_REFERENCE" => Ok(FailureMode::TrapNullReference),
+        "TRAP_CAST_FAILURE" => Ok(FailureMode::TrapCastFailure),
+        "TRAP_OTHER" => Ok(FailureMode::TrapOther("TRAP_OTHER".to_string())),
+        "MEMORY_LIMIT_EXCEEDED" => Ok(FailureMode::MemoryLimitExceeded {
+            pages: 0,
+            limit_pages: 0,
+        }),
+        "INVALID_MODULE" => Ok(FailureMode::InvalidModule(String::new())),
+        "MISSING_ENTRYPOINT" => Ok(FailureMode::MissingEntrypoint {
+            expected: String::new(),
+        }),
+        "HOST_ERROR" => Ok(FailureMode::HostError(String::new())),
+        _ => Err(anyhow::anyhow!("unrecognised failure category '{category}'")),
     }
 }
 
@@ -1133,6 +1375,18 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instinct_stats_errors_when_store_not_initialised() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = server
+            .do_instinct_stats(InstinctStatsParams {})
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not initialised"));
+    }
 
     #[test]
     fn rejects_all_capability_for_mcp_clients() {
