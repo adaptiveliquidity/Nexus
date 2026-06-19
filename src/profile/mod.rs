@@ -1021,9 +1021,9 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_proof_enabled_is_true() {
+    fn default_proof_enabled_is_false() {
         let mcp = McpPolicy::default();
-        assert!(mcp.proof_enabled);
+        assert!(!mcp.proof_enabled);
     }
 
     #[test]
@@ -1034,8 +1034,8 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_wasi_enabled_is_true() {
-        assert!(McpPolicy::default().wasi_enabled);
+    fn default_wasi_enabled_is_false() {
+        assert!(!McpPolicy::default().wasi_enabled);
     }
 
     #[test]
@@ -1046,8 +1046,8 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_instinct_enabled_is_true() {
-        assert!(McpPolicy::default().instinct_enabled);
+    fn default_instinct_enabled_is_false() {
+        assert!(!McpPolicy::default().instinct_enabled);
     }
 
     #[test]
@@ -1058,8 +1058,8 @@ proof_enabled = false
     }
 
     #[test]
-    fn default_retry_enabled_is_true() {
-        assert!(McpPolicy::default().retry_enabled);
+    fn default_retry_enabled_is_false() {
+        assert!(!McpPolicy::default().retry_enabled);
     }
 
     #[test]
