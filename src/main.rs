@@ -562,11 +562,28 @@ fn start_session(name: &str, max_snapshots: usize) -> anyhow::Result<()> {
 }
 
 fn show_stats() -> anyhow::Result<()> {
-    println!("📊 Nexus Statistics");
-    println!("====================");
+    let config = HypervisorConfig::default();
+    let hypervisor = NexusHypervisor::new(config)?;
+    let t = hypervisor.get_stats();
+    let s = hypervisor.get_snapshot_stats();
 
-    // Placeholder - would show real stats
-    println!("   (Run some executions first to see stats)");
+    println!("Telemetry");
+    println!("---------");
+    println!("  Total executions:     {}", t.total_executions);
+    println!("  Successful:           {}", t.successful_executions);
+    println!("  Failed:               {}", t.failed_executions);
+    println!("  Total rollbacks:      {}", t.total_rollbacks);
+    println!("  Avg duration (ms):    {:.2}", t.avg_duration_ms);
+    println!("  Avg fuel/execution:   {:.0}", t.avg_fuel_per_execution);
+    println!("  Success rate:         {:.1}%", t.success_rate * 100.0);
+
+    println!();
+    println!("Snapshots");
+    println!("---------");
+    println!("  Total snapshots:      {}", s.total_snapshots);
+    println!("  Total rollbacks:      {}", s.total_rollbacks);
+    println!("  Memory saved (MB):    {:.2}", s.total_memory_saved_mb);
+    println!("  Avg compression:      {:.2}x", s.avg_compression_ratio);
 
     Ok(())
 }
