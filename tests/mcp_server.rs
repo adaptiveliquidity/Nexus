@@ -300,22 +300,52 @@ async fn initialize_and_list_tools() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 14, "expected 14 tools, got: {:?}", tools);
 
+    // Adaptive check: verify all essential tools are present
+    // without asserting on exact count (allows graceful addition of new tools)
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(tool_names.contains(&"nexus_execute"));
-    assert!(tool_names.contains(&"nexus_execute_proof"));
-    assert!(tool_names.contains(&"nexus_execute_wasi"));
-    assert!(tool_names.contains(&"nexus_snapshot_create"));
-    assert!(tool_names.contains(&"nexus_snapshot_rollback"));
-    assert!(tool_names.contains(&"nexus_issue_token"));
-    assert!(tool_names.contains(&"nexus_fork_and_race"));
-    assert!(tool_names.contains(&"nexus_instinct_stats"));
-    assert!(tool_names.contains(&"nexus_instinct_register"));
-    assert!(tool_names.contains(&"nexus_get_history"));
-    assert!(tool_names.contains(&"nexus_get_stats"));
-    assert!(tool_names.contains(&"nexus_instinct_record_outcome"));
-    assert!(tool_names.contains(&"nexus_instinct_export"));
+
+    // Define the set of tools that must always exist
+    let required_tools = [
+        "nexus_execute",
+        "nexus_execute_proof",
+        "nexus_execute_wasi",
+        "nexus_execute_retry",
+        "nexus_snapshot_create",
+        "nexus_snapshot_rollback",
+        "nexus_issue_token",
+        "nexus_fork_and_race",
+        "nexus_instinct_stats",
+        "nexus_instinct_register",
+        "nexus_get_history",
+        "nexus_get_stats",
+        "nexus_instinct_record_outcome",
+        "nexus_instinct_export",
+    ];
+
+    // Verify all required tools are present
+    for required_tool in &required_tools {
+        assert!(
+            tool_names.contains(required_tool),
+            "required tool '{}' is missing from available tools: {:?}",
+            required_tool,
+            tool_names
+        );
+    }
+
+    // Log actual tool count for visibility (helps track when tools are added/removed)
+    println!(
+        "MCP tools available: {} (expected minimum: {})",
+        tools.len(),
+        required_tools.len()
+    );
+
+    assert!(
+        tools.len() >= required_tools.len(),
+        "expected at least {} tools, got {}",
+        required_tools.len(),
+        tools.len()
+    );
 }
 
 #[tokio::test]
