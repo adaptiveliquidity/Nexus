@@ -40,6 +40,16 @@ pub struct ExecuteParams {
     pub input: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExecuteRetryParams {
+    #[schemars(description = "Path to the .wasm file to execute")]
+    pub wasm_path: String,
+    #[schemars(description = "Entry point function name (default: _start)")]
+    pub entry: Option<String>,
+    #[schemars(description = "JSON input to pass to the WASM module")]
+    pub input: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ExecuteProofParams {
     #[schemars(description = "Path to the WASM module file to execute")]
@@ -285,6 +295,16 @@ impl NexusMcpServer {
     )]
     async fn nexus_execute(&self, Parameters(params): Parameters<ExecuteParams>) -> String {
         match self.do_execute(params).await {
+            Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Execute a WASM tool in the Nexus sandbox with instinct-guided retry, and return structured output including success/failure, result bytes, execution time, fuel consumed, and the runtime snapshot id when WASM memory was captured."
+    )]
+    async fn nexus_execute_retry(&self, Parameters(params): Parameters<ExecuteRetryParams>) -> String {
+        match self.do_execute_retry(params).await {
             Ok(output) => serde_json::to_string_pretty(&output).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
         }
@@ -602,6 +622,23 @@ impl NexusMcpServer {
         // Pure-compute path carries no capability tokens; profile gating for
         // this tool is handled by ensure_tool_allowed above (MCP tool allowlist).
         let output = self.hypervisor.execute_tool(tool, input).await?;
+        Ok(ToolOutputResponse::from(output))
+    }
+
+    async fn do_execute_retry(&self, params: ExecuteRetryParams) -> Result<ToolOutputResponse> {
+        self.ensure_tool_allowed("nexus_execute_retry")?;
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
+
+        let mut tool = ToolDefinition::new("mcp_tool".to_string(), wasm_bytes);
+        if let Some(entry) = params.entry {
+            tool = tool.with_entry(&entry);
+        }
+
+        let input = params.input.unwrap_or(serde_json::json!({}));
+        let output = self.hypervisor.execute_with_retry(tool, input).await?;
         Ok(ToolOutputResponse::from(output))
     }
 
