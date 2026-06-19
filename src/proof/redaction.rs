@@ -29,10 +29,15 @@ impl RedactionPolicy {
     }
 
     pub fn redact_token(&self, token: &str) -> (String, RedactionField) {
-        (
-            format!("token:{}", token.chars().take(8).collect::<String>()),
-            RedactionField::Truncated,
-        )
+        // Truncating to a prefix leaks the token's leading characters, which can
+        // be enough to identify or brute-force short tokens. Use HMAC (or a
+        // static placeholder when HMAC is disabled) to produce a non-reversible,
+        // correlation-safe redacted representation — consistent with redact_path.
+        let redacted = match &self.hmac_key {
+            ProofHmacKey::Disabled => "[TOKEN_REDACTED]".to_owned(),
+            key => digest_with_key(key, token.as_bytes()).value,
+        };
+        (redacted, RedactionField::HmacOrPlaceholder)
     }
 
     pub fn redact_env_value(&self, _val: &str) -> (String, RedactionField) {

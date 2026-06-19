@@ -54,8 +54,9 @@ pub struct ExecutionPolicy {
 
 /// Policy for the MCP tool surface, parsed from the optional `[mcp]` table.
 ///
-/// An absent table — or absent individual fields — falls back to permissive
-/// defaults so existing capability-only profiles keep their current behaviour.
+/// **Fail-closed by default**: an absent table, or absent individual fields,
+/// disables the corresponding tools. Profiles must explicitly set
+/// `snapshot_enabled = true` / `fork_enabled = true` to expose those surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpPolicy {
     /// When `Some`, only these MCP tool names may be invoked. `None` leaves all
@@ -71,8 +72,8 @@ impl Default for McpPolicy {
     fn default() -> Self {
         Self {
             tool_allowlist: None,
-            snapshot_enabled: true,
-            fork_enabled: true,
+            snapshot_enabled: false,
+            fork_enabled: false,
         }
     }
 }
@@ -303,8 +304,8 @@ fn mcp_policy_from_raw(raw: Option<RawMcp>) -> McpPolicy {
         None => McpPolicy::default(),
         Some(raw) => McpPolicy {
             tool_allowlist: raw.tool_allowlist,
-            snapshot_enabled: raw.snapshot_enabled.unwrap_or(true),
-            fork_enabled: raw.fork_enabled.unwrap_or(true),
+            snapshot_enabled: raw.snapshot_enabled.unwrap_or(false),
+            fork_enabled: raw.fork_enabled.unwrap_or(false),
         },
     }
 }
@@ -548,8 +549,19 @@ fn validate_capabilities(
             "mount_tmpfs" => {
                 required_path(raw, original_type, "path", errors).map(Capability::MountTmpfs)
             }
-            "all" => Some(Capability::All),
-            "none" => Some(Capability::None),
+            "all" | "none" => {
+                // `Capability::All` and `Capability::None` are runtime sentinels,
+                // not valid profile entries. Allowing "all" in a profile would
+                // defeat capability confinement entirely.
+                errors.push(ValidationError::UnknownCapabilityType {
+                    line: capability_type.line,
+                    capability_type: format!(
+                        "\"{}\" is a reserved sentinel and may not appear in profile manifests",
+                        original_type
+                    ),
+                });
+                None
+            }
             _ => {
                 errors.push(ValidationError::UnknownCapabilityType {
                     line: capability_type.line,

@@ -944,8 +944,12 @@ impl NexusHypervisor {
             let mut rollback_performed = false;
             if mode.requires_rollback() {
                 if let Some(snap) = snapshot.as_ref() {
-                    if self.rollback_runtime_snapshot(snap).is_ok() {
-                        rollback_performed = true;
+                    match self.rollback_runtime_snapshot(snap) {
+                        Ok(()) => rollback_performed = true,
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "rollback attempt failed; sandbox state may be dirty"
+                        ),
                     }
                 }
             }

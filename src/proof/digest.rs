@@ -43,11 +43,27 @@ impl TypedDigest {
 pub fn digest_with_key(key: &ProofHmacKey, data: &[u8]) -> TypedDigest {
     match key {
         ProofHmacKey::Disabled => TypedDigest::redacted(),
-        ProofHmacKey::FromEnv(var) => {
-            let secret = env::var(var).expect("proof HMAC key environment variable must be set");
-            TypedDigest::hmac_sha256_private(secret.as_bytes(), data)
+        ProofHmacKey::FromEnv(var) => match env::var(var) {
+            Ok(secret) => TypedDigest::hmac_sha256_private(secret.as_bytes(), data),
+            Err(e) => {
+                tracing::warn!(
+                    var = %var,
+                    error = %e,
+                    "proof HMAC key env var is unset; capsule digest will be redacted"
+                );
+                TypedDigest::redacted()
+            }
+        },
+        ProofHmacKey::EphemeralTestOnly => {
+            // Zero-key HMAC is intentionally weak and exists only for test
+            // coverage of the digest paths. In non-test builds fall back to
+            // redacted so a misconfigured production deployment fails closed.
+            if cfg!(test) {
+                TypedDigest::hmac_sha256_private(&[0_u8; 32], data)
+            } else {
+                TypedDigest::redacted()
+            }
         }
-        ProofHmacKey::EphemeralTestOnly => TypedDigest::hmac_sha256_private(&[0_u8; 32], data),
     }
 }
 

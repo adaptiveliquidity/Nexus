@@ -88,13 +88,15 @@ fn redact_error_truncates_to_at_most_256_chars() {
 }
 
 #[test]
-fn redact_token_uses_token_prefix_format() {
+fn redact_token_does_not_leak_prefix() {
     let policy = RedactionPolicy::new(ProofHmacKey::Disabled);
 
     let (redacted, field) = policy.redact_token("abcdefghijklmno");
 
-    assert_eq!(redacted, "token:abcdefgh");
-    assert_eq!(field, RedactionField::Truncated);
+    // Token must be fully opaque — no leading characters exposed.
+    assert_eq!(redacted, "[TOKEN_REDACTED]");
+    assert_eq!(field, RedactionField::HmacOrPlaceholder);
+    assert!(!redacted.contains("abcdefgh"), "token prefix must not appear in redacted output");
 }
 
 #[test]

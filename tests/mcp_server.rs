@@ -1078,7 +1078,7 @@ async fn mcp_tool_allowlist_permits_listed_tool() {
     let tmp = tempfile::tempdir().unwrap();
     let profile_path = profile_with_mcp_block(
         tmp.path(),
-        "[mcp]\ntool_allowlist = ['nexus_snapshot_create']",
+        "[mcp]\ntool_allowlist = ['nexus_snapshot_create']\nsnapshot_enabled = true",
     );
     let mut client = McpClient::spawn_with_module_dir_allowlist_and_profile(
         Some(tmp.path()),
