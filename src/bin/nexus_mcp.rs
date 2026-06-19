@@ -1644,9 +1644,6 @@ fn lexical_normalize_path(path: &Path) -> PathBuf {
             std::borrow::Cow::Borrowed(path)
         }
     };
-    #[cfg(not(windows))]
-    let path = path;
-
     let is_absolute = path.is_absolute();
     let mut normalized = PathBuf::new();
 
