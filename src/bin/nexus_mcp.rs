@@ -555,6 +555,7 @@ impl NexusMcpServer {
 
     async fn do_execute_wasi(&self, params: ExecuteWasiParams) -> Result<ToolOutputResponse> {
         self.ensure_tool_allowed("nexus_execute_wasi")?;
+        self.ensure_wasi_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -1058,6 +1059,18 @@ impl NexusMcpServer {
         }
         Err(profile_denial(
             "nexus_execute_proof is disabled by the active profile".to_string(),
+        ))
+    }
+
+    fn ensure_wasi_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().wasi_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "nexus_execute_wasi is disabled by the active profile".to_string(),
         ))
     }
 }

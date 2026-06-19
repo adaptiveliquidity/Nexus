@@ -67,6 +67,8 @@ pub struct McpPolicy {
     pub fork_enabled: bool,
     /// Whether the nexus_execute_proof tool is permitted.
     pub proof_enabled: bool,
+    /// Whether the nexus_execute_wasi tool is permitted.
+    pub wasi_enabled: bool,
 }
 
 impl Default for McpPolicy {
@@ -76,6 +78,7 @@ impl Default for McpPolicy {
             snapshot_enabled: true,
             fork_enabled: true,
             proof_enabled: true,
+            wasi_enabled: true,
         }
     }
 }
@@ -290,6 +293,7 @@ struct RawMcp {
     snapshot_enabled: Option<bool>,
     fork_enabled: Option<bool>,
     proof_enabled: Option<bool>,
+    wasi_enabled: Option<bool>,
 }
 
 impl RawMcp {
@@ -299,6 +303,7 @@ impl RawMcp {
             snapshot_enabled: None,
             fork_enabled: None,
             proof_enabled: None,
+            wasi_enabled: None,
         }
     }
 }
@@ -311,6 +316,7 @@ fn mcp_policy_from_raw(raw: Option<RawMcp>) -> McpPolicy {
             snapshot_enabled: raw.snapshot_enabled.unwrap_or(true),
             fork_enabled: raw.fork_enabled.unwrap_or(true),
             proof_enabled: raw.proof_enabled.unwrap_or(true),
+            wasi_enabled: raw.wasi_enabled.unwrap_or(true),
         },
     }
 }
@@ -346,6 +352,13 @@ fn parse_mcp_assignment(
         },
         "proof_enabled" => match parse_bool_value(rhs) {
             Ok(value) => mcp.proof_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "wasi_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.wasi_enabled = Some(value),
             Err(message) => errors.push(ValidationError::Parse {
                 line: line_number,
                 message,
@@ -755,6 +768,31 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    type CapabilityProfile = CapabilityProfileManifest;
+
+    impl CapabilityProfileManifest {
+        fn from_str_for_test(contents: &str) -> Result<Self, Vec<ValidationError>> {
+            let mut errors = Vec::new();
+            let raw = parse_profile(contents, &mut errors);
+            let capabilities = if raw.capabilities.is_empty() {
+                Vec::new()
+            } else {
+                validate_capabilities(&raw.capabilities, &mut errors)
+            };
+
+            if errors.is_empty() {
+                Ok(CapabilityProfileManifest {
+                    name: raw.name.unwrap_or_else(|| "test-profile".to_string()),
+                    mcp: mcp_policy_from_raw(raw.mcp),
+                    execution: execution_policy_from_raw(raw.execution),
+                    capabilities,
+                })
+            } else {
+                Err(errors)
+            }
+        }
+    }
+
     static NEXT_PROFILE_ID: AtomicUsize = AtomicUsize::new(0);
 
     fn write_profile(contents: &str) -> PathBuf {
@@ -960,6 +998,18 @@ proof_enabled = false
     fn default_proof_enabled_is_true() {
         let mcp = McpPolicy::default();
         assert!(mcp.proof_enabled);
+    }
+
+    #[test]
+    fn parse_wasi_disabled() {
+        let input = "[mcp]\nwasi_enabled = false";
+        let profile = CapabilityProfile::from_str_for_test(input).unwrap();
+        assert!(!profile.mcp_policy().wasi_enabled);
+    }
+
+    #[test]
+    fn default_wasi_enabled_is_true() {
+        assert!(McpPolicy::default().wasi_enabled);
     }
 
     #[test]
