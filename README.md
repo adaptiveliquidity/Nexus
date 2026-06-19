@@ -143,6 +143,9 @@ nexus execute --wasm tool.wasm
 # Hot path via long-lived daemon (Unix socket / Windows named pipe)
 nexus run --wasm tool.wasm
 
+# Start an interactive operator session
+nexus session --name agent-session
+
 # Run demos
 nexus demo --demo all
 ```

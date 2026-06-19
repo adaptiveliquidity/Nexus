@@ -3,10 +3,17 @@
 //! Command-line interface for the Nexus WASM Snap-Rollback Sandbox.
 
 use clap::{Parser, Subcommand};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use nexus::{HypervisorConfig, NexusHypervisor, ToolDefinition};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionFlow {
+    Continue,
+    Quit,
+}
 
 #[derive(Parser)]
 #[command(name = "nexus")]
@@ -552,18 +559,134 @@ fn start_session(name: &str, max_snapshots: usize) -> anyhow::Result<()> {
         ..HypervisorConfig::default()
     };
 
-    let _hypervisor = NexusHypervisor::new(config)?;
+    let hypervisor = NexusHypervisor::new(config)?;
 
     println!("\n✅ Session started!");
-    println!("   (Interactive mode not yet implemented)");
-    println!("   Use 'nexus execute' to run WASM files");
+    println!("   Type 'help' for commands, 'quit' to exit.");
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+
+    loop {
+        print!("nexus:{}> ", name);
+        io::stdout().flush()?;
+
+        line.clear();
+        if stdin.read_line(&mut line)? == 0 {
+            println!();
+            break;
+        }
+
+        match dispatch_session_command(&hypervisor, &line) {
+            Ok(SessionFlow::Continue) => {}
+            Ok(SessionFlow::Quit) => break,
+            Err(err) => {
+                println!("❌ Command error: {err}");
+            }
+        }
+    }
+
+    println!("👋 Session ended.");
 
     Ok(())
 }
 
-fn show_stats() -> anyhow::Result<()> {
-    let config = HypervisorConfig::default();
-    let hypervisor = NexusHypervisor::new(config)?;
+fn dispatch_session_command(
+    hypervisor: &NexusHypervisor,
+    line: &str,
+) -> anyhow::Result<SessionFlow> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(SessionFlow::Continue);
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next().expect("trimmed input has a command");
+
+    match command {
+        "help" => {
+            print_session_help();
+            Ok(SessionFlow::Continue)
+        }
+        "stats" => {
+            print_hypervisor_stats(hypervisor);
+            Ok(SessionFlow::Continue)
+        }
+        "history" => {
+            let limit = match parts.next() {
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(limit) => limit,
+                    Err(err) => {
+                        println!("❌ Invalid history limit '{raw}': {err}");
+                        return Ok(SessionFlow::Continue);
+                    }
+                },
+                None => 10,
+            };
+
+            if parts.next().is_some() {
+                println!("❌ Usage: history [N]");
+                return Ok(SessionFlow::Continue);
+            }
+
+            print_session_history(hypervisor, limit);
+            Ok(SessionFlow::Continue)
+        }
+        "snapshots" => {
+            print_session_snapshots(hypervisor);
+            Ok(SessionFlow::Continue)
+        }
+        "rollback" => {
+            let Some(raw_id) = parts.next() else {
+                println!("❌ Usage: rollback <uuid>");
+                return Ok(SessionFlow::Continue);
+            };
+
+            if parts.next().is_some() {
+                println!("❌ Usage: rollback <uuid>");
+                return Ok(SessionFlow::Continue);
+            }
+
+            match uuid::Uuid::parse_str(raw_id) {
+                Ok(snapshot_id) => match hypervisor.rollback_snapshot(snapshot_id) {
+                    Ok(rollback) => {
+                        println!("✅ Rollback completed");
+                        println!("   Snapshot ID: {}", rollback.snapshot_id);
+                        println!("   Restored memory: {} bytes", rollback.memory.len());
+                        println!("   Filesystem operations: {}", rollback.fs_operations.len());
+                        println!("   Timestamp: {}", rollback.timestamp);
+                    }
+                    Err(err) => {
+                        println!("❌ Rollback failed: {err}");
+                    }
+                },
+                Err(err) => {
+                    println!("❌ Invalid snapshot id '{raw_id}': {err}");
+                }
+            }
+
+            Ok(SessionFlow::Continue)
+        }
+        "quit" | "exit" => Ok(SessionFlow::Quit),
+        other => {
+            println!("Unknown command: {other}");
+            println!("Type 'help' for available commands.");
+            Ok(SessionFlow::Continue)
+        }
+    }
+}
+
+fn print_session_help() {
+    println!("Commands:");
+    println!("  help             Show this help");
+    println!("  stats            Show telemetry and snapshot statistics");
+    println!("  history [N]      Show recent execution records (default: 10)");
+    println!("  snapshots        Show snapshot stats and latest runtime snapshot id");
+    println!("  rollback <uuid>  Roll back to a full or differential snapshot");
+    println!("  quit | exit      End the session");
+}
+
+fn print_hypervisor_stats(hypervisor: &NexusHypervisor) {
     let t = hypervisor.get_stats();
     let s = hypervisor.get_snapshot_stats();
 
@@ -584,6 +707,54 @@ fn show_stats() -> anyhow::Result<()> {
     println!("  Total rollbacks:      {}", s.total_rollbacks);
     println!("  Memory saved (MB):    {:.2}", s.total_memory_saved_mb);
     println!("  Avg compression:      {:.2}x", s.avg_compression_ratio);
+    println!("  Last snapshot (us):   {}", s.last_snapshot_time_us);
+}
+
+fn print_session_history(hypervisor: &NexusHypervisor, limit: usize) {
+    let history = hypervisor.get_history(Some(limit));
+
+    println!("History");
+    println!("-------");
+
+    if history.is_empty() {
+        println!("  No execution history yet.");
+        return;
+    }
+
+    for record in history {
+        let status = if record.success { "ok" } else { "failed" };
+        println!(
+            "  {}  {}  {}  {}ms  fuel={}",
+            record.timestamp, status, record.operation, record.duration_ms, record.fuel_consumed
+        );
+
+        if let Some(error) = record.error {
+            println!("      error: {}", error.description);
+        }
+    }
+}
+
+fn print_session_snapshots(hypervisor: &NexusHypervisor) {
+    let s = hypervisor.get_snapshot_stats();
+
+    println!("Snapshots");
+    println!("---------");
+    println!("  Total snapshots:      {}", s.total_snapshots);
+    println!("  Total rollbacks:      {}", s.total_rollbacks);
+    println!("  Memory saved (MB):    {:.2}", s.total_memory_saved_mb);
+    println!("  Avg compression:      {:.2}x", s.avg_compression_ratio);
+    println!("  Last snapshot (us):   {}", s.last_snapshot_time_us);
+
+    match hypervisor.latest_runtime_snapshot_id() {
+        Some(snapshot_id) => println!("  Latest runtime ID:    {}", snapshot_id),
+        None => println!("  Latest runtime ID:    none"),
+    }
+}
+
+fn show_stats() -> anyhow::Result<()> {
+    let config = HypervisorConfig::default();
+    let hypervisor = NexusHypervisor::new(config)?;
+    print_hypervisor_stats(&hypervisor);
 
     Ok(())
 }
@@ -782,4 +953,50 @@ fn run_benchmark(iterations: u32) -> anyhow::Result<()> {
     println!("   Throughput:     {} concurrent executions supported", 20);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_hypervisor() -> NexusHypervisor {
+        NexusHypervisor::new(HypervisorConfig::default()).expect("test hypervisor should build")
+    }
+
+    #[test]
+    fn session_help_continues() {
+        let hypervisor = test_hypervisor();
+        let flow = dispatch_session_command(&hypervisor, "help").expect("help should not error");
+        assert_eq!(flow, SessionFlow::Continue);
+    }
+
+    #[test]
+    fn session_stats_continues() {
+        let hypervisor = test_hypervisor();
+        let flow = dispatch_session_command(&hypervisor, "stats").expect("stats should not error");
+        assert_eq!(flow, SessionFlow::Continue);
+    }
+
+    #[test]
+    fn session_empty_line_continues() {
+        let hypervisor = test_hypervisor();
+        let flow =
+            dispatch_session_command(&hypervisor, "   \t\n").expect("empty line should not error");
+        assert_eq!(flow, SessionFlow::Continue);
+    }
+
+    #[test]
+    fn session_quit_exits() {
+        let hypervisor = test_hypervisor();
+        let flow = dispatch_session_command(&hypervisor, "quit").expect("quit should not error");
+        assert_eq!(flow, SessionFlow::Quit);
+    }
+
+    #[test]
+    fn session_unknown_command_continues() {
+        let hypervisor = test_hypervisor();
+        let flow =
+            dispatch_session_command(&hypervisor, "launch").expect("unknown should not error");
+        assert_eq!(flow, SessionFlow::Continue);
+    }
 }

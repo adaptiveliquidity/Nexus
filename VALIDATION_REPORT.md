@@ -1,3 +1,7 @@
+> **Historical snapshot dated 2026-06-07 — may be superseded by later results.**
+> This report reflects measurements taken at a specific point in development.
+> See `BENCHMARKS.md` for the current authoritative benchmark data.
+
 # Nexus Validation Report
 
 **Generated**: 2026-06-07T22:17:44+00:00  
