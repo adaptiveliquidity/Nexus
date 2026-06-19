@@ -69,6 +69,8 @@ pub struct McpPolicy {
     pub proof_enabled: bool,
     /// Whether the nexus_execute_wasi tool is permitted.
     pub wasi_enabled: bool,
+    /// Whether the instinct tools are permitted.
+    pub instinct_enabled: bool,
 }
 
 impl Default for McpPolicy {
@@ -79,6 +81,7 @@ impl Default for McpPolicy {
             fork_enabled: true,
             proof_enabled: true,
             wasi_enabled: true,
+            instinct_enabled: true,
         }
     }
 }
@@ -294,6 +297,7 @@ struct RawMcp {
     fork_enabled: Option<bool>,
     proof_enabled: Option<bool>,
     wasi_enabled: Option<bool>,
+    instinct_enabled: Option<bool>,
 }
 
 impl RawMcp {
@@ -304,6 +308,7 @@ impl RawMcp {
             fork_enabled: None,
             proof_enabled: None,
             wasi_enabled: None,
+            instinct_enabled: None,
         }
     }
 }
@@ -317,6 +322,7 @@ fn mcp_policy_from_raw(raw: Option<RawMcp>) -> McpPolicy {
             fork_enabled: raw.fork_enabled.unwrap_or(true),
             proof_enabled: raw.proof_enabled.unwrap_or(true),
             wasi_enabled: raw.wasi_enabled.unwrap_or(true),
+            instinct_enabled: raw.instinct_enabled.unwrap_or(true),
         },
     }
 }
@@ -359,6 +365,13 @@ fn parse_mcp_assignment(
         },
         "wasi_enabled" => match parse_bool_value(rhs) {
             Ok(value) => mcp.wasi_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "instinct_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.instinct_enabled = Some(value),
             Err(message) => errors.push(ValidationError::Parse {
                 line: line_number,
                 message,
@@ -1010,6 +1023,18 @@ proof_enabled = false
     #[test]
     fn default_wasi_enabled_is_true() {
         assert!(McpPolicy::default().wasi_enabled);
+    }
+
+    #[test]
+    fn parse_instinct_disabled() {
+        let input = "[mcp]\ninstinct_enabled = false";
+        let profile = CapabilityProfile::from_str_for_test(input).unwrap();
+        assert!(!profile.mcp_policy().instinct_enabled);
+    }
+
+    #[test]
+    fn default_instinct_enabled_is_true() {
+        assert!(McpPolicy::default().instinct_enabled);
     }
 
     #[test]
