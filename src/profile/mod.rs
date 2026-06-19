@@ -65,6 +65,8 @@ pub struct McpPolicy {
     pub snapshot_enabled: bool,
     /// Whether the fork-and-race tool is permitted.
     pub fork_enabled: bool,
+    /// Whether the nexus_execute_proof tool is permitted.
+    pub proof_enabled: bool,
 }
 
 impl Default for McpPolicy {
@@ -73,6 +75,7 @@ impl Default for McpPolicy {
             tool_allowlist: None,
             snapshot_enabled: true,
             fork_enabled: true,
+            proof_enabled: true,
         }
     }
 }
@@ -286,6 +289,7 @@ struct RawMcp {
     tool_allowlist: Option<Vec<String>>,
     snapshot_enabled: Option<bool>,
     fork_enabled: Option<bool>,
+    proof_enabled: Option<bool>,
 }
 
 impl RawMcp {
@@ -294,6 +298,7 @@ impl RawMcp {
             tool_allowlist: None,
             snapshot_enabled: None,
             fork_enabled: None,
+            proof_enabled: None,
         }
     }
 }
@@ -305,6 +310,7 @@ fn mcp_policy_from_raw(raw: Option<RawMcp>) -> McpPolicy {
             tool_allowlist: raw.tool_allowlist,
             snapshot_enabled: raw.snapshot_enabled.unwrap_or(true),
             fork_enabled: raw.fork_enabled.unwrap_or(true),
+            proof_enabled: raw.proof_enabled.unwrap_or(true),
         },
     }
 }
@@ -333,6 +339,13 @@ fn parse_mcp_assignment(
         },
         "fork_enabled" => match parse_bool_value(rhs) {
             Ok(value) => mcp.fork_enabled = Some(value),
+            Err(message) => errors.push(ValidationError::Parse {
+                line: line_number,
+                message,
+            }),
+        },
+        "proof_enabled" => match parse_bool_value(rhs) {
+            Ok(value) => mcp.proof_enabled = Some(value),
             Err(message) => errors.push(ValidationError::Parse {
                 line: line_number,
                 message,
@@ -922,6 +935,31 @@ fork_enabled = false
         assert!(mcp.snapshot_enabled);
         assert!(!mcp.fork_enabled);
         assert!(mcp.tool_allowlist.is_none());
+    }
+
+    #[test]
+    fn parse_proof_disabled() {
+        let path = write_profile(
+            r#"
+name = "no-proof"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[mcp]
+proof_enabled = false
+"#,
+        );
+        let manifest = load_and_validate(&path).expect("valid profile");
+        std::fs::remove_file(path).ok();
+        assert!(!manifest.mcp_policy().proof_enabled);
+    }
+
+    #[test]
+    fn default_proof_enabled_is_true() {
+        let mcp = McpPolicy::default();
+        assert!(mcp.proof_enabled);
     }
 
     #[test]

@@ -394,6 +394,7 @@ impl NexusMcpServer {
 
     async fn do_execute_proof(&self, params: ExecuteProofParams) -> Result<ExecuteProofResponse> {
         self.ensure_tool_allowed("nexus_execute_proof")?;
+        self.ensure_proof_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
@@ -774,6 +775,18 @@ impl NexusMcpServer {
         }
         Err(profile_denial(
             "fork_and_race is disabled by the active profile".to_string(),
+        ))
+    }
+
+    fn ensure_proof_enabled(&self) -> Result<()> {
+        let Some(profile) = self.capability_profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.mcp_policy().proof_enabled {
+            return Ok(());
+        }
+        Err(profile_denial(
+            "nexus_execute_proof is disabled by the active profile".to_string(),
         ))
     }
 }
