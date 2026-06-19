@@ -22,3 +22,26 @@ async fn execute_tool_proof_returns_output_and_capsule() {
 
     let _scorecard = ProofScorecard::from_capsule(&capsule);
 }
+
+fn trap_wasm() -> Vec<u8> {
+    wat::parse_str(
+        r#"(module (memory (export "memory") 1) (func (export "_start") (unreachable)))"#,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn wasm_trap_populates_failure_evidence() {
+    let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+    let tool = ToolDefinition::new("proof_trap".to_string(), trap_wasm());
+
+    let (output, capsule) = hypervisor
+        .execute_tool_proof(tool, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    assert!(!output.success);
+    let failure = capsule.failure.expect("trap must produce FailureEvidence");
+    assert!(!failure.failure_category.is_empty());
+    assert!(!failure.error_summary.is_empty());
+}
