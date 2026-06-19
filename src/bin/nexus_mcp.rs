@@ -119,6 +119,20 @@ pub struct IssueTokenParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AttenuateTokenParams {
+    #[schemars(description = "UUID of the parent token")]
+    pub parent_token_id: String,
+    #[schemars(
+        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+    )]
+    pub capability: String,
+    #[schemars(description = "Path or URL pattern for the capability")]
+    pub path: Option<String>,
+    #[schemars(description = "Token validity in seconds (default: 3600)")]
+    pub validity_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ForkAndRaceParams {
     #[schemars(description = "Path to the .wasm file to execute in each branch")]
     pub wasm_path: String,
@@ -379,6 +393,19 @@ impl NexusMcpServer {
     )]
     async fn nexus_issue_token(&self, Parameters(params): Parameters<IssueTokenParams>) -> String {
         match self.do_issue_token(params) {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
+        description = "Create a restricted child capability token attenuated from an existing parent token."
+    )]
+    async fn nexus_attenuate_token(
+        &self,
+        Parameters(params): Parameters<AttenuateTokenParams>,
+    ) -> String {
+        match self.do_attenuate_token(params) {
             Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
             Err(e) => tool_anyhow_error_response(e),
         }
@@ -797,6 +824,31 @@ impl NexusMcpServer {
         let token = self
             .hypervisor
             .issue_token(capability.clone(), "mcp_client", validity)?;
+
+        Ok(TokenResponse {
+            token_id: token.id.to_string(),
+            capability: format!("{:?}", capability),
+            expires_in_secs: validity_secs,
+        })
+    }
+
+    fn do_attenuate_token(&self, params: AttenuateTokenParams) -> Result<TokenResponse> {
+        self.ensure_tool_allowed("nexus_attenuate_token")?;
+        let parent_id = Uuid::parse_str(&params.parent_token_id)
+            .map_err(|e| anyhow::anyhow!("invalid parent_token_id UUID: {e}"))?;
+        let capability = parse_capability_from_str(&params.capability, params.path.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", params.capability))?;
+
+        // Security: reject the unrestricted `All` capability and clamp the
+        // caller-supplied validity to a bounded maximum (see SECURITY.md).
+        let (capability, validity_secs) = sanitize_token_request(capability, params.validity_secs)?;
+        let validity = Duration::from_secs(validity_secs);
+        let token = self.hypervisor.attenuate_token(
+            parent_id,
+            capability.clone(),
+            "mcp_client",
+            validity,
+        )?;
 
         Ok(TokenResponse {
             token_id: token.id.to_string(),
@@ -1755,6 +1807,26 @@ mod tests {
         let (_, secs) =
             sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), None).unwrap();
         assert_eq!(secs, MAX_TOKEN_VALIDITY_SECS);
+    }
+
+    #[test]
+    fn attenuate_token_rejects_invalid_uuid() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let error = match server.do_attenuate_token(AttenuateTokenParams {
+            parent_token_id: "not-a-uuid".to_string(),
+            capability: "read_file".to_string(),
+            path: Some("/tmp".to_string()),
+            validity_secs: None,
+        }) {
+            Ok(_) => panic!("expected invalid parent_token_id UUID error"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(
+            error.contains("invalid parent_token_id UUID"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

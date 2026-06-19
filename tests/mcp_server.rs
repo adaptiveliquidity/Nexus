@@ -313,6 +313,7 @@ async fn initialize_and_list_tools() {
         "nexus_snapshot_create",
         "nexus_snapshot_rollback",
         "nexus_issue_token",
+        "nexus_attenuate_token",
         "nexus_fork_and_race",
         "nexus_instinct_stats",
         "nexus_instinct_query",
