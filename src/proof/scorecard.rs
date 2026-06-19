@@ -15,7 +15,7 @@ impl ProofScorecard {
                 + c.redaction.truncated_fields.len()
                 + c.redaction.removed_fields.len(),
             limitations_count,
-            scorecard_pass: has_signature,
+            scorecard_pass: c.failure.is_none() && c.capabilities.mismatch.is_none(),
         }
     }
 }
