@@ -658,6 +658,126 @@ impl NexusHypervisor {
             aeon_agent_id: tool.aeon_agent_id.clone(),
             #[cfg(feature = "aeon-memory")]
             aeon_session_id: tool.aeon_session_id.clone(),
+            #[cfg(feature = "aeon-memory")]
+            negotiation_rounds: None,
+        };
+
+        let capsule = Self::capsule_from_receipt(&receipt, &output);
+        let capsule = sign_capsule(capsule, &self.proof_signing_key);
+        Ok((output, capsule))
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    /// Execute a proof-producing tool with caller capability tokens and
+    /// fail-open AEON-IQ denial negotiation.
+    pub async fn execute_tool_proof_with_tokens(
+        &self,
+        mut tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[crate::security::CapabilityToken],
+    ) -> Result<(ToolOutput, ProofCapsule)> {
+        let run_id = uuid::Uuid::new_v4();
+        let started_at = Utc::now();
+        let input_bytes = serde_json::to_vec(&input).map_err(|e| {
+            NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
+        })?;
+        let module_digest = TypedDigest::sha256_public(&tool.wasm_bytes);
+        let input_digest = TypedDigest::sha256_public(&input_bytes);
+        let mut effective_capabilities = tool.required_capabilities.clone();
+        let mut negotiation_rounds = None;
+
+        if !tool.required_capabilities.is_empty() {
+            let authorization = {
+                let manager = self.capability_manager.read().unwrap();
+                manager.authorize(caller_tokens, &tool.required_capabilities)
+            };
+
+            if let Err(original_denial) = authorization {
+                if !matches!(original_denial, NexusError::CapabilityDenied(_)) {
+                    return Err(original_denial);
+                }
+
+                let aeon_context_available =
+                    tool.aeon_agent_id.is_some() && tool.aeon_session_id.is_some();
+                let outcome = match (self.aeon_memory.as_ref(), aeon_context_available) {
+                    (Some(memory), true) => {
+                        crate::security::negotiator::negotiate_capability_denial_with_authorizer(
+                            &tool.required_capabilities,
+                            memory,
+                            |narrowed| {
+                                let manager = self.capability_manager.read().unwrap();
+                                manager.authorize(caller_tokens, narrowed).is_ok()
+                            },
+                        )
+                        .await
+                    }
+                    _ => None,
+                };
+
+                match outcome {
+                    Some(outcome) => {
+                        debug_assert!(
+                            outcome
+                                .narrowed_capabilities
+                                .iter()
+                                .all(|capability| tool.required_capabilities.contains(capability)),
+                            "negotiated capabilities must be drawn only from the original requirement set"
+                        );
+                        debug_assert!(
+                            outcome.narrowed_capabilities.len() < tool.required_capabilities.len(),
+                            "negotiated capabilities must strictly narrow the original requirement set"
+                        );
+                        effective_capabilities = outcome.narrowed_capabilities;
+                        negotiation_rounds = Some(outcome.rounds);
+                        tool.required_capabilities = effective_capabilities.clone();
+                    }
+                    None => return Err(original_denial),
+                }
+            }
+        }
+
+        let required_caps: Vec<String> = effective_capabilities
+            .iter()
+            .map(Capability::description)
+            .collect();
+        let output = self
+            .execute_tool_inner(tool.clone(), input, caller_tokens, None, None)
+            .await?;
+        let finished_at = Utc::now();
+
+        let snapshot = output
+            .snapshot_id
+            .map(|snapshot_id| self.snapshot_evidence(snapshot_id));
+        let failure = Self::failure_lite(&output);
+        let rollback = match (output.rollback_performed, output.snapshot_id) {
+            (true, Some(snapshot_id)) => Some((
+                true,
+                snapshot_id,
+                "restore latest runtime state after failed execution".to_string(),
+            )),
+            _ => None,
+        };
+
+        let receipt = ExecutionReceipt {
+            run_id,
+            started_at,
+            finished_at,
+            tool_name: tool.name.clone(),
+            entrypoint: tool.entry_point.clone(),
+            module_sha256: module_digest.value.clone(),
+            input_sha256: input_digest.value.clone(),
+            input_bytes_len: input_bytes.len(),
+            required_caps: required_caps.clone(),
+            granted_caps: required_caps,
+            policy_mode: PolicyEnforcementMode::UnprofiledDev,
+            profile: None,
+            snapshot,
+            failure,
+            rollback,
+            branches: None,
+            aeon_agent_id: tool.aeon_agent_id.clone(),
+            aeon_session_id: tool.aeon_session_id.clone(),
+            negotiation_rounds,
         };
 
         let capsule = Self::capsule_from_receipt(&receipt, &output);
@@ -759,6 +879,8 @@ impl NexusHypervisor {
                 required,
                 granted,
                 mismatch,
+                #[cfg(feature = "aeon-memory")]
+                negotiation_rounds: receipt.negotiation_rounds,
             },
             snapshot: receipt.snapshot.clone(),
             failure: receipt.failure.as_ref().map(|failure| FailureEvidence {
@@ -1767,6 +1889,27 @@ mod tests {
     }
 
     #[cfg(feature = "aeon-memory")]
+    fn aeon_search_client(
+        content: &'static str,
+    ) -> (crate::aeon::AeonMemoryClient, CapturedAeonRequests) {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let client = crate::aeon::AeonMemoryClient::with_test_responder(
+            &aeon_test_config(Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                crate::aeon::TestHttpResponse {
+                    status: 200,
+                    body: format!(
+                        r#"{{"results":[{{"id":"mem-1","content":{content:?},"score":0.9}}]}}"#
+                    ),
+                }
+            }),
+        );
+        (client, captured)
+    }
+
+    #[cfg(feature = "aeon-memory")]
     async fn wait_for_aeon_requests(captured: &CapturedAeonRequests, expected: usize) {
         for _ in 0..50 {
             if captured.lock().unwrap().len() >= expected {
@@ -1803,6 +1946,38 @@ mod tests {
             .iter()
             .find(|(header, _)| header.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[tokio::test]
+    async fn execute_tool_proof_with_tokens_records_negotiation_rounds() {
+        let allowed = Capability::ReadFile(std::path::PathBuf::from("/allowed"));
+        let blocked = Capability::WriteFile(std::path::PathBuf::from("/blocked"));
+        let (client, captured) = aeon_search_client("use read:/allowed only");
+        let hv = NexusHypervisor::new(HypervisorConfig::default())
+            .unwrap()
+            .with_aeon_memory_client_for_test(client);
+        let token = hv
+            .issue_token(allowed.clone(), "test", Duration::from_secs(60))
+            .unwrap();
+        let wasm =
+            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+                .unwrap();
+        let tool = ToolDefinition::new("aeon_negotiated_proof".to_string(), wasm)
+            .with_capabilities(vec![allowed.clone(), blocked])
+            .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string()));
+
+        let (_output, capsule) = hv
+            .execute_tool_proof_with_tokens(tool, serde_json::json!({}), &[token])
+            .await
+            .unwrap();
+
+        assert_eq!(capsule.capabilities.required, vec![allowed.description()]);
+        assert_eq!(capsule.capabilities.granted, vec![allowed.description()]);
+        assert_eq!(capsule.capabilities.negotiation_rounds, Some(1));
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/api/v1/memories/search");
     }
 
     #[cfg(feature = "aeon-memory")]

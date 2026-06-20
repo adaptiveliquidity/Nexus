@@ -56,6 +56,8 @@ fn sample_capsule() -> ProofCapsule {
             required: vec!["fs:read:/input/orders.csv".to_owned()],
             granted: vec!["fs:read:/input/orders.csv".to_owned()],
             mismatch: None,
+            #[cfg(feature = "aeon-memory")]
+            negotiation_rounds: None,
         },
         snapshot: None,
         failure: None,
