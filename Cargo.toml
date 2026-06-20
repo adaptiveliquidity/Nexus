@@ -85,6 +85,9 @@ bench-density = []
 # `cargo build` does not pull in HTTP / TLS / token-secret handling for
 # users who only want the static + instinct policies.
 ai-recovery = ["dep:reqwest", "dep:tokio-util"]
+# Route ai-recovery OpenAI-compatible requests through the AEON-IQ memory proxy.
+# Off by default; enabling it also enables the ai-recovery HTTP lane.
+aeon-memory = ["ai-recovery"]
 
 [dev-dependencies]
 criterion = "0.5"
