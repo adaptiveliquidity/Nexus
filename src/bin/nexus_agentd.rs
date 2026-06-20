@@ -444,6 +444,8 @@ async fn serve(
                         message:
                             "wasm_bytes submission requires daemon authentication to be configured"
                                 .into(),
+                        #[cfg(feature = "aeon-memory")]
+                        events: vec![],
                     };
                 }
                 (Some(b), _) => b,
@@ -452,12 +454,16 @@ async fn serve(
                     Err(e) => {
                         return DaemonResponse::Error {
                             message: e.to_string(),
+                            #[cfg(feature = "aeon-memory")]
+                            events: vec![],
                         }
                     }
                 },
                 (None, None) => {
                     return DaemonResponse::Error {
                         message: "request missing wasm_bytes and wasm_path".into(),
+                        #[cfg(feature = "aeon-memory")]
+                        events: vec![],
                     }
                 }
             };
@@ -466,6 +472,8 @@ async fn serve(
                 Err(e) => {
                     return DaemonResponse::Error {
                         message: format!("pool acquire failed: {e}"),
+                        #[cfg(feature = "aeon-memory")]
+                        events: vec![],
                     }
                 }
             };
@@ -475,6 +483,8 @@ async fn serve(
                 Err(e) => {
                     return DaemonResponse::Error {
                         message: format!("module compile failed: {e}"),
+                        #[cfg(feature = "aeon-memory")]
+                        events: vec![],
                     }
                 }
             };
@@ -486,12 +496,42 @@ async fn serve(
                 .execute_tool_precompiled(tool, input, module)
                 .await
             {
-                Ok(output) => DaemonResponse::Executed {
-                    output: Box::new(output),
-                },
-                Err(e) => DaemonResponse::Error {
-                    message: e.to_string(),
-                },
+                Ok(output) => {
+                    #[cfg(feature = "aeon-memory")]
+                    let events = {
+                        let mut evts = Vec::new();
+                        if let Some(id) = output.snapshot_id {
+                            evts.push(nexus::daemon::NexusExecutionEvent::SnapshotCreated {
+                                snapshot_id: id,
+                            });
+                        }
+                        evts
+                    };
+                    DaemonResponse::Executed {
+                        output: Box::new(output),
+                        #[cfg(feature = "aeon-memory")]
+                        events,
+                    }
+                }
+                Err(ref e) => {
+                    #[cfg(feature = "aeon-memory")]
+                    let events = {
+                        use nexus::error::NexusError;
+                        match e {
+                            NexusError::CapabilityDenied(msg) => {
+                                vec![nexus::daemon::NexusExecutionEvent::CapabilityDenied {
+                                    denied_category: msg.clone(),
+                                }]
+                            }
+                            _ => vec![],
+                        }
+                    };
+                    DaemonResponse::Error {
+                        message: e.to_string(),
+                        #[cfg(feature = "aeon-memory")]
+                        events,
+                    }
+                }
             }
         }
     }
@@ -514,6 +554,8 @@ fn unauthorized_response(req: &DaemonRequest, auth_token: Option<&str>) -> Optio
     } else {
         Some(DaemonResponse::Error {
             message: UNAUTHORIZED_MESSAGE.into(),
+            #[cfg(feature = "aeon-memory")]
+            events: vec![],
         })
     }
 }
@@ -645,7 +687,7 @@ mod auth_tests {
 
         assert!(matches!(
             resp,
-            Some(DaemonResponse::Error { message }) if message == UNAUTHORIZED_MESSAGE
+            Some(DaemonResponse::Error { message, .. }) if message == UNAUTHORIZED_MESSAGE
         ));
     }
 
@@ -655,7 +697,7 @@ mod auth_tests {
 
         assert!(matches!(
             resp,
-            Some(DaemonResponse::Error { message }) if message == UNAUTHORIZED_MESSAGE
+            Some(DaemonResponse::Error { message, .. }) if message == UNAUTHORIZED_MESSAGE
         ));
     }
 

@@ -298,7 +298,7 @@ fn run_via_daemon(
         write_frame(&mut wr, &req).await?;
         let resp: DaemonResponse = read_frame(&mut rd).await?;
         match resp {
-            DaemonResponse::Executed { output } => {
+            DaemonResponse::Executed { output, .. } => {
                 if output.success {
                     println!(
                         "[nexus run] OK ({}ms, fuel={})",
@@ -316,7 +316,9 @@ fn run_via_daemon(
                 }
                 Ok(())
             }
-            DaemonResponse::Error { message } => Err(anyhow::anyhow!("daemon error: {message}")),
+            DaemonResponse::Error { message, .. } => {
+                Err(anyhow::anyhow!("daemon error: {message}"))
+            }
             DaemonResponse::Pong { .. } => Err(anyhow::anyhow!("unexpected Pong reply to Execute")),
         }
     })
