@@ -3,6 +3,8 @@
 //! Next-generation sandboxing infrastructure for AI agents with
 //! microsecond snapshots, instant rollback, and opt-in self-correction.
 
+#[cfg(feature = "aeon-memory")]
+pub mod aeon;
 pub mod daemon;
 pub mod error;
 pub mod hypervisor;
