@@ -69,6 +69,21 @@ pub enum DaemonRequest {
         /// request value only; replay protection remains future work.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_token: Option<String>,
+        /// AEON-IQ tenant agent-id. Used to correlate this execution with an
+        /// AEON-IQ memory session. The raw id is never logged above `debug!`.
+        #[cfg(feature = "aeon-memory")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aeon_agent_id: Option<String>,
+        /// AEON-IQ session-id. Paired with `aeon_agent_id` to form the
+        /// `AgentSessionMapping` that anchors the proof-capsule namespace.
+        #[cfg(feature = "aeon-memory")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aeon_session_id: Option<String>,
+        /// Pre-computed HMAC digest of the memory-evidence bundle, produced by
+        /// the AEON-IQ recall path before dispatch. Reserved for Phase 6+.
+        #[cfg(feature = "aeon-memory")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aeon_memory_evidence_digest: Option<String>,
     },
     /// Graceful shutdown. Server replies `Pong` then exits.
     Shutdown {
@@ -140,6 +155,69 @@ mod serde_bytes_opt {
                 Ok(Some(bytes))
             }
             None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_client_execute_missing_correlation_is_backward_compat() {
+        let json = r#"{"type":"Execute","name":"tool","wasm_bytes":"","input":{}}"#;
+        let req: DaemonRequest = serde_json::from_str(json).unwrap();
+        match req {
+            DaemonRequest::Execute {
+                name,
+                #[cfg(feature = "aeon-memory")]
+                aeon_agent_id,
+                #[cfg(feature = "aeon-memory")]
+                aeon_session_id,
+                #[cfg(feature = "aeon-memory")]
+                aeon_memory_evidence_digest,
+                ..
+            } => {
+                assert_eq!(name, "tool");
+                #[cfg(feature = "aeon-memory")]
+                {
+                    assert!(aeon_agent_id.is_none());
+                    assert!(aeon_session_id.is_none());
+                    assert!(aeon_memory_evidence_digest.is_none());
+                }
+            }
+            _ => panic!("expected Execute variant"),
+        }
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[test]
+    fn daemon_request_execute_round_trips_correlation_fields() {
+        let req = DaemonRequest::Execute {
+            name: "test_tool".to_string(),
+            wasm_bytes: None,
+            wasm_path: None,
+            entry: "_start".to_string(),
+            input: serde_json::json!({}),
+            auth_token: None,
+            aeon_agent_id: Some("agent-42".to_string()),
+            aeon_session_id: Some("session-99".to_string()),
+            aeon_memory_evidence_digest: Some("abc123digest".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let req2: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match req2 {
+            DaemonRequest::Execute {
+                aeon_agent_id,
+                aeon_session_id,
+                aeon_memory_evidence_digest,
+                ..
+            } => {
+                assert_eq!(aeon_agent_id.as_deref(), Some("agent-42"));
+                assert_eq!(aeon_session_id.as_deref(), Some("session-99"));
+                assert_eq!(aeon_memory_evidence_digest.as_deref(), Some("abc123digest"));
+            }
+            _ => panic!("expected Execute variant"),
         }
     }
 }

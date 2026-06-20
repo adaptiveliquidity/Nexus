@@ -57,6 +57,15 @@ pub struct ToolDefinition {
     pub entry_point: String,
     pub input_schema: serde_json::Value,
     pub required_capabilities: Vec<Capability>,
+    /// AEON-IQ tenant agent-id. Propagated into `ExecutionReceipt` so
+    /// `capsule_from_receipt` can record the session namespace mapping (G2).
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_agent_id: Option<String>,
+    /// AEON-IQ session-id. See `aeon_agent_id`.
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_session_id: Option<String>,
 }
 
 impl ToolDefinition {
@@ -67,6 +76,10 @@ impl ToolDefinition {
             entry_point: "_start".to_string(),
             input_schema: serde_json::json!({}),
             required_capabilities: Vec::new(),
+            #[cfg(feature = "aeon-memory")]
+            aeon_agent_id: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_session_id: None,
         }
     }
 
@@ -77,6 +90,20 @@ impl ToolDefinition {
 
     pub fn with_capabilities(mut self, caps: Vec<Capability>) -> Self {
         self.required_capabilities = caps;
+        self
+    }
+
+    /// Attach AEON-IQ session correlation. Both ids are optional; passing
+    /// `None` for either leaves the field unset. The raw ids are never
+    /// logged above `debug!` level.
+    #[cfg(feature = "aeon-memory")]
+    pub fn with_aeon_context(
+        mut self,
+        agent_id: Option<String>,
+        session_id: Option<String>,
+    ) -> Self {
+        self.aeon_agent_id = agent_id;
+        self.aeon_session_id = session_id;
         self
     }
 }
@@ -627,6 +654,10 @@ impl NexusHypervisor {
             failure,
             rollback,
             branches: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_agent_id: tool.aeon_agent_id.clone(),
+            #[cfg(feature = "aeon-memory")]
+            aeon_session_id: tool.aeon_session_id.clone(),
         };
 
         let capsule = Self::capsule_from_receipt(&receipt, &output);
@@ -758,7 +789,10 @@ impl NexusHypervisor {
             #[cfg(feature = "aeon-memory")]
             memory_evidence: None,
             #[cfg(feature = "aeon-memory")]
-            memory_mode: None,
+            memory_mode: match (&receipt.aeon_agent_id, &receipt.aeon_session_id) {
+                (Some(_), Some(_)) => Some(crate::proof::schema::MemoryAttestationMode::Advisory),
+                _ => None,
+            },
             signature: None,
         }
     }

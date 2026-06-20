@@ -430,6 +430,10 @@ async fn serve(
             wasm_path,
             entry,
             input,
+            #[cfg(feature = "aeon-memory")]
+            aeon_agent_id,
+            #[cfg(feature = "aeon-memory")]
+            aeon_session_id,
             ..
         } => {
             let bytes = match (wasm_bytes, wasm_path) {
@@ -475,6 +479,8 @@ async fn serve(
                 }
             };
             let tool = ToolDefinition::new(name, bytes).with_entry(&entry);
+            #[cfg(feature = "aeon-memory")]
+            let tool = tool.with_aeon_context(aeon_agent_id, aeon_session_id);
             match guard
                 .hv()
                 .execute_tool_precompiled(tool, input, module)
