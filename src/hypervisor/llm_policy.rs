@@ -25,6 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+#[cfg(feature = "aeon-memory")]
+use crate::aeon::AeonConfig;
+
 use super::failure_mode::FailureMode;
 #[cfg(feature = "ai-recovery")]
 use super::recovery::RecoverySource;
@@ -81,6 +84,8 @@ pub struct LLMPolicy {
     rl_count: AtomicU64,
     #[cfg(feature = "ai-recovery")]
     http: reqwest::Client,
+    #[cfg(feature = "aeon-memory")]
+    aeon: Option<AeonConfig>,
 }
 
 impl LLMPolicy {
@@ -101,7 +106,16 @@ impl LLMPolicy {
             rl_count: AtomicU64::new(0),
             #[cfg(feature = "ai-recovery")]
             http,
+            #[cfg(feature = "aeon-memory")]
+            aeon: None,
         }
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    pub fn new_with_aeon(provider: LlmProvider, budget: LlmBudget, aeon: AeonConfig) -> Self {
+        let mut policy = Self::new(provider, budget);
+        policy.aeon = Some(aeon);
+        policy
     }
 
     /// Sanitize `error_log.description` for inclusion in an LLM prompt.
@@ -159,6 +173,35 @@ impl LLMPolicy {
             return false;
         }
         true
+    }
+
+    #[cfg(feature = "ai-recovery")]
+    fn build_openai_recovery_request(
+        &self,
+        api_key: &str,
+        endpoint: &str,
+        body: &serde_json::Value,
+    ) -> reqwest::RequestBuilder {
+        #[cfg(feature = "aeon-memory")]
+        {
+            let aeon = self.aeon.as_ref().filter(|config| config.enabled);
+            let target = aeon
+                .map(AeonConfig::chat_completions_url)
+                .unwrap_or_else(|| endpoint.to_string());
+            let mut request = self.http.post(target).bearer_auth(api_key);
+            if let Some(config) = aeon {
+                request = request.header("x-agent-id", &config.agent_id);
+                if let Some(session_id) = &config.session_id {
+                    request = request.header("x-session-id", session_id);
+                }
+            }
+            request.json(body)
+        }
+
+        #[cfg(not(feature = "aeon-memory"))]
+        {
+            self.http.post(endpoint).bearer_auth(api_key).json(body)
+        }
     }
 }
 
@@ -225,10 +268,7 @@ fn futures_lite_blocking_call(
                     ]
                 });
                 policy
-                    .http
-                    .post(endpoint)
-                    .bearer_auth(api_key)
-                    .json(&req)
+                    .build_openai_recovery_request(api_key, endpoint, &req)
                     .send()
                     .await
                     .map_err(|_| ())?
@@ -383,5 +423,121 @@ mod tests {
         let p = policy();
         let out = p.recover(&FailureMode::TrapDivByZero, "op");
         assert!(out.is_empty());
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[test]
+    fn aeon_enabled_openai_request_targets_proxy_with_memory_headers() {
+        let p = LLMPolicy::new_with_aeon(
+            LlmProvider::Openai {
+                api_key: "test-key".into(),
+                model: "gpt-test".into(),
+                endpoint: "https://provider.example/v1/chat/completions".into(),
+            },
+            LlmBudget::default(),
+            crate::aeon::AeonConfig {
+                enabled: true,
+                base_url: "http://localhost:8080/".into(),
+                agent_id: "nexus-agent".into(),
+                session_id: Some("session-7".into()),
+                timeout_ms: 30_000,
+            },
+        );
+        let payload = serde_json::json!({"model": "gpt-test"});
+
+        let request = p
+            .build_openai_recovery_request(
+                "test-key",
+                "https://provider.example/v1/chat/completions",
+                &payload,
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "http://localhost:8080/v1/chat/completions"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer test-key")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("x-agent-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("nexus-agent")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("x-session-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-7")
+        );
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[test]
+    fn aeon_disabled_openai_request_uses_provider_endpoint_without_memory_headers() {
+        let p = LLMPolicy::new_with_aeon(
+            LlmProvider::Openai {
+                api_key: "test-key".into(),
+                model: "gpt-test".into(),
+                endpoint: "https://provider.example/v1/chat/completions".into(),
+            },
+            LlmBudget::default(),
+            crate::aeon::AeonConfig {
+                enabled: false,
+                base_url: "http://localhost:8080".into(),
+                agent_id: "nexus-agent".into(),
+                session_id: Some("session-7".into()),
+                timeout_ms: 30_000,
+            },
+        );
+        let payload = serde_json::json!({"model": "gpt-test"});
+
+        let request = p
+            .build_openai_recovery_request(
+                "test-key",
+                "https://provider.example/v1/chat/completions",
+                &payload,
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "https://provider.example/v1/chat/completions"
+        );
+        assert!(!request.headers().contains_key("x-agent-id"));
+        assert!(!request.headers().contains_key("x-session-id"));
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[test]
+    fn no_aeon_config_openai_request_uses_provider_endpoint_without_memory_headers() {
+        let p = policy();
+        let payload = serde_json::json!({"model": "gpt-test"});
+
+        let request = p
+            .build_openai_recovery_request(
+                "test-key",
+                "https://provider.example/v1/chat/completions",
+                &payload,
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "https://provider.example/v1/chat/completions"
+        );
+        assert!(!request.headers().contains_key("x-agent-id"));
+        assert!(!request.headers().contains_key("x-session-id"));
     }
 }
