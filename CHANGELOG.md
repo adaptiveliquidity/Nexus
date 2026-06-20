@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-20
+
+### Added
+
+- **AEON-IQ memory integration (`aeon-memory` feature)**: opt-in service-boundary integration from Phases 4-10.
+  - Adds HMAC-bound memory evidence references, explicit `Advisory` / `Attested` / `Degraded` / `Absent` proof modes, and an env-only `NEXUS_AEON_HMAC_KEY` path.
+  - Threads AEON agent/session correlation through proof, daemon, and MCP surfaces without changing the default build shape.
+  - Surfaces Nexus execution events for AEON-IQ timeline persistence while keeping timeline outages fail-open.
+  - Adds bounded capability-denial negotiation with a hard two-round cap, strict-subset narrowing, and no escalation beyond caller-held tokens.
+  - Exposes the `nexus_aeon_execute_timeline` MCP tool, `examples/aeon_e2e_demo.rs`, and `tests/aeon_conformance.rs` for integration validation.
+  - Adds Phase 10 release hardening docs: threat model, runbook, key-provisioning guide, and closed merge audit annotations.
+
 ## [0.1.0] - 2026-06-10
 
 ### Added

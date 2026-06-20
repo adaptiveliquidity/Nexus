@@ -1,5 +1,6 @@
 # AEON-IQ ↔ Nexus Integration Audit
 
+**Status:** CLOSED — Phase 10 release hardening and final gate.
 **Date:** 2026-06-19
 **Scope:** Review of the *"Cognitive Hypervisor: AEON-IQ & Nexus Integration Specification"* against the
 ground truth of both repositories.
@@ -105,6 +106,8 @@ These are the substantive findings. None are blockers to the *direction*; all ar
 written*.
 
 ### G1 — The PR plan has **zero Nexus-side work**, but the integration requires it.
+**Closure:** Closed across Phases 4-6. G1.1 proof-capsule memory evidence landed in Phase 4; G1.2 daemon/request correlation landed in Phase 5; G1.3 execution-event surfacing landed in Phase 6.
+
 Spec §10 lists five PRs, all on `AEON-IQ` branches. Yet the handshake cannot exist without Nexus changes:
 
 1. **`ProofCapsule` has no slot for external memory evidence.** Grepping Nexus finds no
@@ -124,12 +127,16 @@ Spec §10 lists five PRs, all on `AEON-IQ` branches. Yet the handshake cannot ex
 > both repos depend on one definition.
 
 ### G2 — Two different `agent_id` namespaces.
+**Closure:** Closed in Phase 5 through explicit `AgentSessionMapping`/correlation fields, with the denial-negotiation hook completed in Phase 8.
+
 AEON-IQ `agent_id` is `TEXT` (memory owner / tenant). Nexus's only `AgentId` lives in
 `src/snapshot/sync/lineage.rs` and identifies a **snapshot lineage node**, not a memory tenant. These are
 unrelated today. The bridge must define an explicit mapping (and the evidence contract should digest the
 AEON-IQ agent id, not assume Nexus knows it).
 
 ### G3 — "Maximum isolation" claim vs. real coupling.
+**Closure:** Closed in Phase 6 by surfacing Nexus execution events for AEON-IQ to persist while keeping ledger persistence fail-open.
+
 The strategy table rates the service boundary "Maximum" isolation, but §6/§8 make Nexus depend on AEON-IQ
 being up to record every execution event (timeline ledger lives in AEON-IQ's Postgres). That is a real
 runtime coupling. Mitigation: Nexus should **return** events in the signed response and treat ledger
@@ -143,13 +150,19 @@ append-only by design (that's what makes `list_latest_versions_as_of` and the di
 branch-don't-prune:** create a new timeline branch pointer; never hard-delete history, or the audit trail the
 whole project exists to provide is destroyed. Mark this MUST before any time-travel endpoint ships.
 
+**Closure:** Closed in Phase 7 by keeping the integration model branch-oriented and preserving append-only timeline semantics.
+
 ### G5 — Snapshot addressing by timestamp.
+**Closure:** Closed in Phase 7 by assigning timestamp-to-snapshot resolution to the AEON-IQ timeline table instead of changing Nexus snapshot addressing.
+
 §6 path D calls `/memories/at?timestamp=…` (AEON-IQ has this) and asks Nexus to "load the WASM state snapshot
 matching the target snapshot ID." Nexus snapshots are keyed by `snapshot_id`/lineage, **not wall-clock**. The
 timestamp→snapshot resolution must live in the `cognitive_hypervisor_timeline` table (it already has
 `nexus_snapshot_id` + `timestamp`, so this is workable — but the bridge must do the lookup; Nexus can't).
 
 ### G6 — Key management is split.
+**Closure:** Closed in Phase 4 by adding a dedicated AEON/Nexus HMAC key path for memory evidence; Phase 10 documents provisioning and rotation.
+
 The contract assumes one rotating "operator key" for HMAC digests. Nexus actually has **two** independent key
 sources: an ed25519 **signing seed** (capsule signatures) and an HMAC **redaction key**. AEON-IQ currently
 hashes queries with plain SHA-256 (no HMAC, no `hmac` crate in its deps). For an auditor to cross-verify
@@ -197,3 +210,27 @@ The spec's wave ordering is sound for AEON-IQ hardening. The amendment is to **i
 - **Pleasant surprise:** Nexus already implements most of the spec's cryptographic/privacy contract
   (`TypedDigest`, `DigestMode::HmacSha256Private`, `RedactionPolicy`, ed25519 signing, `fork_and_race`),
   so the bridge is mostly *wiring and identity mapping*, not net-new crypto.
+
+---
+
+## 8. Closure Status
+
+This audit is closed by the AEON-IQ x Nexus integration through Phase 10:
+
+Closure here means the Nexus-side integration seams, documentation, and validation gates are present in this repository. Live deployment claims still require a real AEON-IQ plus Nexus transcript or CI artifact for the target environment.
+
+| Gap / surface | Resolution |
+| :--- | :--- |
+| G1.1 proof-capsule memory evidence | Phase 4 added HMAC-bound memory evidence and honest attestation modes. |
+| G6 shared HMAC key management | Phase 4 added the `NEXUS_AEON_HMAC_KEY` path; Phase 10 documents provisioning and rotation. |
+| G1.2 daemon/request correlation | Phase 5 added AEON agent/session/evidence correlation fields. |
+| G2 agent namespace mapping | Phase 5 introduced explicit mapping instead of reusing Nexus snapshot lineage identifiers. |
+| G1.3 timeline event surfacing | Phase 6 surfaced Nexus execution events for AEON-IQ timeline persistence. |
+| G3 fail-open ledger coupling | Phase 6 kept timeline persistence advisory so outages degrade auditability, not execution. |
+| G4 branch-don't-prune timeline semantics | Phase 7 closed the destructive pruning risk. |
+| G5 timestamp-to-snapshot addressing | Phase 7 made AEON-IQ timeline lookup responsible for resolving time to Nexus snapshot/proof identifiers. |
+| G2 hook / denial negotiation | Phase 8 hooked bounded denial negotiation into the Nexus execution path with no escalation. |
+| MCP surfacing and conformance gates | Phase 9 exposed `nexus_aeon_execute_timeline`, the E2E demo, and the conformance suite. |
+| Release hardening | Phase 10 adds the threat model, runbook, key-provisioning guide, changelog entry, version bump, and final verification gate. |
+
+Do not reopen the original G1-G6 findings unless new evidence shows a regression in the default-off build, fail-open behavior, or proof-honesty modes.
