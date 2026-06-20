@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rmcp::{
-    handler::server::wrapper::Parameters, schemars, tool, tool_router, transport::stdio, ServiceExt,
+    handler::server::wrapper::Parameters, schemars, tool, tool_handler, tool_router,
+    transport::stdio, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -56,6 +57,14 @@ pub struct ExecuteProofParams {
     pub wasm_path: String,
     #[schemars(description = "JSON input to pass to the WASM module")]
     pub input: Option<serde_json::Value>,
+    #[cfg(feature = "aeon-memory")]
+    #[schemars(description = "AEON-IQ agent id used to correlate the proof with a memory session")]
+    pub aeon_agent_id: Option<String>,
+    #[cfg(feature = "aeon-memory")]
+    #[schemars(
+        description = "AEON-IQ session id used to correlate the proof with a memory session"
+    )]
+    pub aeon_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -274,6 +283,31 @@ pub struct ExecutionRecordSummary {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetStatsParams {}
 
+#[cfg(feature = "aeon-memory")]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AeonTimelineExecuteParams {
+    #[schemars(description = "Path to the WASM module file to execute")]
+    pub wasm_path: String,
+    #[schemars(description = "Entry point function name (default: _start)")]
+    pub entry: Option<String>,
+    #[schemars(description = "JSON input to pass to the WASM module")]
+    pub input: Option<serde_json::Value>,
+    #[schemars(description = "Capabilities required by the tool: array of {type, path?} objects")]
+    pub capabilities: Option<Vec<CapabilitySpec>>,
+    #[schemars(
+        description = "Capabilities held by the caller. Omit to request the same set as capabilities."
+    )]
+    pub caller_capabilities: Option<Vec<CapabilitySpec>>,
+    #[schemars(
+        description = "Optional parent capability token UUID used to attenuate caller_capabilities"
+    )]
+    pub parent_token_id: Option<String>,
+    #[schemars(description = "AEON-IQ agent id used to correlate timeline events")]
+    pub aeon_agent_id: Option<String>,
+    #[schemars(description = "AEON-IQ session id used to correlate timeline events")]
+    pub aeon_session_id: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 struct GetStatsResponse {
     pub telemetry: TelemetryStatsDto,
@@ -310,7 +344,7 @@ pub struct NexusMcpServer {
     capability_profile: Option<Arc<CapabilityProfileManifest>>,
 }
 
-#[tool_router(server_handler)]
+#[tool_router(router = base_tool_router, vis = "pub")]
 impl NexusMcpServer {
     #[tool(
         description = "Execute a WASM tool in the Nexus sandbox. Loads the .wasm file, runs it with optional JSON input, and returns structured output including success/failure, result bytes, execution time, fuel consumed, and the runtime snapshot id when WASM memory was captured."
@@ -514,6 +548,38 @@ impl NexusMcpServer {
     }
 }
 
+#[cfg(feature = "aeon-memory")]
+#[tool_router(router = aeon_tool_router, vis = "pub")]
+impl NexusMcpServer {
+    #[tool(
+        description = "Execute a WASM module with AEON-IQ correlation, return the proof capsule, and surface Nexus execution events for forwarding to POST /agents/:id/timeline."
+    )]
+    async fn nexus_aeon_execute_timeline(
+        &self,
+        Parameters(params): Parameters<AeonTimelineExecuteParams>,
+    ) -> String {
+        match self.do_aeon_execute_timeline(params).await {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+}
+
+impl NexusMcpServer {
+    #[cfg(feature = "aeon-memory")]
+    fn combined_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        Self::base_tool_router() + Self::aeon_tool_router()
+    }
+
+    #[cfg(not(feature = "aeon-memory"))]
+    fn combined_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        Self::base_tool_router()
+    }
+}
+
+#[tool_handler(router = Self::combined_tool_router())]
+impl rmcp::handler::server::ServerHandler for NexusMcpServer {}
+
 // ─── Implementation ──────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -532,6 +598,23 @@ struct ToolOutputResponse {
 struct ExecuteProofResponse {
     output: ToolOutputResponse,
     proof_capsule: nexus::proof::ProofCapsule,
+    #[cfg(feature = "aeon-memory")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events: Vec<nexus::daemon::NexusExecutionEvent>,
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Serialize)]
+struct AeonTimelineExecuteResponse {
+    output: ToolOutputResponse,
+    proof_capsule: nexus::proof::ProofCapsule,
+    events: Vec<nexus::daemon::NexusExecutionEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aeon_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aeon_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aeon_timeline_path: Option<String>,
 }
 
 impl From<ToolOutput> for ToolOutputResponse {
@@ -702,12 +785,76 @@ impl NexusMcpServer {
         })?;
 
         let tool = ToolDefinition::new("mcp_tool_proof".to_string(), wasm_bytes);
+        #[cfg(feature = "aeon-memory")]
+        let tool = tool.with_aeon_context(params.aeon_agent_id, params.aeon_session_id);
         let input = params.input.unwrap_or(serde_json::json!({}));
         let (output, proof_capsule) = self.hypervisor.execute_tool_proof(tool, input).await?;
+        #[cfg(feature = "aeon-memory")]
+        let events = proof_events(&output, proof_capsule.capsule_id, None);
 
         Ok(ExecuteProofResponse {
             output: ToolOutputResponse::from(output),
             proof_capsule,
+            #[cfg(feature = "aeon-memory")]
+            events,
+        })
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    async fn do_aeon_execute_timeline(
+        &self,
+        params: AeonTimelineExecuteParams,
+    ) -> Result<AeonTimelineExecuteResponse> {
+        self.ensure_tool_allowed("nexus_aeon_execute_timeline")?;
+        self.ensure_proof_enabled()?;
+        let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+        })?;
+
+        let required_capabilities = params
+            .capabilities
+            .unwrap_or_default()
+            .into_iter()
+            .map(|spec| parse_capability(&spec))
+            .collect::<Result<Vec<_>>>()?;
+        let caller_capabilities = match params.caller_capabilities {
+            Some(specs) => specs
+                .into_iter()
+                .map(|spec| parse_capability(&spec))
+                .collect::<Result<Vec<_>>>()?,
+            None => required_capabilities.clone(),
+        };
+        let caller_tokens =
+            self.execute_wasi_tokens(&caller_capabilities, params.parent_token_id.as_deref())?;
+        self.check_tokens_against_active_profile(&caller_tokens)?;
+
+        let mut tool = ToolDefinition::new("mcp_aeon_timeline".to_string(), wasm_bytes)
+            .with_capabilities(required_capabilities)
+            .with_aeon_context(params.aeon_agent_id.clone(), params.aeon_session_id.clone());
+        if let Some(entry) = params.entry {
+            tool = tool.with_entry(&entry);
+        }
+
+        let input = params.input.unwrap_or(serde_json::json!({}));
+        let (output, proof_capsule) = self
+            .hypervisor
+            .execute_tool_proof_with_tokens(tool, input, &caller_tokens)
+            .await?;
+        let negotiation_rounds = proof_capsule.capabilities.negotiation_rounds;
+        let events = proof_events(&output, proof_capsule.capsule_id, negotiation_rounds);
+        let aeon_timeline_path = params
+            .aeon_agent_id
+            .as_ref()
+            .map(|agent_id| format!("/agents/{agent_id}/timeline"));
+
+        Ok(AeonTimelineExecuteResponse {
+            output: ToolOutputResponse::from(output),
+            proof_capsule,
+            events,
+            aeon_agent_id: params.aeon_agent_id,
+            aeon_session_id: params.aeon_session_id,
+            aeon_timeline_path,
         })
     }
 
@@ -1384,6 +1531,27 @@ fn restored_state_summary(result: &nexus::snapshot::RollbackResult) -> RestoredS
             captured_tables: result.execution_state.captured_tables.len(),
         },
     }
+}
+
+#[cfg(feature = "aeon-memory")]
+fn proof_events(
+    output: &ToolOutput,
+    capsule_id: Uuid,
+    negotiation_rounds: Option<u32>,
+) -> Vec<nexus::daemon::NexusExecutionEvent> {
+    let mut events = Vec::new();
+
+    if negotiation_rounds.is_some() {
+        events.push(nexus::daemon::NexusExecutionEvent::CapabilityDenied {
+            denied_category: "capability_denial_negotiated".to_string(),
+        });
+    }
+    if let Some(snapshot_id) = output.snapshot_id {
+        events.push(nexus::daemon::NexusExecutionEvent::SnapshotCreated { snapshot_id });
+    }
+    events.push(nexus::daemon::NexusExecutionEvent::ProofCapsuleEmitted { capsule_id });
+
+    events
 }
 
 fn failure_mode_from_category(category: &str) -> anyhow::Result<FailureMode> {

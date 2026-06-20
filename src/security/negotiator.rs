@@ -7,10 +7,11 @@ use crate::security::{Capability, CapabilityManager, CapabilityToken};
 pub const MAX_NEGOTIATION_ROUNDS: usize = 2;
 
 /// Successful capability-denial negotiation result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NegotiationOutcome {
     pub narrowed_capabilities: Vec<Capability>,
     pub rounds: u32,
+    pub evidence_hits: Vec<crate::aeon::MemoryHit>,
 }
 
 /// Attempt to replace a denied request with an authorized strict subset.
@@ -66,6 +67,7 @@ pub(crate) async fn negotiate_capability_denial_with_authorizer(
             return Some(NegotiationOutcome {
                 narrowed_capabilities: narrowed,
                 rounds: round as u32,
+                evidence_hits: hits,
             });
         }
     }
@@ -285,6 +287,11 @@ mod tests {
             Some(NegotiationOutcome {
                 narrowed_capabilities: vec![allowed],
                 rounds: 1,
+                evidence_hits: vec![crate::aeon::MemoryHit {
+                    id: "mem-1".to_string(),
+                    content: "use read:/allowed only".to_string(),
+                    score: Some(0.9),
+                }],
             })
         );
     }
