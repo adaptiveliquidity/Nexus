@@ -73,6 +73,10 @@ fn sample_capsule(signature: Option<SignatureEnvelope>) -> ProofCapsule {
             hmac_fields: vec!["input.digest".to_owned()],
         },
         limitations: vec!["runtime attestation only".to_owned()],
+        #[cfg(feature = "aeon-memory")]
+        memory_evidence: None,
+        #[cfg(feature = "aeon-memory")]
+        memory_mode: None,
         signature,
     }
 }

@@ -22,6 +22,7 @@ const AGENT_ID_ENV: &str = "NEXUS_AEON_AGENT_ID";
 const SESSION_ID_ENV: &str = "NEXUS_AEON_SESSION_ID";
 const TIMEOUT_MS_ENV: &str = "NEXUS_AEON_TIMEOUT_MS";
 const MANAGEMENT_KEY_ENV: &str = "NEXUS_AEON_MANAGEMENT_KEY";
+const HMAC_KEY_ENV: &str = "NEXUS_AEON_HMAC_KEY";
 static MISSING_MANAGEMENT_KEY_WARN: Once = Once::new();
 
 /// Configuration for routing ai-recovery LLM calls through AEON-IQ.
@@ -33,6 +34,9 @@ pub struct AeonConfig {
     pub session_id: Option<String>,
     pub timeout_ms: u64,
     pub management_key: Option<String>,
+    /// Hex-encoded HMAC-SHA256 key shared with AEON-IQ for memory evidence binding.
+    /// When absent, `build_memory_evidence_ref` returns `Absent` mode with no evidence.
+    pub hmac_key: Option<Vec<u8>>,
 }
 
 impl Default for AeonConfig {
@@ -44,6 +48,7 @@ impl Default for AeonConfig {
             session_id: None,
             timeout_ms: 30_000,
             management_key: None,
+            hmac_key: None,
         }
     }
 }
@@ -59,6 +64,7 @@ impl AeonConfig {
             session_id: env_optional_string(SESSION_ID_ENV)?,
             timeout_ms: env_u64(TIMEOUT_MS_ENV, defaults.timeout_ms)?,
             management_key: env_optional_string(MANAGEMENT_KEY_ENV)?,
+            hmac_key: env_optional_hex(HMAC_KEY_ENV)?,
         })
     }
 
@@ -393,6 +399,58 @@ impl AeonMemoryClient {
     }
 }
 
+/// Builds a `MemoryEvidenceRef` from the resolved memory hits for inclusion in
+/// a `ProofCapsule`. Requires the `aeon-memory` feature.
+///
+/// Returns `Absent` when `config.hmac_key` is `None` — no fallback key is
+/// ever used. Returns `Degraded` when evidence construction fails.
+pub fn build_memory_evidence_ref(
+    config: &AeonConfig,
+    hits: &[MemoryHit],
+    session_id: Option<String>,
+) -> (
+    Option<aeon_nexus_bridge::MemoryEvidenceRef>,
+    crate::proof::schema::MemoryAttestationMode,
+) {
+    use crate::proof::schema::MemoryAttestationMode;
+
+    let Some(key) = config.hmac_key.as_deref() else {
+        return (None, MemoryAttestationMode::Absent);
+    };
+
+    let mapping =
+        aeon_nexus_bridge::AgentSessionMapping::new(&config.agent_id, session_id, &config.agent_id);
+
+    let mut bridge_hits = Vec::with_capacity(hits.len());
+    for hit in hits {
+        match aeon_nexus_bridge::MemoryEvidenceHit::new(&hit.id, hit.content.as_bytes(), hit.score)
+        {
+            Ok(h) => bridge_hits.push(h),
+            Err(e) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %e,
+                    "memory hit has invalid score; returning degraded evidence"
+                );
+                return (None, MemoryAttestationMode::Degraded);
+            }
+        }
+    }
+
+    let evidence = mapping.memory_evidence(key, bridge_hits);
+    match evidence.to_ref() {
+        Ok(evidence_ref) => (Some(evidence_ref), MemoryAttestationMode::Attested),
+        Err(e) => {
+            debug!(
+                target: "nexus.aeon",
+                error = %e,
+                "failed to build memory evidence ref; returning degraded evidence"
+            );
+            (None, MemoryAttestationMode::Degraded)
+        }
+    }
+}
+
 struct HttpResponse {
     status: u16,
     body: String,
@@ -518,6 +576,56 @@ fn env_u64(name: &str, default: u64) -> Result<u64> {
         Err(std::env::VarError::NotUnicode(_)) => Err(NexusError::ConfigError(format!(
             "{name} must be valid Unicode"
         ))),
+    }
+}
+
+/// Parse an optional hex-encoded byte sequence from an environment variable.
+/// Returns `None` when the variable is absent or empty; errors on invalid hex
+/// or values that decode to more than 512 bytes.
+fn env_optional_hex(name: &str) -> Result<Option<Vec<u8>>> {
+    match std::env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => {
+            let trimmed = value.trim();
+            let bytes: Result<Vec<u8>> = trimmed
+                .as_bytes()
+                .chunks(2)
+                .map(|pair| {
+                    if pair.len() != 2 {
+                        return Err(NexusError::ConfigError(format!(
+                            "{name} must be an even-length hex string"
+                        )));
+                    }
+                    let hi = hex_nibble(pair[0]).ok_or_else(|| {
+                        NexusError::ConfigError(format!("{name} contains invalid hex character"))
+                    })?;
+                    let lo = hex_nibble(pair[1]).ok_or_else(|| {
+                        NexusError::ConfigError(format!("{name} contains invalid hex character"))
+                    })?;
+                    Ok((hi << 4) | lo)
+                })
+                .collect();
+            let bytes = bytes?;
+            if bytes.len() > 512 {
+                return Err(NexusError::ConfigError(format!(
+                    "{name} must be at most 512 bytes (1024 hex chars)"
+                )));
+            }
+            Ok(Some(bytes))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(NexusError::ConfigError(format!(
+            "{name} must be valid Unicode"
+        ))),
+    }
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -723,6 +831,7 @@ mod tests {
             session_id: None,
             timeout_ms: 100,
             management_key: management_key.map(str::to_string),
+            hmac_key: None,
         }
     }
 
@@ -762,5 +871,48 @@ mod tests {
         let mut requests = captured.lock().unwrap();
         assert_eq!(requests.len(), 1);
         requests.remove(0)
+    }
+
+    #[test]
+    fn build_memory_evidence_ref_absent_when_no_hmac_key() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let config = AeonConfig {
+            hmac_key: None,
+            ..test_config("http://aeon.test", None)
+        };
+        let (evidence, mode) = super::build_memory_evidence_ref(&config, &[], None);
+        assert!(evidence.is_none());
+        assert_eq!(mode, MemoryAttestationMode::Absent);
+    }
+
+    #[test]
+    fn build_memory_evidence_ref_attested_with_valid_key_and_hits() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let config = AeonConfig {
+            hmac_key: Some(vec![0x01, 0x02, 0x03, 0x04]),
+            ..test_config("http://aeon.test", None)
+        };
+        let hits = vec![MemoryHit {
+            id: "mem-1".to_string(),
+            content: "some context".to_string(),
+            score: Some(0.9),
+        }];
+        let (evidence, mode) = super::build_memory_evidence_ref(&config, &hits, None);
+        assert!(evidence.is_some());
+        assert_eq!(mode, MemoryAttestationMode::Attested);
+        assert_eq!(evidence.unwrap().injected_count, 1);
+    }
+
+    #[test]
+    fn build_memory_evidence_ref_attested_with_no_hits() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let config = AeonConfig {
+            hmac_key: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+            ..test_config("http://aeon.test", None)
+        };
+        let (evidence, mode) = super::build_memory_evidence_ref(&config, &[], None);
+        assert!(evidence.is_some());
+        assert_eq!(mode, MemoryAttestationMode::Attested);
+        assert_eq!(evidence.unwrap().injected_count, 0);
     }
 }

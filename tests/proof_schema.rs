@@ -59,6 +59,10 @@ fn sample_capsule() -> ProofCapsule {
             hmac_fields: vec![],
         },
         limitations: vec!["does_not_prove_external_side_effects_absent".into()],
+        #[cfg(feature = "aeon-memory")]
+        memory_evidence: None,
+        #[cfg(feature = "aeon-memory")]
+        memory_mode: None,
         signature: None,
     }
 }

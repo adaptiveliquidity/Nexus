@@ -112,6 +112,24 @@ pub struct RedactionReport {
     pub hmac_fields: Vec<String>,
 }
 
+/// Records whether AEON-IQ memory was consulted and what the result was.
+///
+/// Not feature-gated so non-aeon-memory builds can still reference the type
+/// (e.g. for display or configuration). Fields that carry actual evidence are
+/// gated individually on the `aeon-memory` feature in `ProofCapsule`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MemoryAttestationMode {
+    /// Memory was not configured or not consulted (default).
+    #[default]
+    Advisory,
+    /// Memory was consulted and evidence is cryptographically attested.
+    Attested,
+    /// Memory was consulted but the evidence could not be fully attested.
+    Degraded,
+    /// Memory sidecar is not configured; no HMAC key present.
+    Absent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureEnvelope {
     pub signer: String,
@@ -135,6 +153,12 @@ pub struct ProofCapsule {
     pub branches: Option<BranchRaceEvidence>,
     pub redaction: RedactionReport,
     pub limitations: Vec<String>,
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_evidence: Option<aeon_nexus_bridge::MemoryEvidenceRef>,
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mode: Option<MemoryAttestationMode>,
     pub signature: Option<SignatureEnvelope>,
 }
 
