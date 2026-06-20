@@ -83,6 +83,7 @@ pub struct MemoryHit {
 ///
 /// Memory is advisory in Nexus. Every method absorbs transport, timeout,
 /// status, and response-shape failures and returns the no-op value.
+#[derive(Clone)]
 pub struct AeonMemoryClient {
     http: reqwest::Client,
     base_url: String,
@@ -114,6 +115,25 @@ impl AeonMemoryClient {
             #[cfg(test)]
             test_responder: None,
         }
+    }
+
+    pub fn from_enabled_config(config: &AeonConfig) -> Option<Self> {
+        let has_required_config = config.enabled
+            && !config.base_url.trim().is_empty()
+            && !config.agent_id.trim().is_empty()
+            && config
+                .management_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty());
+
+        has_required_config.then(|| Self::from_config(config))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_responder(config: &AeonConfig, responder: TestResponder) -> Self {
+        let mut client = Self::from_config(config);
+        client.test_responder = Some(responder);
+        client
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryHit> {
@@ -151,7 +171,7 @@ impl AeonMemoryClient {
                 .map(|hit| MemoryHit {
                     id: hit.id.unwrap_or_default(),
                     content: hit.content.unwrap_or_default(),
-                    score: hit.score.or(hit.distance),
+                    score: hit.score.or(hit.distance).or(hit.similarity),
                 })
                 .collect(),
             Err(e) => {
@@ -380,21 +400,21 @@ struct HttpResponse {
 
 #[cfg(test)]
 #[derive(Debug)]
-struct TestHttpRequest {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: String,
+pub(crate) struct TestHttpRequest {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: String,
 }
 
 #[cfg(test)]
-struct TestHttpResponse {
-    status: u16,
-    body: String,
+pub(crate) struct TestHttpResponse {
+    pub(crate) status: u16,
+    pub(crate) body: String,
 }
 
 #[cfg(test)]
-type TestResponder = Arc<dyn Fn(TestHttpRequest) -> TestHttpResponse + Send + Sync>;
+pub(crate) type TestResponder = Arc<dyn Fn(TestHttpRequest) -> TestHttpResponse + Send + Sync>;
 
 #[derive(Serialize)]
 struct SearchRequest<'a> {
@@ -415,6 +435,7 @@ struct SearchHit {
     content: Option<String>,
     score: Option<f64>,
     distance: Option<f64>,
+    similarity: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -566,6 +587,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aeon_memory_search_parses_similarity_as_score() {
+        let (client, captured) = mock_client(
+            200,
+            r#"{"results":[{"id":"m1","content":"c","similarity":0.91,"memory_type":"semantic"}]}"#,
+            Some("mgmt-key"),
+        );
+
+        let hits = client.search("trap recovery", 1).await;
+        let _ = take_request(&captured);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "m1");
+        assert_eq!(hits[0].content, "c");
+        assert_eq!(hits[0].score, Some(0.91));
+    }
+
+    #[tokio::test]
     async fn aeon_memory_search_returns_empty_on_http_500() {
         let (client, captured) = mock_client(500, r#"{"error":"boom"}"#, Some("mgmt-key"));
 
@@ -659,6 +697,24 @@ mod tests {
         assert!(captured.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn aeon_memory_client_requires_enabled_config() {
+        let disabled = AeonConfig {
+            enabled: false,
+            management_key: Some("mgmt-key".to_string()),
+            ..test_config("http://aeon.test", Some("mgmt-key"))
+        };
+        let missing_key = AeonConfig {
+            management_key: None,
+            ..test_config("http://aeon.test", None)
+        };
+        let configured = test_config("http://aeon.test", Some("mgmt-key"));
+
+        assert!(AeonMemoryClient::from_enabled_config(&disabled).is_none());
+        assert!(AeonMemoryClient::from_enabled_config(&missing_key).is_none());
+        assert!(AeonMemoryClient::from_enabled_config(&configured).is_some());
+    }
+
     fn test_config(base_url: &str, management_key: Option<&str>) -> AeonConfig {
         AeonConfig {
             enabled: true,
@@ -689,15 +745,16 @@ mod tests {
         let response_body = response_body.to_string();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_for_responder = Arc::clone(&captured);
-        let mut client =
-            AeonMemoryClient::from_config(&test_config("http://aeon.test", management_key));
-        client.test_responder = Some(Arc::new(move |request| {
-            captured_for_responder.lock().unwrap().push(request);
-            TestHttpResponse {
-                status,
-                body: response_body.clone(),
-            }
-        }));
+        let client = AeonMemoryClient::with_test_responder(
+            &test_config("http://aeon.test", management_key),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status,
+                    body: response_body.clone(),
+                }
+            }),
+        );
         (client, captured)
     }
 

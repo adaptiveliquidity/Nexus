@@ -146,6 +146,10 @@ pub struct HypervisorConfig {
     /// Dedicated proof-capsule signing key source. Defaults to a fresh
     /// ephemeral key that is independent of the capability-token authority.
     pub proof_signing: ProofSigningConfig,
+    /// Optional AEON-IQ memory configuration. Compiled only when
+    /// `aeon-memory` is enabled; default builds do not carry this field.
+    #[cfg(feature = "aeon-memory")]
+    pub aeon_config: Option<crate::aeon::AeonConfig>,
 }
 
 impl Default for HypervisorConfig {
@@ -162,6 +166,8 @@ impl Default for HypervisorConfig {
             snapshot_strategy: SnapshotStrategy::Full,
             recovery_config: RecoveryConfig::Static,
             proof_signing: ProofSigningConfig::default(),
+            #[cfg(feature = "aeon-memory")]
+            aeon_config: None,
         }
     }
 }
@@ -225,6 +231,10 @@ pub struct NexusHypervisor {
     /// Dedicated key for proof-capsule attestation, separate from capability
     /// token authorization.
     proof_signing_key: SigningKey,
+    /// Fail-open AEON-IQ memory client for advisory capture. `None` means
+    /// disabled or unconfigured, and all capture hooks no-op.
+    #[cfg(feature = "aeon-memory")]
+    aeon_memory: Option<crate::aeon::AeonMemoryClient>,
 }
 
 impl NexusHypervisor {
@@ -267,6 +277,11 @@ impl NexusHypervisor {
 
         let capability_manager = CapabilityManager::new();
         let proof_signing_key = config.proof_signing.signing_key()?;
+        #[cfg(feature = "aeon-memory")]
+        let aeon_memory = config
+            .aeon_config
+            .as_ref()
+            .and_then(crate::aeon::AeonMemoryClient::from_enabled_config);
 
         let fuel_policy = FuelBudgetPolicy::new(sandbox_config.max_fuel);
 
@@ -293,6 +308,8 @@ impl NexusHypervisor {
             pool,
             latest_runtime_snapshot: RwLock::new(None),
             proof_signing_key,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory,
         })
     }
 
@@ -339,6 +356,12 @@ impl NexusHypervisor {
     /// adjust instinct confidence — outcome feedback is a no-op.
     pub fn with_self_correction(self, store: Arc<crate::instinct::InstinctStore>) -> Self {
         self.with_instinct_store(store)
+    }
+
+    #[cfg(all(test, feature = "aeon-memory"))]
+    fn with_aeon_memory_client_for_test(mut self, client: crate::aeon::AeonMemoryClient) -> Self {
+        self.aeon_memory = Some(client);
+        self
     }
 
     /// Returns true when self-correction is active (instinct store attached).
@@ -1177,6 +1200,19 @@ impl NexusHypervisor {
                 }
             }
 
+            #[cfg(feature = "aeon-memory")]
+            self.capture_aeon_memory(
+                Self::aeon_failure_memory_content(
+                    &error_log,
+                    rollback_performed,
+                    duration_ms,
+                    fuel_consumed,
+                    snapshot_id,
+                ),
+                Some(0.75),
+                "failure",
+            );
+
             let record = ExecutionRecord::failure(
                 tool.name.clone(),
                 error_log.clone(),
@@ -1230,6 +1266,9 @@ impl NexusHypervisor {
         tool: ToolDefinition,
         input: serde_json::Value,
     ) -> Result<ToolOutput> {
+        #[cfg(feature = "aeon-memory")]
+        let mut pending_instincts: Vec<(uuid::Uuid, String)> = Vec::new();
+        #[cfg(not(feature = "aeon-memory"))]
         let mut pending_instincts: Vec<uuid::Uuid> = Vec::new();
 
         for attempt in 0..=self.config.max_retries {
@@ -1245,12 +1284,37 @@ impl NexusHypervisor {
                     // the PREVIOUS attempt.
                     if attempt > 0 && !pending_instincts.is_empty() {
                         if let Some(store) = &self.instinct_store {
-                            for id in &pending_instincts {
-                                let _ = if output.success {
-                                    store.record_success(id)
-                                } else {
-                                    store.record_failure(id)
-                                };
+                            #[cfg(not(feature = "aeon-memory"))]
+                            {
+                                for id in &pending_instincts {
+                                    let _ = if output.success {
+                                        store.record_success(id)
+                                    } else {
+                                        store.record_failure(id)
+                                    };
+                                }
+                            }
+
+                            #[cfg(feature = "aeon-memory")]
+                            {
+                                for (id, description) in &pending_instincts {
+                                    let _ = if output.success {
+                                        store.record_success(id)
+                                    } else {
+                                        store.record_failure(id)
+                                    };
+                                    self.capture_aeon_memory(
+                                        Self::aeon_recovery_outcome_memory_content(
+                                            &tool.name,
+                                            attempt,
+                                            id,
+                                            description,
+                                            output.success,
+                                        ),
+                                        Some(if output.success { 0.7 } else { 0.55 }),
+                                        "recovery",
+                                    );
+                                }
                             }
                         }
                         pending_instincts.clear();
@@ -1263,11 +1327,22 @@ impl NexusHypervisor {
                     // Collect instinct ids proposed on this failed attempt
                     // so the next attempt's outcome can be credited back.
                     if let Some(log) = &output.error_log {
-                        pending_instincts = log
-                            .recovery_actions
-                            .iter()
-                            .filter_map(|a| a.instinct_id)
-                            .collect();
+                        #[cfg(feature = "aeon-memory")]
+                        {
+                            pending_instincts = log
+                                .recovery_actions
+                                .iter()
+                                .filter_map(|a| a.instinct_id.map(|id| (id, a.description.clone())))
+                                .collect();
+                        }
+                        #[cfg(not(feature = "aeon-memory"))]
+                        {
+                            pending_instincts = log
+                                .recovery_actions
+                                .iter()
+                                .filter_map(|a| a.instinct_id)
+                                .collect();
+                        }
                     }
 
                     if attempt == self.config.max_retries {
@@ -1474,6 +1549,110 @@ impl NexusHypervisor {
             .profile_for(tool_name)
             .cloned()
     }
+
+    #[cfg(feature = "aeon-memory")]
+    fn capture_aeon_memory(
+        &self,
+        content: String,
+        importance: Option<f32>,
+        memory_type: &'static str,
+    ) {
+        let Some(client) = self.aeon_memory.clone() else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            let _ = client.store(&content, importance, Some(memory_type)).await;
+        });
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn aeon_failure_memory_content(
+        error_log: &ErrorLog,
+        rollback_performed: bool,
+        duration_ms: u64,
+        fuel_consumed: u64,
+        snapshot_id: Option<uuid::Uuid>,
+    ) -> String {
+        let mut content = format!(
+            "execution failure: operation={} category={} description={} rollback_performed={} duration_ms={} fuel_consumed={} snapshot_id={}",
+            Self::aeon_safe_fragment(&error_log.operation, 128),
+            error_log.failure_mode.category(),
+            Self::aeon_safe_fragment(&error_log.description, 512),
+            rollback_performed,
+            duration_ms,
+            fuel_consumed,
+            snapshot_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        );
+
+        let actions: Vec<String> = error_log
+            .recovery_actions
+            .iter()
+            .take(3)
+            .map(|action| Self::aeon_safe_fragment(&action.description, 256))
+            .filter(|action| !action.is_empty())
+            .collect();
+        if !actions.is_empty() {
+            content.push_str(" recovery_actions=");
+            content.push_str(&actions.join(" | "));
+        }
+
+        content.chars().take(2_048).collect()
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn aeon_recovery_outcome_memory_content(
+        operation: &str,
+        attempt: u32,
+        instinct_id: &uuid::Uuid,
+        description: &str,
+        success: bool,
+    ) -> String {
+        format!(
+            "recovery outcome: operation={} attempt={} instinct_id={} outcome={} action={}",
+            Self::aeon_safe_fragment(operation, 128),
+            attempt,
+            instinct_id,
+            if success { "success" } else { "failure" },
+            Self::aeon_safe_fragment(description, 512)
+        )
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn aeon_safe_fragment(raw: &str, max_chars: usize) -> String {
+        let cleaned: String = raw
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+            .take(max_chars)
+            .collect();
+
+        cleaned
+            .split_whitespace()
+            .map(Self::aeon_redact_token)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn aeon_redact_token(token: &str) -> String {
+        let lower = token.to_ascii_lowercase();
+        let sensitive = lower.starts_with("sk-")
+            || lower.contains("api_key")
+            || lower.contains("apikey")
+            || lower.contains("token=")
+            || lower.contains("password")
+            || lower.contains("secret")
+            || lower.contains("authorization")
+            || lower == "bearer";
+
+        if sensitive {
+            "[redacted]".to_string()
+        } else {
+            token.to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1511,5 +1690,190 @@ mod tests {
         ];
 
         assert!(!suggestions.is_empty());
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    type CapturedAeonRequests = Arc<std::sync::Mutex<Vec<crate::aeon::TestHttpRequest>>>;
+
+    #[cfg(feature = "aeon-memory")]
+    fn aeon_test_config(management_key: Option<&str>) -> crate::aeon::AeonConfig {
+        crate::aeon::AeonConfig {
+            enabled: true,
+            base_url: "http://aeon.test".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: None,
+            timeout_ms: 30_000,
+            management_key: management_key.map(str::to_string),
+        }
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn aeon_capture_client(
+        status: u16,
+        management_key: Option<&str>,
+    ) -> (crate::aeon::AeonMemoryClient, CapturedAeonRequests) {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let client = crate::aeon::AeonMemoryClient::with_test_responder(
+            &aeon_test_config(management_key),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                crate::aeon::TestHttpResponse {
+                    status,
+                    body: r#"{"id":"550e8400-e29b-41d4-a716-446655440000"}"#.to_string(),
+                }
+            }),
+        );
+        (client, captured)
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    async fn wait_for_aeon_requests(captured: &CapturedAeonRequests, expected: usize) {
+        for _ in 0..50 {
+            if captured.lock().unwrap().len() >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!(
+            "timed out waiting for {expected} AEON request(s); saw {}",
+            captured.lock().unwrap().len()
+        );
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn divzero_tool(name: &str) -> ToolDefinition {
+        let wasm = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "_start")
+                    i32.const 1 i32.const 0 i32.div_s drop))"#,
+        )
+        .unwrap();
+        ToolDefinition::new(name.to_string(), wasm)
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn request_header<'a>(
+        request: &'a crate::aeon::TestHttpRequest,
+        name: &str,
+    ) -> Option<&'a str> {
+        request
+            .headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[tokio::test]
+    async fn aeon_capture_posts_execution_failure_and_store_failure_is_fail_open() {
+        let (client, captured) = aeon_capture_client(500, Some("mgmt-key"));
+        let hv = NexusHypervisor::new(HypervisorConfig::default())
+            .unwrap()
+            .with_aeon_memory_client_for_test(client);
+
+        let output = hv
+            .execute_tool(divzero_tool("aeon_capture_failure"), serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(!output.success);
+        assert!(output.error_log.is_some());
+
+        wait_for_aeon_requests(&captured, 1).await;
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/api/v1/agents/agent-1/memories");
+        assert_eq!(
+            request_header(&requests[0], "x-management-key"),
+            Some("mgmt-key")
+        );
+
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["memory_type"], "failure");
+        assert!(body["content"]
+            .as_str()
+            .unwrap()
+            .contains("operation=aeon_capture_failure"));
+        assert!(body["content"]
+            .as_str()
+            .unwrap()
+            .contains("category=TRAP_DIV_BY_ZERO"));
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[tokio::test]
+    async fn aeon_capture_posts_recovery_outcome_after_retry_feedback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(crate::instinct::InstinctStore::open(tmp.path().to_path_buf()).unwrap());
+        store
+            .register(
+                &FailureMode::TrapDivByZero,
+                "*",
+                "instinct: validate divisor before division",
+            )
+            .unwrap();
+        let policy: Arc<dyn RecoveryPolicy> = Arc::new(LayeredPolicy::new(vec![
+            Box::new(StaticPolicy::new()),
+            Box::new(crate::instinct::InstinctPolicy::new(store.clone())),
+        ]));
+        let (client, captured) = aeon_capture_client(200, Some("mgmt-key"));
+        let cfg = HypervisorConfig {
+            max_retries: 1,
+            ..HypervisorConfig::default()
+        };
+        let hv = NexusHypervisor::new_with_policy(cfg, policy)
+            .unwrap()
+            .with_instinct_store(store)
+            .with_aeon_memory_client_for_test(client);
+
+        let output = hv
+            .execute_with_retry(divzero_tool("aeon_retry_outcome"), serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(!output.success);
+        wait_for_aeon_requests(&captured, 3).await;
+        let requests = captured.lock().unwrap();
+        let recovery = requests
+            .iter()
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .find(|body| body["memory_type"] == "recovery")
+            .expect("recovery outcome capture request");
+
+        assert!(recovery["content"]
+            .as_str()
+            .unwrap()
+            .contains("operation=aeon_retry_outcome"));
+        assert!(recovery["content"]
+            .as_str()
+            .unwrap()
+            .contains("outcome=failure"));
+        assert!(recovery["content"]
+            .as_str()
+            .unwrap()
+            .contains("validate divisor"));
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[tokio::test]
+    async fn aeon_capture_missing_management_key_issues_no_request() {
+        let (client, captured) = aeon_capture_client(200, None);
+        let hv = NexusHypervisor::new(HypervisorConfig::default())
+            .unwrap()
+            .with_aeon_memory_client_for_test(client);
+
+        let output = hv
+            .execute_tool(divzero_tool("aeon_disabled_capture"), serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(!output.success);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(captured.lock().unwrap().is_empty());
     }
 }
