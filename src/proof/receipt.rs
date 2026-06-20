@@ -61,4 +61,15 @@ pub struct ExecutionReceipt {
     /// (occurred, from_snapshot_id, reason)
     pub rollback: Option<(bool, Uuid, String)>,
     pub branches: Option<BranchRaceEvidence>,
+    /// AEON-IQ tenant agent-id that initiated this execution. Propagated from
+    /// `DaemonRequest::Execute` and used by `capsule_from_receipt` to set
+    /// `memory_mode` on the resulting proof capsule.
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_agent_id: Option<String>,
+    /// AEON-IQ session-id paired with `aeon_agent_id`. Together they form the
+    /// `AgentSessionMapping` namespace bridge (G2 resolution).
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_session_id: Option<String>,
 }

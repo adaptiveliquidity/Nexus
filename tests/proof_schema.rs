@@ -86,6 +86,10 @@ fn sample_receipt() -> ExecutionReceipt {
         failure: None,
         rollback: None,
         branches: None,
+        #[cfg(feature = "aeon-memory")]
+        aeon_agent_id: None,
+        #[cfg(feature = "aeon-memory")]
+        aeon_session_id: None,
     }
 }
 
