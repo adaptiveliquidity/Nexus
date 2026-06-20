@@ -99,13 +99,45 @@ fn default_entry() -> String {
     "_start".into()
 }
 
+/// An execution event returned inside `DaemonResponse`.
+/// AEON-IQ consumes these to update its audit ledger; the ledger is
+/// best-effort on the AEON-IQ side — a ledger outage degrades
+/// auditability but never blocks execution (G3 fail-open invariant).
+#[cfg(feature = "aeon-memory")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NexusExecutionEvent {
+    /// A required capability was denied during execution.
+    CapabilityDenied { denied_category: String },
+    /// A runtime snapshot was captured during this execution.
+    SnapshotCreated { snapshot_id: uuid::Uuid },
+    /// A proof capsule was emitted for this execution (wired in Phase 9).
+    ProofCapsuleEmitted { capsule_id: uuid::Uuid },
+}
+
 /// Single response frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DaemonResponse {
-    Pong { version: String },
-    Executed { output: Box<ToolOutput> },
-    Error { message: String },
+    Pong {
+        version: String,
+    },
+    Executed {
+        output: Box<ToolOutput>,
+        /// AEON-IQ audit events produced by this execution. Empty on
+        /// non-feature builds and when no notable events occurred.
+        #[cfg(feature = "aeon-memory")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<NexusExecutionEvent>,
+    },
+    Error {
+        message: String,
+        /// AEON-IQ audit events associated with this error (e.g. the
+        /// capability category that was denied).
+        #[cfg(feature = "aeon-memory")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<NexusExecutionEvent>,
+    },
 }
 
 /// Compute the default socket path for this platform, honoring
