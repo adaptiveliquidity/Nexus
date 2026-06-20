@@ -441,6 +441,7 @@ mod tests {
                 agent_id: "nexus-agent".into(),
                 session_id: Some("session-7".into()),
                 timeout_ms: 30_000,
+                management_key: None,
             },
         );
         let payload = serde_json::json!({"model": "gpt-test"});
@@ -497,6 +498,7 @@ mod tests {
                 agent_id: "nexus-agent".into(),
                 session_id: Some("session-7".into()),
                 timeout_ms: 30_000,
+                management_key: None,
             },
         );
         let payload = serde_json::json!({"model": "gpt-test"});
