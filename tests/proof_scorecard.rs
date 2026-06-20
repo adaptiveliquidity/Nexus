@@ -63,6 +63,10 @@ fn sample_capsule() -> ProofCapsule {
             hmac_fields: Vec::new(),
         },
         limitations: Vec::new(),
+        #[cfg(feature = "aeon-memory")]
+        memory_evidence: None,
+        #[cfg(feature = "aeon-memory")]
+        memory_mode: None,
         signature: None,
     }
 }

@@ -755,6 +755,10 @@ impl NexusHypervisor {
                 hmac_fields: Vec::new(),
             },
             limitations: Vec::new(),
+            #[cfg(feature = "aeon-memory")]
+            memory_evidence: None,
+            #[cfg(feature = "aeon-memory")]
+            memory_mode: None,
             signature: None,
         }
     }
@@ -1704,6 +1708,7 @@ mod tests {
             session_id: None,
             timeout_ms: 30_000,
             management_key: management_key.map(str::to_string),
+            hmac_key: None,
         }
     }
 

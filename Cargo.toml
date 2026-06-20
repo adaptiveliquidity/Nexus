@@ -67,6 +67,9 @@ rmcp = { version = "1.7", features = ["server", "transport-io"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tokio-util = { version = "0.7", optional = true }
 
+# Optional, only with `aeon-memory` feature.
+aeon_nexus_bridge = { path = "crates/aeon_nexus_bridge", optional = true }
+
 [features]
 default = []
 component-model = []
@@ -87,7 +90,7 @@ bench-density = []
 ai-recovery = ["dep:reqwest", "dep:tokio-util"]
 # Route ai-recovery OpenAI-compatible requests through the AEON-IQ memory proxy.
 # Off by default; enabling it also enables the ai-recovery HTTP lane.
-aeon-memory = ["ai-recovery"]
+aeon-memory = ["ai-recovery", "dep:aeon_nexus_bridge"]
 
 [dev-dependencies]
 criterion = "0.5"
