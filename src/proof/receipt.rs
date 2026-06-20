@@ -72,4 +72,7 @@ pub struct ExecutionReceipt {
     #[cfg(feature = "aeon-memory")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aeon_session_id: Option<String>,
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negotiation_rounds: Option<u32>,
 }

@@ -52,6 +52,8 @@ fn sample_capsule(redaction: RedactionReport) -> ProofCapsule {
             required: vec!["fs:read:sandbox-input".to_owned()],
             granted: vec!["fs:read:sandbox-input".to_owned()],
             mismatch: None,
+            #[cfg(feature = "aeon-memory")]
+            negotiation_rounds: None,
         },
         snapshot: None,
         failure: None,

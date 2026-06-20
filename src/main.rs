@@ -294,6 +294,12 @@ fn run_via_daemon(
             entry,
             input: serde_json::json!({}),
             auth_token: std::env::var("NEXUS_AGENTD_AUTH_TOKEN").ok(),
+            #[cfg(feature = "aeon-memory")]
+            aeon_agent_id: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_session_id: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: None,
         };
         write_frame(&mut wr, &req).await?;
         let resp: DaemonResponse = read_frame(&mut rd).await?;

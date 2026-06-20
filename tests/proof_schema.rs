@@ -47,6 +47,8 @@ fn sample_capsule() -> ProofCapsule {
             required: vec!["read".into()],
             granted: vec!["read".into()],
             mismatch: None,
+            #[cfg(feature = "aeon-memory")]
+            negotiation_rounds: None,
         },
         snapshot: None,
         failure: None,
@@ -90,6 +92,8 @@ fn sample_receipt() -> ExecutionReceipt {
         aeon_agent_id: None,
         #[cfg(feature = "aeon-memory")]
         aeon_session_id: None,
+        #[cfg(feature = "aeon-memory")]
+        negotiation_rounds: None,
     }
 }
 

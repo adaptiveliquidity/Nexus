@@ -70,6 +70,9 @@ pub struct CapabilityEvidence {
     pub required: Vec<String>,
     pub granted: Vec<String>,
     pub mismatch: Option<Vec<String>>,
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negotiation_rounds: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
