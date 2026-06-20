@@ -115,6 +115,11 @@ path = "src/bin/nexus_mcp.rs"
 name = "wasi_capability_demo"
 path = "examples/wasi_capability_demo/host.rs"
 
+[[example]]
+name = "aeon_e2e_demo"
+path = "examples/aeon_e2e_demo.rs"
+required-features = ["aeon-memory"]
+
 [[bench]]
 name = "nexus_validation"
 harness = false

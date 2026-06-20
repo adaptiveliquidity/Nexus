@@ -336,6 +336,12 @@ async fn initialize_and_list_tools() {
             tool_names
         );
     }
+    #[cfg(feature = "aeon-memory")]
+    assert!(
+        tool_names.contains(&"nexus_aeon_execute_timeline"),
+        "AEON timeline tool is missing from available tools: {:?}",
+        tool_names
+    );
 
     assert!(
         tools.len() >= required_tools.len(),
@@ -402,6 +408,15 @@ async fn execute_proof_returns_output_and_capsule() {
 
     let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
     initialize_client(&mut client).await;
+    let mut arguments = json!({
+        "wasm_path": wasm_path,
+        "input": { "message": "hello" }
+    });
+    #[cfg(feature = "aeon-memory")]
+    {
+        arguments["aeon_agent_id"] = json!("agent-1");
+        arguments["aeon_session_id"] = json!("session-1");
+    }
 
     let resp = client
         .request(
@@ -409,10 +424,7 @@ async fn execute_proof_returns_output_and_capsule() {
             "tools/call",
             json!({
                 "name": "nexus_execute_proof",
-                "arguments": {
-                    "wasm_path": wasm_path,
-                    "input": { "message": "hello" }
-                }
+                "arguments": arguments
             }),
         )
         .await;
@@ -428,6 +440,11 @@ async fn execute_proof_returns_output_and_capsule() {
         parsed.to_string().contains("success"),
         "proof response should include output success: {parsed}"
     );
+    #[cfg(feature = "aeon-memory")]
+    {
+        assert_eq!(parsed["proof_capsule"]["memory_mode"], "Advisory");
+        assert!(parsed["events"].is_array());
+    }
 }
 
 #[tokio::test]

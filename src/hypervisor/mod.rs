@@ -685,6 +685,7 @@ impl NexusHypervisor {
         let input_digest = TypedDigest::sha256_public(&input_bytes);
         let mut effective_capabilities = tool.required_capabilities.clone();
         let mut negotiation_rounds = None;
+        let mut negotiation_evidence_hits = Vec::new();
 
         if !tool.required_capabilities.is_empty() {
             let authorization = {
@@ -729,6 +730,7 @@ impl NexusHypervisor {
                         );
                         effective_capabilities = outcome.narrowed_capabilities;
                         negotiation_rounds = Some(outcome.rounds);
+                        negotiation_evidence_hits = outcome.evidence_hits;
                         tool.required_capabilities = effective_capabilities.clone();
                     }
                     None => return Err(original_denial),
@@ -780,9 +782,34 @@ impl NexusHypervisor {
             negotiation_rounds,
         };
 
-        let capsule = Self::capsule_from_receipt(&receipt, &output);
+        let mut capsule = Self::capsule_from_receipt(&receipt, &output);
+        if negotiation_rounds.is_some() {
+            let (memory_evidence, memory_mode) =
+                self.memory_evidence_from_hits(&tool, &negotiation_evidence_hits);
+            capsule.memory_evidence = memory_evidence;
+            capsule.memory_mode = Some(memory_mode);
+        }
         let capsule = sign_capsule(capsule, &self.proof_signing_key);
         Ok((output, capsule))
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn memory_evidence_from_hits(
+        &self,
+        tool: &ToolDefinition,
+        hits: &[crate::aeon::MemoryHit],
+    ) -> (
+        Option<aeon_nexus_bridge::MemoryEvidenceRef>,
+        crate::proof::schema::MemoryAttestationMode,
+    ) {
+        let Some(config) = self.config.aeon_config.as_ref() else {
+            return (None, crate::proof::schema::MemoryAttestationMode::Advisory);
+        };
+        let session_id = tool
+            .aeon_session_id
+            .clone()
+            .or_else(|| config.session_id.clone());
+        crate::aeon::build_memory_evidence_ref(config, hits, session_id)
     }
 
     fn snapshot_evidence(&self, snapshot_id: uuid::Uuid) -> SnapshotEvidence {
