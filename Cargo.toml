@@ -127,6 +127,11 @@ required-features = ["bench-density"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codspeed)'] }
 
+[workspace]
+members = [".", "crates/aeon_nexus_bridge"]
+exclude = ["fuzz"]
+resolver = "2"
+
 [profile.release]
 opt-level = "z"
 lto = true
