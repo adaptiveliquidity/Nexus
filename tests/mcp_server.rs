@@ -408,6 +408,7 @@ async fn execute_proof_returns_output_and_capsule() {
 
     let mut client = McpClient::spawn_with_module_dir(Some(tmp.path())).await;
     initialize_client(&mut client).await;
+    #[cfg_attr(not(feature = "aeon-memory"), allow(unused_mut))]
     let mut arguments = json!({
         "wasm_path": wasm_path,
         "input": { "message": "hello" }
