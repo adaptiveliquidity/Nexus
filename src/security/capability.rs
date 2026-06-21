@@ -29,6 +29,8 @@ pub enum Capability {
     ExecuteBinary(PathBuf),
     /// Mount tmpfs at a path
     MountTmpfs(PathBuf),
+    /// Read a raw restored WASM memory preview from MCP rollback responses
+    MemoryPreview,
     /// All capabilities (admin)
     All,
     /// No capability (deny all)
@@ -76,6 +78,7 @@ impl Capability {
             // Execute and MountTmpfs - exact match only
             (Capability::ExecuteBinary(p1), Capability::ExecuteBinary(p2)) => p1 == p2,
             (Capability::MountTmpfs(p1), Capability::MountTmpfs(p2)) => p1 == p2,
+            (Capability::MemoryPreview, Capability::MemoryPreview) => true,
 
             // Default deny
             _ => false,
@@ -105,6 +108,7 @@ impl Capability {
             Capability::HttpPost(pattern) => format!("http_post:{}", pattern),
             Capability::ExecuteBinary(p) => format!("exec:{}", p.display()),
             Capability::MountTmpfs(p) => format!("tmpfs:{}", p.display()),
+            Capability::MemoryPreview => "nexus:memory_preview".to_string(),
             Capability::All => "all".to_string(),
             Capability::None => "none".to_string(),
         }

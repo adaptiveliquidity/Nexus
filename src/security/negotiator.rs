@@ -158,6 +158,7 @@ fn capability_aliases(capability: &Capability) -> Vec<String> {
             "mounttmpfs".to_string(),
             format!("mount tmpfs {}", path.display()).to_ascii_lowercase(),
         ],
+        Capability::MemoryPreview => vec!["nexus:memory_preview".to_string()],
         Capability::All => vec!["all".to_string()],
         Capability::None => vec!["none".to_string()],
     }
