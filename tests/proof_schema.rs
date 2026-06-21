@@ -4,7 +4,8 @@ use nexus::proof::{
     receipt::ExecutionReceipt,
     schema::{
         CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
-        ProofScorecard, ProofSubject, RedactionReport, ToolIdentity, TypedDigest,
+        ProofCapsuleBuilder, ProofScorecard, ProofSubject, RedactionReport, ToolIdentity,
+        TypedDigest,
     },
 };
 use uuid::Uuid;
@@ -23,6 +24,27 @@ fn sample_private_digest() -> TypedDigest {
         value: "input-hmac".into(),
         public_recomputable: false,
     }
+}
+
+#[test]
+fn proof_capsule_builder_builds_minimal_capsule() {
+    let capsule =
+        ProofCapsuleBuilder::new("bench_tool", sample_typed_digest(), sample_private_digest())
+            .build();
+
+    assert_eq!(capsule.version, "1");
+    assert_eq!(capsule.subject.tool_name, "bench_tool");
+    assert_eq!(capsule.tool.module_name, "bench_tool");
+    assert_eq!(capsule.tool.entrypoint, "_start");
+    assert_eq!(capsule.input.media_type, "application/json");
+    assert!(!capsule.input.raw_included);
+    assert_eq!(capsule.policy.mode, PolicyEnforcementMode::UnprofiledDev);
+    assert!(capsule.capabilities.required.is_empty());
+    assert!(capsule.capabilities.granted.is_empty());
+    assert!(capsule
+        .limitations
+        .contains(&"runtime_attestation_only".to_owned()));
+    assert!(capsule.signature.is_none());
 }
 
 fn sample_capsule() -> ProofCapsule {

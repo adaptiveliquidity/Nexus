@@ -44,13 +44,13 @@ pub(crate) async fn negotiate_capability_denial_with_authorizer(
         let candidates = candidates_from_hits(original_required, &hits);
         let narrowed = strict_intersection(original_required, &candidates);
 
-        debug_assert!(
+        assert!(
             narrowed
                 .iter()
                 .all(|capability| original_required.contains(capability)),
             "negotiated capabilities must be drawn only from the original requirement set"
         );
-        debug_assert!(
+        assert!(
             narrowed.len() < original_required.len(),
             "negotiated capabilities must strictly narrow the original requirement set"
         );

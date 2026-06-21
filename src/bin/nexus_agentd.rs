@@ -699,7 +699,7 @@ fn queue_timeline_delivery(
             .await;
     });
 
-    Some(nexus::aeon::TimelineDeliveryStatus::Queued)
+    Some(nexus::aeon::TimelineDeliveryStatus::FireAndForget)
 }
 
 fn read_allowlisted_wasm_path(wasm_path: &Path) -> anyhow::Result<Vec<u8>> {

@@ -1,6 +1,6 @@
 [package]
 name = "nexus"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Nexus AI Infrastructure Team"]
 description = "AI-Native WASM Snap-Rollback Sandbox for Agent Execution"
@@ -93,7 +93,7 @@ ai-recovery = ["dep:reqwest", "dep:tokio-util"]
 aeon-memory = ["ai-recovery", "dep:aeon_nexus_bridge"]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", features = ["async_tokio"] }
 codspeed-criterion-compat = "4"
 tempfile = "3.14"
 proptest = "1.5"
@@ -122,6 +122,10 @@ required-features = ["aeon-memory"]
 
 [[bench]]
 name = "nexus_validation"
+harness = false
+
+[[bench]]
+name = "nexus_iq_bench"
 harness = false
 
 # Density benchmark: custom harness (own percentile + RSS measurement,
