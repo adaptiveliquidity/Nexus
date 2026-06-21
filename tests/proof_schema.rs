@@ -1,5 +1,6 @@
 use chrono::Utc;
 use nexus::proof::{
+    default_proof_capsule_limitations,
     receipt::ExecutionReceipt,
     schema::{
         CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
@@ -13,6 +14,14 @@ fn sample_typed_digest() -> TypedDigest {
         algorithm: "sha256".into(),
         value: "abc123".into(),
         public_recomputable: true,
+    }
+}
+
+fn sample_private_digest() -> TypedDigest {
+    TypedDigest {
+        algorithm: "hmac-sha256".into(),
+        value: "input-hmac".into(),
+        public_recomputable: false,
     }
 }
 
@@ -34,7 +43,7 @@ fn sample_capsule() -> ProofCapsule {
             entrypoint: "_start".into(),
         },
         input: InputIdentity {
-            digest: sample_typed_digest(),
+            digest: sample_private_digest(),
             media_type: "application/json".into(),
             raw_included: false,
         },
@@ -58,9 +67,9 @@ fn sample_capsule() -> ProofCapsule {
             hashed_fields: vec![],
             truncated_fields: vec![],
             removed_fields: vec![],
-            hmac_fields: vec![],
+            hmac_fields: vec!["input.digest".into()],
         },
-        limitations: vec!["does_not_prove_external_side_effects_absent".into()],
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]

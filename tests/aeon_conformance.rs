@@ -1,4 +1,5 @@
 use chrono::Utc;
+use nexus::proof::default_proof_capsule_limitations;
 #[cfg(feature = "aeon-memory")]
 use nexus::proof::schema::MemoryAttestationMode;
 use nexus::proof::schema::{
@@ -14,6 +15,14 @@ fn typed_digest() -> TypedDigest {
         algorithm: "sha256".to_string(),
         value: "abc123".to_string(),
         public_recomputable: true,
+    }
+}
+
+fn private_input_digest() -> TypedDigest {
+    TypedDigest {
+        algorithm: "hmac-sha256".to_string(),
+        value: "input-hmac".to_string(),
+        public_recomputable: false,
     }
 }
 
@@ -36,7 +45,7 @@ fn sample_capsule_without_memory() -> ProofCapsule {
             entrypoint: "_start".to_string(),
         },
         input: InputIdentity {
-            digest: typed_digest(),
+            digest: private_input_digest(),
             media_type: "application/json".to_string(),
             raw_included: false,
         },
@@ -60,9 +69,9 @@ fn sample_capsule_without_memory() -> ProofCapsule {
             hashed_fields: Vec::new(),
             truncated_fields: Vec::new(),
             removed_fields: Vec::new(),
-            hmac_fields: Vec::new(),
+            hmac_fields: vec!["input.digest".to_owned()],
         },
-        limitations: Vec::new(),
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]
