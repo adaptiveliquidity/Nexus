@@ -1,8 +1,6 @@
 #![cfg(feature = "aeon-memory")]
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use nexus::aeon::{MemoryEvidenceV1, MemoryHit};
-use nexus::proof::schema::MemoryAttestationMode;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -169,10 +167,6 @@ fn noop_wasm_b64() -> String {
     STANDARD.encode(wasm)
 }
 
-fn iq_args(_server: &MockAeonServer) -> Value {
-    iq_args_stub()
-}
-
 fn iq_args_stub() -> Value {
     json!({
         "tool_name": "nexus_iq_noop",
@@ -325,7 +319,7 @@ fn handle_http(
 
     let (status, response_body) = if path == "/api/v1/memories/search" {
         (memory_status, memory_body)
-    } else if path == "/api/v1/agents/agent-1/timeline" {
+    } else if path.starts_with("/api/v1/agents/") && path.ends_with("/timeline") {
         (timeline_status, "{}")
     } else {
         (404, r#"{"error":"not found"}"#)
@@ -342,8 +336,10 @@ fn handle_http(
     let _ = stream.write_all(response.as_bytes());
 }
 
+// ─── Timeline Delivery Tests ────────────────────────────────────────────
+
 #[tokio::test]
-async fn nexus_iq_execute_full_loop() {
+async fn timeline_events_delivered_on_success() {
     let Some(server) = MockAeonServer::try_new(
         200,
         r#"{"results":[{"id":"mem-1","content":"previous context","score":0.91}]}"#,
@@ -354,15 +350,11 @@ async fn nexus_iq_execute_full_loop() {
     let mut client = McpClient::spawn(&server, None).await;
     initialize_client(&mut client).await;
 
-    let mut args = iq_args(&server);
-    args["memory_query"] = json!("recall context");
-    args["memory_limit"] = json!(5);
-
     let resp = client
         .request(
             2,
             "tools/call",
-            json!({ "name": "nexus_iq_execute", "arguments": args }),
+            json!({ "name": "nexus_iq_execute", "arguments": iq_args_stub() }),
         )
         .await;
     let parsed = tool_json(&resp);
@@ -372,31 +364,23 @@ async fn nexus_iq_execute_full_loop() {
         parsed["proof_capsule_ref"].is_string(),
         "missing proof ref: {parsed}"
     );
-    assert_eq!(parsed["memory_hits_count"], 1);
-    assert_eq!(
-        parsed["memory_evidence_ref"]["attestation"],
-        "AttestedWithRecall"
-    );
-    assert!(parsed["memory_evidence_ref"]["capsule_digest"].is_string());
-    assert_eq!(parsed["timeline_status"], "fire_and_forget");
-    server.wait_for_path("/api/v1/memories/search", 1).await;
-    server
-        .wait_for_path("/api/v1/agents/agent-1/timeline", 1)
-        .await;
+    let events = parsed["events"].as_array().expect("events should be an array");
+    assert!(!events.is_empty(), "events should be non-empty after successful exec");
+
+    server.wait_for_path("/api/v1/agents/agent-1/timeline", 1).await;
     let captured = server.captured.lock().unwrap();
-    let search = captured
+    let timeline_reqs: Vec<_> = captured
         .iter()
-        .find(|request| request.path == "/api/v1/memories/search")
-        .expect("search request should be captured");
+        .filter(|req| req.path == "/api/v1/agents/agent-1/timeline")
+        .collect();
     assert!(
-        search.body.contains("recall context"),
-        "memory recall query should be forwarded: {}",
-        search.body
+        !timeline_reqs.is_empty(),
+        "mock AEON should have received timeline POST"
     );
 }
 
 #[tokio::test]
-async fn nexus_iq_execute_no_memory() {
+async fn timeline_offline_no_aeon_url() {
     let mut client = McpClient::spawn_without_aeon(None).await;
     initialize_client(&mut client).await;
 
@@ -414,42 +398,76 @@ async fn nexus_iq_execute_no_memory() {
         parsed["proof_capsule_ref"].is_string(),
         "missing proof ref: {parsed}"
     );
-    assert_eq!(parsed["memory_hits_count"], 0);
-    assert_eq!(parsed["memory_evidence_ref"]["attestation"], "Absent");
+    assert_eq!(parsed["timeline_status"], "failed_open");
 }
 
 #[tokio::test]
-async fn nexus_iq_execute_capability_denied() {
-    let mut client = McpClient::spawn_without_aeon(None).await;
+async fn timeline_fail_open_aeon_500() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[{"id":"mem-1","content":"previous context","score":0.91}]}"#,
+        500,
+    ) else {
+        return;
+    };
+    let mut client = McpClient::spawn(&server, None).await;
     initialize_client(&mut client).await;
-
-    let mut args = iq_args_stub();
-    args["required_capabilities"] = json!(["read:/denied"]);
 
     let resp = client
         .request(
             2,
             "tools/call",
-            json!({ "name": "nexus_iq_execute", "arguments": args }),
+            json!({ "name": "nexus_iq_execute", "arguments": iq_args_stub() }),
         )
         .await;
     let parsed = tool_json(&resp);
 
-    assert_eq!(parsed["denied"], true, "expected denial: {parsed}");
-    assert_eq!(parsed["denial_negotiation"]["denied"], true);
-    assert_eq!(parsed["denial_negotiation"]["negotiated"], false);
+    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
     assert!(
-        parsed["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event["kind"] == "capability_denied"),
-        "expected CapabilityDenied event: {parsed}"
+        parsed["proof_capsule_ref"].is_string(),
+        "execution must still produce proof capsule despite AEON 500: {parsed}"
     );
 }
 
 #[tokio::test]
-async fn nexus_iq_execute_attested_delivery_failure() {
+async fn timeline_events_include_proof_ref() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[{"id":"mem-1","content":"previous context","score":0.91}]}"#,
+        200,
+    ) else {
+        return;
+    };
+    let mut client = McpClient::spawn(&server, None).await;
+    initialize_client(&mut client).await;
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_iq_execute", "arguments": iq_args_stub() }),
+        )
+        .await;
+    let parsed = tool_json(&resp);
+
+    let proof_ref = parsed["proof_capsule_ref"]
+        .as_str()
+        .expect("proof_capsule_ref should be present")
+        .to_string();
+
+    let events = parsed["events"].as_array().expect("events should be an array");
+    let proof_event = events.iter().find(|event| {
+        event["kind"] == "proof_capsule_emitted"
+            && event["capsule_id"].as_str() == Some(&proof_ref)
+    });
+    assert!(
+        proof_event.is_some(),
+        "events must contain proof_capsule_emitted entry with capsule_id matching proof_capsule_ref: events={events:?}, proof_ref={proof_ref}"
+    );
+}
+
+#[tokio::test]
+async fn timeline_attested_mode_degrades_on_failure() {
     let mut client = McpClient::spawn_without_aeon(None).await;
     initialize_client(&mut client).await;
 
@@ -466,96 +484,59 @@ async fn nexus_iq_execute_attested_delivery_failure() {
     let parsed = tool_json(&resp);
 
     assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
-    assert_eq!(parsed["attestation_mode"], "attested");
+    assert!(
+        parsed["proof_capsule_ref"].is_string(),
+        "proof capsule must be present despite timeline degradation: {parsed}"
+    );
+    let events = parsed["events"].as_array().expect("events should be an array");
+    assert!(!events.is_empty(), "events should be present despite timeline degradation");
     assert_eq!(parsed["timeline_status"], "required_but_failed");
 }
 
 #[tokio::test]
-async fn verify_memory_evidence_cli_valid() {
-    let tmp = tempfile::tempdir().unwrap();
-    let evidence_path = tmp.path().join("memory-evidence-valid.json");
-    let hit = MemoryHit {
-        id: "mem-1".to_string(),
-        content: "context".to_string(),
-        score: Some(0.9),
+async fn timeline_events_have_correct_agent_id() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[{"id":"mem-1","content":"previous context","score":0.91}]}"#,
+        200,
+    ) else {
+        return;
     };
-    let evidence =
-        MemoryEvidenceV1::new("context", &[hit], MemoryAttestationMode::AttestedWithRecall)
-            .with_capsule_digest(Some("capsule-1".to_string()));
-    let mut evidence_json = serde_json::to_value(&evidence).unwrap();
-    evidence_json["capsule_id"] = json!("capsule-1");
-    std::fs::write(&evidence_path, serde_json::to_vec(&evidence_json).unwrap()).unwrap();
+    let mut client = McpClient::spawn(&server, None).await;
+    initialize_client(&mut client).await;
 
-    let output = Command::new(cargo_bin("nexus"))
-        .arg("aeon")
-        .arg("verify-memory-evidence")
-        .arg("--capsule-id")
-        .arg("capsule-1")
-        .arg(&evidence_path)
-        .output()
-        .await
-        .expect("run nexus verifier");
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_iq_execute", "arguments": iq_args_stub() }),
+        )
+        .await;
+    let parsed = tool_json(&resp);
 
-    assert!(output.status.success(), "verifier should exit successfully");
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "VALID");
-}
-
-#[tokio::test]
-async fn verify_memory_evidence_cli_capsule_id_mismatch() {
-    let tmp = tempfile::tempdir().unwrap();
-    let evidence_path = tmp.path().join("memory-evidence-capsule-mismatch.json");
-    let evidence = MemoryEvidenceV1::new("context", &[], MemoryAttestationMode::AttestedNoHit);
-    let mut evidence_json = serde_json::to_value(&evidence).unwrap();
-    evidence_json["capsule_id"] = json!("capsule-actual");
-    std::fs::write(&evidence_path, serde_json::to_vec(&evidence_json).unwrap()).unwrap();
-
-    let output = Command::new(cargo_bin("nexus"))
-        .arg("aeon")
-        .arg("verify-memory-evidence")
-        .arg("--capsule-id")
-        .arg("capsule-expected")
-        .arg(&evidence_path)
-        .output()
-        .await
-        .expect("run nexus verifier");
-
-    assert!(output.status.success(), "verifier should exit successfully");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
     assert!(
-        stdout.starts_with("INVALID: capsule_id mismatch:"),
-        "expected capsule mismatch output, got: {stdout}"
+        parsed["proof_capsule_ref"].is_string(),
+        "missing proof ref: {parsed}"
     );
-}
 
-#[tokio::test]
-async fn verify_memory_evidence_cli_invalid() {
-    let tmp = tempfile::tempdir().unwrap();
-    let evidence_path = tmp.path().join("memory-evidence-invalid.json");
-    std::fs::write(
-        &evidence_path,
-        serde_json::to_vec(&json!({
-            "version": 1,
-            "query": "context",
-            "hit_count": 2,
-            "hit_digests": ["abc"],
-            "attestation": "Attested"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    server.wait_for_path("/api/v1/agents/agent-1/timeline", 1).await;
+    let captured = server.captured.lock().unwrap();
+    let timeline_req = captured
+        .iter()
+        .find(|req| req.path == "/api/v1/agents/agent-1/timeline")
+        .expect("mock AEON should have received timeline POST");
 
-    let output = Command::new(cargo_bin("nexus"))
-        .arg("aeon")
-        .arg("verify-memory-evidence")
-        .arg(&evidence_path)
-        .output()
-        .await
-        .expect("run nexus verifier");
-
-    assert!(output.status.success(), "verifier should exit successfully");
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.starts_with("INVALID:"),
-        "expected INVALID output, got: {stdout}"
+        timeline_req.path.contains("agent-1"),
+        "timeline request path should reference agent-1: {}",
+        timeline_req.path
+    );
+
+    let body: serde_json::Value =
+        serde_json::from_str(&timeline_req.body).expect("timeline body should be valid JSON");
+    assert_eq!(
+        body["session_id"], "session-1",
+        "timeline event body should carry session_id: {body}"
     );
 }

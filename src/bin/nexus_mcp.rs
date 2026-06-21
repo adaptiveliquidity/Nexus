@@ -364,6 +364,8 @@ pub struct NexusMcpServer {
     hypervisor: Arc<NexusHypervisor>,
     wasm_module_dirs: Arc<Vec<PathBuf>>,
     capability_allowlist: Arc<Option<Vec<Capability>>>,
+    #[cfg_attr(not(feature = "aeon-memory"), allow(dead_code))]
+    nexus_iq_allowlist: Arc<Option<Vec<String>>>,
     capability_profile: Option<Arc<CapabilityProfileManifest>>,
 }
 
@@ -810,6 +812,7 @@ impl NexusMcpServer {
             hypervisor,
             wasm_module_dirs: Arc::new(wasm_module_dirs),
             capability_allowlist: Arc::new(capability_allowlist_from_env()?),
+            nexus_iq_allowlist: Arc::new(nexus_iq_allowlist_from_env()?),
             capability_profile,
         })
     }
@@ -884,10 +887,35 @@ impl NexusMcpServer {
 
         let mode = nexus::aeon::TimelineDeliveryMode::parse(params.attestation_mode.as_deref());
         let attestation_mode = timeline_mode_label(mode).to_string();
+
+        if let Some(allowlist) = (*self.nexus_iq_allowlist).as_ref() {
+            if !allowlist.iter().any(|allowed| allowed == &params.tool_name) {
+                return self
+                    .nexus_iq_denial_response(NexusIqDenialContext {
+                        aeon_agent_id: params.aeon_agent_id,
+                        aeon_session_id: params.aeon_session_id,
+                        mode,
+                        attestation_mode,
+                        memory_evidence_ref: nexus::aeon::MemoryEvidenceV1::new(
+                            "",
+                            &[],
+                            nexus::proof::schema::MemoryAttestationMode::Absent,
+                        ),
+                        memory_hits_count: 0,
+                        reason: format!(
+                            "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
+                            params.tool_name
+                        ),
+                    })
+                    .await;
+            }
+        }
+
         let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
         let memory_client = if params.memory_query.is_some() {
             aeon_config
                 .as_ref()
+                .filter(|c| c.hmac_key.is_some())
                 .and_then(nexus::aeon::AeonMemoryClient::from_enabled_config)
         } else {
             None
@@ -1072,7 +1100,7 @@ impl NexusMcpServer {
                             .deliver(&agent_id, session_id.as_deref(), &events)
                             .await;
                     });
-                    Some(nexus::aeon::TimelineDeliveryStatus::Queued)
+                    Some(nexus::aeon::TimelineDeliveryStatus::FireAndForget)
                 }
                 None => Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen),
             }
@@ -1801,6 +1829,7 @@ impl NexusMcpServer {
 
 const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
+const NEXUS_IQ_ALLOWLIST_ENV: &str = "NEXUS_IQ_ALLOWLIST";
 const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
 const RESTORED_MEMORY_PREVIEW_BYTES: usize = 64;
 
@@ -1885,7 +1914,7 @@ async fn deliver_nexus_iq_timeline(
             .deliver(&agent_id, session_id.as_deref(), &events)
             .await;
     });
-    nexus::aeon::TimelineDeliveryStatus::Queued
+    nexus::aeon::TimelineDeliveryStatus::FireAndForget
 }
 
 #[cfg(feature = "aeon-memory")]
@@ -2065,6 +2094,33 @@ fn capability_allowlist_from_env() -> Result<Option<Vec<Capability>>> {
         })
         .collect::<Result<Vec<_>>>()
         .map(Some)
+}
+
+fn nexus_iq_allowlist_from_env() -> Result<Option<Vec<String>>> {
+    let Some(raw) = std::env::var_os(NEXUS_IQ_ALLOWLIST_ENV) else {
+        return Ok(None);
+    };
+    let raw = raw.into_string().map_err(|_| {
+        anyhow::anyhow!("{NEXUS_IQ_ALLOWLIST_ENV} must be UTF-8 JSON or comma-separated tool names")
+    })?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    let tools = if raw.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(raw).map_err(|e| {
+            anyhow::anyhow!("{NEXUS_IQ_ALLOWLIST_ENV} must be a JSON array of strings: {e}")
+        })?
+    } else {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+
+    Ok(Some(tools))
 }
 
 fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {

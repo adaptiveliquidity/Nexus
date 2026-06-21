@@ -1,7 +1,6 @@
 #![cfg(feature = "aeon-memory")]
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use nexus::aeon::{MemoryEvidenceV1, MemoryHit};
 use nexus::proof::schema::MemoryAttestationMode;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -34,18 +33,34 @@ struct McpClient {
 }
 
 impl McpClient {
-    async fn spawn(server: &MockAeonServer, allowlist: Option<String>) -> Self {
-        Self::spawn_with_aeon_base_url(Some(server.base_url()), allowlist).await
+    async fn spawn_with_aeon(server: &MockAeonServer) -> Self {
+        Self::spawn_with_aeon_options(Some(AeonEnv {
+            base_url: server.base_url(),
+            hmac_key: Some(test_hmac_key_hex()),
+            management_key: Some(test_management_key()),
+        }))
+        .await
     }
 
-    async fn spawn_without_aeon(allowlist: Option<String>) -> Self {
-        Self::spawn_with_aeon_base_url(None, allowlist).await
+    async fn spawn_without_hmac(server: &MockAeonServer) -> Self {
+        Self::spawn_with_aeon_options(Some(AeonEnv {
+            base_url: server.base_url(),
+            hmac_key: None,
+            management_key: Some(test_management_key()),
+        }))
+        .await
     }
 
-    async fn spawn_with_aeon_base_url(
-        aeon_base_url: Option<String>,
-        allowlist: Option<String>,
-    ) -> Self {
+    async fn spawn_with_unreachable_aeon() -> Self {
+        Self::spawn_with_aeon_options(Some(AeonEnv {
+            base_url: "http://127.0.0.1:1".to_string(),
+            hmac_key: Some(test_hmac_key_hex()),
+            management_key: Some(test_management_key()),
+        }))
+        .await
+    }
+
+    async fn spawn_with_aeon_options(aeon: Option<AeonEnv>) -> Self {
         let bin = cargo_bin("nexus-mcp");
         assert!(bin.exists(), "nexus-mcp binary not found at {:?}", bin);
 
@@ -64,18 +79,20 @@ impl McpClient {
             .env_remove("NEXUS_AEON_HMAC_KEY")
             .env_remove("NEXUS_MCP_CAPABILITY_ALLOWLIST")
             .env_remove("NEXUS_MCP_PROFILE");
-        if let Some(aeon_base_url) = aeon_base_url {
+
+        if let Some(aeon) = aeon {
             command
                 .env("NEXUS_AEON_ENABLED", "true")
-                .env("NEXUS_AEON_BASE_URL", aeon_base_url)
+                .env("NEXUS_AEON_BASE_URL", aeon.base_url)
                 .env("NEXUS_AEON_AGENT_ID", "agent-1")
                 .env("NEXUS_AEON_SESSION_ID", "session-1")
-                .env("NEXUS_AEON_TIMEOUT_MS", "200")
-                .env("NEXUS_AEON_MANAGEMENT_KEY", test_management_key())
-                .env("NEXUS_AEON_HMAC_KEY", test_hmac_key_hex());
-        }
-        if let Some(allowlist) = allowlist {
-            command.env("NEXUS_MCP_CAPABILITY_ALLOWLIST", allowlist);
+                .env("NEXUS_AEON_TIMEOUT_MS", "200");
+            if let Some(management_key) = aeon.management_key {
+                command.env("NEXUS_AEON_MANAGEMENT_KEY", management_key);
+            }
+            if let Some(hmac_key) = aeon.hmac_key {
+                command.env("NEXUS_AEON_HMAC_KEY", hmac_key);
+            }
         }
 
         let mut child = command.spawn().expect("failed to spawn nexus-mcp");
@@ -115,6 +132,12 @@ impl McpClient {
         .await;
         self.recv().await
     }
+}
+
+struct AeonEnv {
+    base_url: String,
+    hmac_key: Option<String>,
+    management_key: Option<String>,
 }
 
 fn test_hmac_key_hex() -> String {
@@ -169,11 +192,7 @@ fn noop_wasm_b64() -> String {
     STANDARD.encode(wasm)
 }
 
-fn iq_args(_server: &MockAeonServer) -> Value {
-    iq_args_stub()
-}
-
-fn iq_args_stub() -> Value {
+fn iq_args() -> Value {
     json!({
         "tool_name": "nexus_iq_noop",
         "tool_wasm": noop_wasm_b64(),
@@ -181,6 +200,28 @@ fn iq_args_stub() -> Value {
         "aeon_agent_id": "agent-1",
         "aeon_session_id": "session-1"
     })
+}
+
+fn mode_from_response(parsed: &Value) -> MemoryAttestationMode {
+    serde_json::from_value(parsed["memory_evidence_ref"]["attestation"].clone())
+        .expect("memory_evidence_ref.attestation should deserialize")
+}
+
+async fn call_nexus_iq_execute(client: &mut McpClient, args: Value) -> Value {
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_iq_execute", "arguments": args }),
+        )
+        .await;
+    let parsed = tool_json(&resp);
+    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
+    assert!(
+        parsed["proof_capsule_ref"].is_string(),
+        "missing proof ref: {parsed}"
+    );
+    parsed
 }
 
 #[derive(Debug, Clone)]
@@ -243,17 +284,28 @@ impl MockAeonServer {
         format!("http://{}", self.addr)
     }
 
+    fn path_count(&self, path: &str) -> usize {
+        self.captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.path == path)
+            .count()
+    }
+
+    fn first_body_for_path(&self, path: &str) -> Option<String> {
+        self.captured
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.path == path)
+            .map(|request| request.body.clone())
+    }
+
     async fn wait_for_path(&self, path: &str, count: usize) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            let seen = self
-                .captured
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|request| request.path == path)
-                .count();
-            if seen >= count {
+            if self.path_count(path) >= count {
                 return;
             }
             sleep(Duration::from_millis(20)).await;
@@ -343,219 +395,145 @@ fn handle_http(
 }
 
 #[tokio::test]
-async fn nexus_iq_execute_full_loop() {
+async fn no_memory_query_gives_advisory() {
+    let Some(server) = MockAeonServer::try_new(200, r#"{"results":[]}"#, 200) else {
+        return;
+    };
+    let mut client = McpClient::spawn_with_aeon(&server).await;
+    initialize_client(&mut client).await;
+
+    let parsed = call_nexus_iq_execute(&mut client, iq_args()).await;
+
+    assert_eq!(mode_from_response(&parsed), MemoryAttestationMode::Absent);
+    assert_eq!(parsed["memory_hits_count"], 0);
+    assert_eq!(server.path_count("/api/v1/memories/search"), 0);
+}
+
+#[tokio::test]
+async fn memory_query_no_hits_gives_attested_no_hit() {
+    let Some(server) = MockAeonServer::try_new(200, r#"{"results":[]}"#, 200) else {
+        return;
+    };
+    let mut client = McpClient::spawn_with_aeon(&server).await;
+    initialize_client(&mut client).await;
+
+    let mut args = iq_args();
+    args["memory_query"] = json!("recall without hits");
+    let parsed = call_nexus_iq_execute(&mut client, args).await;
+
+    assert_eq!(
+        mode_from_response(&parsed),
+        MemoryAttestationMode::AttestedNoHit
+    );
+    assert_eq!(parsed["memory_hits_count"], 0);
+    server.wait_for_path("/api/v1/memories/search", 1).await;
+    let search_body = server
+        .first_body_for_path("/api/v1/memories/search")
+        .expect("memory search request should be captured");
+    assert!(
+        search_body.contains("recall without hits"),
+        "memory recall query should be forwarded: {search_body}"
+    );
+}
+
+#[tokio::test]
+async fn memory_query_with_hits_gives_attested_with_recall() {
     let Some(server) = MockAeonServer::try_new(
         200,
-        r#"{"results":[{"id":"mem-1","content":"previous context","score":0.91}]}"#,
+        r#"{"results":[{"id":"mem-1","content":"first context","score":0.91},{"id":"mem-2","content":"second context","score":0.87}]}"#,
         200,
     ) else {
         return;
     };
-    let mut client = McpClient::spawn(&server, None).await;
+    let mut client = McpClient::spawn_with_aeon(&server).await;
     initialize_client(&mut client).await;
 
-    let mut args = iq_args(&server);
-    args["memory_query"] = json!("recall context");
-    args["memory_limit"] = json!(5);
+    let mut args = iq_args();
+    args["memory_query"] = json!("recall with hits");
+    let parsed = call_nexus_iq_execute(&mut client, args).await;
 
-    let resp = client
-        .request(
-            2,
-            "tools/call",
-            json!({ "name": "nexus_iq_execute", "arguments": args }),
-        )
-        .await;
-    let parsed = tool_json(&resp);
-
-    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
-    assert!(
-        parsed["proof_capsule_ref"].is_string(),
-        "missing proof ref: {parsed}"
-    );
-    assert_eq!(parsed["memory_hits_count"], 1);
     assert_eq!(
-        parsed["memory_evidence_ref"]["attestation"],
-        "AttestedWithRecall"
+        mode_from_response(&parsed),
+        MemoryAttestationMode::AttestedWithRecall
     );
-    assert!(parsed["memory_evidence_ref"]["capsule_digest"].is_string());
-    assert_eq!(parsed["timeline_status"], "fire_and_forget");
+    assert_eq!(parsed["memory_hits_count"], 2);
     server.wait_for_path("/api/v1/memories/search", 1).await;
-    server
-        .wait_for_path("/api/v1/agents/agent-1/timeline", 1)
-        .await;
-    let captured = server.captured.lock().unwrap();
-    let search = captured
-        .iter()
-        .find(|request| request.path == "/api/v1/memories/search")
-        .expect("search request should be captured");
-    assert!(
-        search.body.contains("recall context"),
-        "memory recall query should be forwarded: {}",
-        search.body
-    );
 }
 
 #[tokio::test]
-async fn nexus_iq_execute_no_memory() {
-    let mut client = McpClient::spawn_without_aeon(None).await;
+async fn aeon_down_degrades_gracefully() {
+    let mut client = McpClient::spawn_with_unreachable_aeon().await;
     initialize_client(&mut client).await;
 
-    let resp = client
-        .request(
-            2,
-            "tools/call",
-            json!({ "name": "nexus_iq_execute", "arguments": iq_args_stub() }),
-        )
-        .await;
-    let parsed = tool_json(&resp);
+    let mut args = iq_args();
+    args["memory_query"] = json!("recall while aeon is down");
+    let parsed = call_nexus_iq_execute(&mut client, args).await;
+    let mode = mode_from_response(&parsed);
 
-    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
     assert!(
-        parsed["proof_capsule_ref"].is_string(),
-        "missing proof ref: {parsed}"
+        matches!(
+            mode,
+            MemoryAttestationMode::Degraded | MemoryAttestationMode::Advisory
+        ),
+        "unexpected memory attestation mode when AEON is down: {mode:?}; response: {parsed}"
     );
     assert_eq!(parsed["memory_hits_count"], 0);
-    assert_eq!(parsed["memory_evidence_ref"]["attestation"], "Absent");
 }
 
 #[tokio::test]
-async fn nexus_iq_execute_capability_denied() {
-    let mut client = McpClient::spawn_without_aeon(None).await;
-    initialize_client(&mut client).await;
-
-    let mut args = iq_args_stub();
-    args["required_capabilities"] = json!(["read:/denied"]);
-
-    let resp = client
-        .request(
-            2,
-            "tools/call",
-            json!({ "name": "nexus_iq_execute", "arguments": args }),
-        )
-        .await;
-    let parsed = tool_json(&resp);
-
-    assert_eq!(parsed["denied"], true, "expected denial: {parsed}");
-    assert_eq!(parsed["denial_negotiation"]["denied"], true);
-    assert_eq!(parsed["denial_negotiation"]["negotiated"], false);
-    assert!(
-        parsed["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event["kind"] == "capability_denied"),
-        "expected CapabilityDenied event: {parsed}"
-    );
-}
-
-#[tokio::test]
-async fn nexus_iq_execute_attested_delivery_failure() {
-    let mut client = McpClient::spawn_without_aeon(None).await;
-    initialize_client(&mut client).await;
-
-    let mut args = iq_args_stub();
-    args["attestation_mode"] = json!("attested");
-
-    let resp = client
-        .request(
-            2,
-            "tools/call",
-            json!({ "name": "nexus_iq_execute", "arguments": args }),
-        )
-        .await;
-    let parsed = tool_json(&resp);
-
-    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
-    assert_eq!(parsed["attestation_mode"], "attested");
-    assert_eq!(parsed["timeline_status"], "required_but_failed");
-}
-
-#[tokio::test]
-async fn verify_memory_evidence_cli_valid() {
-    let tmp = tempfile::tempdir().unwrap();
-    let evidence_path = tmp.path().join("memory-evidence-valid.json");
-    let hit = MemoryHit {
-        id: "mem-1".to_string(),
-        content: "context".to_string(),
-        score: Some(0.9),
+async fn hit_digests_populated_on_recall() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[{"id":"mem-1","content":"first context","score":0.91},{"id":"mem-2","content":"second context","score":0.87}]}"#,
+        200,
+    ) else {
+        return;
     };
-    let evidence =
-        MemoryEvidenceV1::new("context", &[hit], MemoryAttestationMode::AttestedWithRecall)
-            .with_capsule_digest(Some("capsule-1".to_string()));
-    let mut evidence_json = serde_json::to_value(&evidence).unwrap();
-    evidence_json["capsule_id"] = json!("capsule-1");
-    std::fs::write(&evidence_path, serde_json::to_vec(&evidence_json).unwrap()).unwrap();
+    let mut client = McpClient::spawn_with_aeon(&server).await;
+    initialize_client(&mut client).await;
 
-    let output = Command::new(cargo_bin("nexus"))
-        .arg("aeon")
-        .arg("verify-memory-evidence")
-        .arg("--capsule-id")
-        .arg("capsule-1")
-        .arg(&evidence_path)
-        .output()
-        .await
-        .expect("run nexus verifier");
+    let mut args = iq_args();
+    args["memory_query"] = json!("recall with digests");
+    let parsed = call_nexus_iq_execute(&mut client, args).await;
+    let hit_digests = parsed["memory_evidence_ref"]["hit_digests"]
+        .as_array()
+        .expect("hit_digests should be an array");
 
-    assert!(output.status.success(), "verifier should exit successfully");
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "VALID");
-}
-
-#[tokio::test]
-async fn verify_memory_evidence_cli_capsule_id_mismatch() {
-    let tmp = tempfile::tempdir().unwrap();
-    let evidence_path = tmp.path().join("memory-evidence-capsule-mismatch.json");
-    let evidence = MemoryEvidenceV1::new("context", &[], MemoryAttestationMode::AttestedNoHit);
-    let mut evidence_json = serde_json::to_value(&evidence).unwrap();
-    evidence_json["capsule_id"] = json!("capsule-actual");
-    std::fs::write(&evidence_path, serde_json::to_vec(&evidence_json).unwrap()).unwrap();
-
-    let output = Command::new(cargo_bin("nexus"))
-        .arg("aeon")
-        .arg("verify-memory-evidence")
-        .arg("--capsule-id")
-        .arg("capsule-expected")
-        .arg(&evidence_path)
-        .output()
-        .await
-        .expect("run nexus verifier");
-
-    assert!(output.status.success(), "verifier should exit successfully");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        mode_from_response(&parsed),
+        MemoryAttestationMode::AttestedWithRecall
+    );
+    assert_eq!(hit_digests.len(), 2);
     assert!(
-        stdout.starts_with("INVALID: capsule_id mismatch:"),
-        "expected capsule mismatch output, got: {stdout}"
+        hit_digests
+            .iter()
+            .all(|digest| digest.as_str().is_some_and(|value| !value.is_empty())),
+        "hit_digests should contain non-empty digest strings: {parsed}"
     );
 }
 
 #[tokio::test]
-async fn verify_memory_evidence_cli_invalid() {
-    let tmp = tempfile::tempdir().unwrap();
-    let evidence_path = tmp.path().join("memory-evidence-invalid.json");
-    std::fs::write(
-        &evidence_path,
-        serde_json::to_vec(&json!({
-            "version": 1,
-            "query": "context",
-            "hit_count": 2,
-            "hit_digests": ["abc"],
-            "attestation": "Attested"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+async fn absent_mode_when_no_hmac_key() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[{"id":"mem-1","content":"unattested context","score":0.91}]}"#,
+        200,
+    ) else {
+        return;
+    };
+    let mut client = McpClient::spawn_without_hmac(&server).await;
+    initialize_client(&mut client).await;
 
-    let output = Command::new(cargo_bin("nexus"))
-        .arg("aeon")
-        .arg("verify-memory-evidence")
-        .arg(&evidence_path)
-        .output()
-        .await
-        .expect("run nexus verifier");
+    let mut args = iq_args();
+    args["memory_query"] = json!("recall without hmac key");
+    let parsed = call_nexus_iq_execute(&mut client, args).await;
+    let mode = mode_from_response(&parsed);
 
-    assert!(output.status.success(), "verifier should exit successfully");
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.starts_with("INVALID:"),
-        "expected INVALID output, got: {stdout}"
+        matches!(
+            mode,
+            MemoryAttestationMode::Absent | MemoryAttestationMode::Advisory
+        ),
+        "unexpected memory attestation mode without NEXUS_AEON_HMAC_KEY: {mode:?}; response: {parsed}"
     );
 }

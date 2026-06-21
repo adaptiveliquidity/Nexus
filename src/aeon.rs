@@ -31,7 +31,7 @@ const TIMELINE_MAX_ATTEMPTS: usize = 3;
 static MISSING_MANAGEMENT_KEY_WARN: Once = Once::new();
 
 /// Configuration for routing ai-recovery LLM calls through AEON-IQ.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AeonConfig {
     pub enabled: bool,
     pub base_url: String,
@@ -42,6 +42,29 @@ pub struct AeonConfig {
     /// Hex-encoded HMAC-SHA256 key shared with AEON-IQ for memory evidence binding.
     /// When absent, `build_memory_evidence_ref` returns `Absent` mode with no evidence.
     pub hmac_key: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for AeonConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AeonConfig")
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("agent_id", &self.agent_id)
+            .field("session_id", &self.session_id)
+            .field("timeout_ms", &self.timeout_ms)
+            .field(
+                "management_key",
+                &self.management_key.as_deref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "hmac_key",
+                &self
+                    .hmac_key
+                    .as_ref()
+                    .map(|key| format!("[REDACTED {} bytes]", key.len())),
+            )
+            .finish()
+    }
 }
 
 impl Default for AeonConfig {
@@ -62,15 +85,38 @@ impl AeonConfig {
     /// Load AEON-IQ proxy configuration from `NEXUS_AEON_*` environment vars.
     pub fn from_env() -> Result<Self> {
         let defaults = Self::default();
-        Ok(Self {
+        let base_url = env_string(BASE_URL_ENV, defaults.base_url)?;
+        {
+            let parsed = reqwest::Url::parse(&base_url).map_err(|e| {
+                NexusError::ConfigError(format!("AEON_BASE_URL is not a valid URL: {e}"))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(NexusError::ConfigError(format!(
+                    "AEON_BASE_URL must use http or https scheme, got '{}'",
+                    parsed.scheme()
+                )));
+            }
+        }
+
+        let config = Self {
             enabled: env_bool(ENABLED_ENV, defaults.enabled)?,
-            base_url: env_string(BASE_URL_ENV, defaults.base_url)?,
+            base_url,
             agent_id: env_string(AGENT_ID_ENV, defaults.agent_id)?,
             session_id: env_optional_string(SESSION_ID_ENV)?,
             timeout_ms: env_u64(TIMEOUT_MS_ENV, defaults.timeout_ms)?,
             management_key: env_optional_string(MANAGEMENT_KEY_ENV)?,
             hmac_key: env_optional_hex(HMAC_KEY_ENV)?,
-        })
+        };
+        if let Some(ref key) = config.hmac_key {
+            if key.len() < 32 {
+                return Err(NexusError::ConfigError(format!(
+                    "AEON_HMAC_KEY must be at least 32 bytes (256 bits); got {} bytes",
+                    key.len()
+                )));
+            }
+        }
+
+        Ok(config)
     }
 
     /// AEON-IQ's OpenAI-compatible chat-completions endpoint.
@@ -530,8 +576,8 @@ impl AeonMemoryClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineDeliveryStatus {
-    /// Delivery has been queued onto a non-blocking task or local spool.
-    Queued,
+    /// Fire-and-forget delivery; success is not guaranteed.
+    FireAndForget,
     /// All requested events were delivered.
     Delivered,
     /// Delivery failed in advisory mode; execution remains unaffected.
@@ -637,7 +683,7 @@ impl AeonTimelineSink {
 
         if matches!(self.mode, TimelineDeliveryMode::Offline) {
             return if self.spool_events(agent_id, session_id, events).await {
-                TimelineDeliveryStatus::Queued
+                TimelineDeliveryStatus::FireAndForget
             } else {
                 TimelineDeliveryStatus::FailedOpen
             };
@@ -1281,9 +1327,22 @@ mod tests {
     use super::*;
     use crate::daemon::NexusExecutionEvent;
     use serde_json::Value;
+    use std::ffi::OsString;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
+
+    static AEON_ENV_LOCK: Mutex<()> = Mutex::new(());
+    const AEON_ENV_VARS: [&str; 8] = [
+        ENABLED_ENV,
+        BASE_URL_ENV,
+        AGENT_ID_ENV,
+        SESSION_ID_ENV,
+        TIMEOUT_MS_ENV,
+        MANAGEMENT_KEY_ENV,
+        HMAC_KEY_ENV,
+        TIMELINE_SPOOL_ENV,
+    ];
 
     #[test]
     fn default_config_is_disabled_local_proxy() {
@@ -1299,6 +1358,63 @@ mod tests {
             cfg.chat_completions_url(),
             "http://localhost:8080/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn aeon_config_debug_redacts_secrets() {
+        let cfg = AeonConfig {
+            management_key: Some("mgmt-secret".to_string()),
+            hmac_key: Some(vec![0x42; 32]),
+            ..AeonConfig::default()
+        };
+
+        let debug = format!("{cfg:?}");
+
+        assert!(debug.contains("management_key: Some(\"[REDACTED]\")"));
+        assert!(debug.contains("hmac_key: Some(\"[REDACTED 32 bytes]\")"));
+        assert!(!debug.contains("mgmt-secret"));
+        assert!(!debug.contains("66"));
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_base_url() {
+        with_clean_aeon_env(|| {
+            std::env::set_var(BASE_URL_ENV, "not a url");
+
+            let error = AeonConfig::from_env().unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("AEON_BASE_URL is not a valid URL"));
+        });
+    }
+
+    #[test]
+    fn from_env_rejects_non_http_base_url_scheme() {
+        with_clean_aeon_env(|| {
+            std::env::set_var(BASE_URL_ENV, "file:///tmp/aeon.sock");
+
+            let error = AeonConfig::from_env().unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "Configuration error: AEON_BASE_URL must use http or https scheme, got 'file'"
+            );
+        });
+    }
+
+    #[test]
+    fn from_env_rejects_short_hmac_key() {
+        with_clean_aeon_env(|| {
+            std::env::set_var(HMAC_KEY_ENV, "00010203");
+
+            let error = AeonConfig::from_env().unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "Configuration error: AEON_HMAC_KEY must be at least 32 bytes (256 bits); got 4 bytes"
+            );
+        });
     }
 
     #[test]
@@ -1526,6 +1642,29 @@ mod tests {
         requests.remove(0)
     }
 
+    fn with_clean_aeon_env(test: impl FnOnce() + std::panic::UnwindSafe) {
+        let _guard = AEON_ENV_LOCK.lock().unwrap();
+        let saved: [(&str, Option<OsString>); 8] =
+            AEON_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in AEON_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     fn timeline_events() -> Vec<NexusExecutionEvent> {
         vec![
             NexusExecutionEvent::SnapshotCreated {
@@ -1653,7 +1792,7 @@ mod tests {
         }];
 
         let queued = offline.deliver("agent-1", Some("session-1"), &event).await;
-        assert_eq!(queued, TimelineDeliveryStatus::Queued);
+        assert_eq!(queued, TimelineDeliveryStatus::FireAndForget);
 
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_for_responder = Arc::clone(&captured);

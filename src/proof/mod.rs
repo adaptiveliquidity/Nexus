@@ -17,7 +17,8 @@ pub use receipt::{
 pub use schema::{
     default_proof_capsule_limitations, BranchRaceEvidence, CapabilityEvidence, DigestMode,
     FailureEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
-    ProofScorecard, ProofSubject, RedactionReport, RollbackEvidence, SignatureEnvelope,
-    SnapshotEvidence, SnapshotKind, ToolIdentity, TypedDigest, DEFAULT_PROOF_CAPSULE_LIMITATIONS,
+    ProofCapsuleBuilder, ProofScorecard, ProofSubject, RedactionReport, RollbackEvidence,
+    SignatureEnvelope, SnapshotEvidence, SnapshotKind, ToolIdentity, TypedDigest,
+    DEFAULT_PROOF_CAPSULE_LIMITATIONS,
 };
 pub use signing::{sign_capsule, verify_capsule, ProofSigningConfig};

@@ -126,9 +126,30 @@ fn feature_capsule_without_memory_omits_aeon_keys() {
     assert!(value["capabilities"].get("negotiation_rounds").is_none());
 }
 
+#[test]
+fn no_raw_secrets_in_proof_capsule() {
+    let json = serde_json::to_string(&sample_capsule_without_memory())
+        .unwrap()
+        .to_ascii_lowercase();
+
+    for forbidden in [
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "private_key",
+        "bearer",
+    ] {
+        assert!(
+            !json.contains(forbidden),
+            "proof capsule JSON leaked forbidden marker: {forbidden}"
+        );
+    }
+}
+
 #[cfg(not(feature = "aeon-memory"))]
 #[test]
-fn default_build_capsule_json_has_no_aeon_keys() {
+fn default_build_omits_aeon_fields() {
     // This is the default-off shape gate: when aeon-memory is not compiled,
     // proof JSON must not expose AEON-IQ memory or negotiation fields at all.
     let value = serde_json::to_value(sample_capsule_without_memory()).unwrap();
