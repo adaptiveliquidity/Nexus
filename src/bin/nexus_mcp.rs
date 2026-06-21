@@ -364,6 +364,7 @@ pub struct NexusMcpServer {
     hypervisor: Arc<NexusHypervisor>,
     wasm_module_dirs: Arc<Vec<PathBuf>>,
     capability_allowlist: Arc<Option<Vec<Capability>>>,
+    nexus_iq_allowlist: Arc<Option<Vec<String>>>,
     capability_profile: Option<Arc<CapabilityProfileManifest>>,
 }
 
@@ -810,6 +811,7 @@ impl NexusMcpServer {
             hypervisor,
             wasm_module_dirs: Arc::new(wasm_module_dirs),
             capability_allowlist: Arc::new(capability_allowlist_from_env()?),
+            nexus_iq_allowlist: Arc::new(nexus_iq_allowlist_from_env()?),
             capability_profile,
         })
     }
@@ -916,6 +918,25 @@ impl NexusMcpServer {
             }
             _ => None,
         };
+
+        if let Some(allowlist) = self.nexus_iq_allowlist.as_ref() {
+            if !allowlist.iter().any(|allowed| allowed == &params.tool_name) {
+                return self
+                    .nexus_iq_denial_response(NexusIqDenialContext {
+                        aeon_agent_id: params.aeon_agent_id,
+                        aeon_session_id: params.aeon_session_id,
+                        mode,
+                        attestation_mode,
+                        memory_evidence_ref: recall.evidence,
+                        memory_hits_count,
+                        reason: format!(
+                            "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
+                            params.tool_name
+                        ),
+                    })
+                    .await;
+            }
+        }
 
         use base64::Engine as _;
         let wasm_bytes = base64::engine::general_purpose::STANDARD
@@ -1802,6 +1823,7 @@ impl NexusMcpServer {
 
 const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
+const NEXUS_IQ_ALLOWLIST_ENV: &str = "NEXUS_IQ_ALLOWLIST";
 const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
 const RESTORED_MEMORY_PREVIEW_BYTES: usize = 64;
 
@@ -2066,6 +2088,33 @@ fn capability_allowlist_from_env() -> Result<Option<Vec<Capability>>> {
         })
         .collect::<Result<Vec<_>>>()
         .map(Some)
+}
+
+fn nexus_iq_allowlist_from_env() -> Result<Option<Vec<String>>> {
+    let Some(raw) = std::env::var_os(NEXUS_IQ_ALLOWLIST_ENV) else {
+        return Ok(None);
+    };
+    let raw = raw.into_string().map_err(|_| {
+        anyhow::anyhow!("{NEXUS_IQ_ALLOWLIST_ENV} must be UTF-8 JSON or comma-separated tool names")
+    })?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    let tools = if raw.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(raw).map_err(|e| {
+            anyhow::anyhow!("{NEXUS_IQ_ALLOWLIST_ENV} must be a JSON array of strings: {e}")
+        })?
+    } else {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+
+    Ok(Some(tools))
 }
 
 fn allowed_wasm_module_dirs() -> Result<Vec<PathBuf>> {
