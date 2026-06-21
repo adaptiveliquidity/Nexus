@@ -887,6 +887,30 @@ impl NexusMcpServer {
 
         let mode = nexus::aeon::TimelineDeliveryMode::parse(params.attestation_mode.as_deref());
         let attestation_mode = timeline_mode_label(mode).to_string();
+
+        if let Some(allowlist) = (*self.nexus_iq_allowlist).as_ref() {
+            if !allowlist.iter().any(|allowed| allowed == &params.tool_name) {
+                return self
+                    .nexus_iq_denial_response(NexusIqDenialContext {
+                        aeon_agent_id: params.aeon_agent_id,
+                        aeon_session_id: params.aeon_session_id,
+                        mode,
+                        attestation_mode,
+                        memory_evidence_ref: nexus::aeon::MemoryEvidenceV1::new(
+                            "",
+                            &[],
+                            nexus::proof::schema::MemoryAttestationMode::Absent,
+                        ),
+                        memory_hits_count: 0,
+                        reason: format!(
+                            "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
+                            params.tool_name
+                        ),
+                    })
+                    .await;
+            }
+        }
+
         let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
         let memory_client = if params.memory_query.is_some() {
             aeon_config
@@ -919,25 +943,6 @@ impl NexusMcpServer {
             }
             _ => None,
         };
-
-        if let Some(allowlist) = (*self.nexus_iq_allowlist).as_ref() {
-            if !allowlist.iter().any(|allowed| allowed == &params.tool_name) {
-                return self
-                    .nexus_iq_denial_response(NexusIqDenialContext {
-                        aeon_agent_id: params.aeon_agent_id,
-                        aeon_session_id: params.aeon_session_id,
-                        mode,
-                        attestation_mode,
-                        memory_evidence_ref: recall.evidence,
-                        memory_hits_count,
-                        reason: format!(
-                            "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
-                            params.tool_name
-                        ),
-                    })
-                    .await;
-            }
-        }
 
         use base64::Engine as _;
         let wasm_bytes = base64::engine::general_purpose::STANDARD
