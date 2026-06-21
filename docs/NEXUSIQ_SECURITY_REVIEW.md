@@ -20,8 +20,8 @@
 
 The following items were identified but are explicitly out of scope for v1.0:
 
-- **Token TOCTOU re-check at sandbox entry**: capability tokens are checked at request time; a re-check immediately before WASM instantiation would catch late-revocation. Deferred to post-v1.0.
-- **preview_base64 explicit permission gate**: base64 previews in proof capsules are not gated on a separate explicit capability. Deferred to post-v1.0.
+- **Token TOCTOU re-check at sandbox entry**: Fixed: tokenized MCP execution paths re-check caller tokens immediately before sandbox entry.
+- **preview_base64 explicit permission gate**: Fixed: gated behind `nexus:memory_preview` capability.
 
 ## References
 

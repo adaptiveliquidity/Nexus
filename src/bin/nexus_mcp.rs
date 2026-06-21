@@ -113,6 +113,14 @@ pub struct SnapshotRollbackParams {
         description = "When true, include a memory checksum/preview and execution-state summary for the restored snapshot."
     )]
     pub include_restored_state: Option<bool>,
+    #[schemars(
+        description = "Optional caller capabilities. Include {\"type\":\"nexus:memory_preview\"} to receive restored memory preview bytes."
+    )]
+    pub caller_capabilities: Option<Vec<CapabilitySpec>>,
+    #[schemars(
+        description = "Optional parent capability token UUID. When set, requested caller_capabilities are attenuated from this token."
+    )]
+    pub parent_token_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -762,6 +770,7 @@ struct RestoredMemorySummary {
     byte_len: usize,
     sha256: String,
     preview_len: usize,
+    // Empty unless the caller holds nexus:memory_preview; raw WASM memory can contain secrets.
     preview_base64: String,
 }
 
@@ -970,6 +979,7 @@ impl NexusMcpServer {
         } else {
             match self.iq_caller_tokens_for_required(&required_capabilities) {
                 Ok(caller_tokens) => {
+                    self.check_tokens_against_active_profile(&caller_tokens)?;
                     self.hypervisor
                         .execute_tool_proof_with_tokens(tool, input, &caller_tokens)
                         .await
@@ -1077,6 +1087,7 @@ impl NexusMcpServer {
         }
 
         let input = params.input.unwrap_or(serde_json::json!({}));
+        self.check_tokens_against_active_profile(&caller_tokens)?;
         let (output, proof_capsule) = self
             .hypervisor
             .execute_tool_proof_with_tokens(tool, input, &caller_tokens)
@@ -1143,6 +1154,7 @@ impl NexusMcpServer {
         tool = tool.with_capabilities(caps);
 
         let input = params.input.unwrap_or(serde_json::json!({}));
+        self.check_tokens_against_active_profile(&caller_tokens)?;
         let output = self
             .hypervisor
             .execute_tool_wasi(tool, input, &caller_tokens)
@@ -1204,10 +1216,22 @@ impl NexusMcpServer {
         self.ensure_snapshot_enabled()?;
         let id = Uuid::parse_str(&params.snapshot_id)
             .map_err(|e| anyhow::anyhow!("Invalid snapshot UUID: {e}"))?;
+        let caller_capabilities: Vec<Capability> = params
+            .caller_capabilities
+            .unwrap_or_default()
+            .into_iter()
+            .map(|spec| parse_capability(&spec))
+            .collect::<Result<_>>()?;
+        let caller_tokens =
+            self.execute_wasi_tokens(&caller_capabilities, params.parent_token_id.as_deref())?;
+        self.check_tokens_against_active_profile(&caller_tokens)?;
 
         let result = self.hypervisor.rollback_snapshot(id)?;
         let restored_state = if params.include_restored_state.unwrap_or(false) {
-            Some(restored_state_summary(&result))
+            Some(restored_state_summary(
+                &result,
+                caller_has_memory_preview(&caller_tokens),
+            ))
         } else {
             None
         };
@@ -1668,6 +1692,8 @@ impl NexusMcpServer {
     fn check_tokens_against_active_profile(&self, tokens: &[CapabilityToken]) -> Result<()> {
         if let Some(profile) = self.capability_profile.as_deref() {
             check_tokens_against_profile(tokens, profile)?;
+        } else {
+            check_tokens_fresh(tokens)?;
         }
         Ok(())
     }
@@ -1831,14 +1857,22 @@ const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
 const NEXUS_IQ_ALLOWLIST_ENV: &str = "NEXUS_IQ_ALLOWLIST";
 const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
+pub const NEXUS_MEMORY_PREVIEW_CAPABILITY: &str = "nexus:memory_preview";
 const RESTORED_MEMORY_PREVIEW_BYTES: usize = 64;
 
 /// Maximum token validity an MCP client may request, in seconds (1 hour).
 /// Larger caller-supplied values are clamped to this. See SECURITY.md.
 const MAX_TOKEN_VALIDITY_SECS: u64 = 3600;
 
-fn restored_state_summary(result: &nexus::snapshot::RollbackResult) -> RestoredStateSummary {
-    let preview_len = result.memory.len().min(RESTORED_MEMORY_PREVIEW_BYTES);
+fn restored_state_summary(
+    result: &nexus::snapshot::RollbackResult,
+    include_memory_preview: bool,
+) -> RestoredStateSummary {
+    let preview_len = if include_memory_preview {
+        result.memory.len().min(RESTORED_MEMORY_PREVIEW_BYTES)
+    } else {
+        0
+    };
     let sha256 = format!("{:x}", sha2::Sha256::digest(&result.memory));
     let preview_base64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -1857,6 +1891,15 @@ fn restored_state_summary(result: &nexus::snapshot::RollbackResult) -> RestoredS
             captured_tables: result.execution_state.captured_tables.len(),
         },
     }
+}
+
+fn memory_preview_capability() -> Capability {
+    Capability::MemoryPreview
+}
+
+fn caller_has_memory_preview(tokens: &[CapabilityToken]) -> bool {
+    let required = memory_preview_capability();
+    tokens.iter().any(|token| token.allows(&required))
 }
 
 #[cfg(feature = "aeon-memory")]
@@ -1931,6 +1974,9 @@ fn parse_iq_capability(spec: &str) -> Result<Capability> {
     if let Ok(value) = serde_json::from_str::<CapabilitySpec>(spec) {
         return parse_capability(&value);
     }
+    if spec == "memory_preview" || spec == NEXUS_MEMORY_PREVIEW_CAPABILITY {
+        return Ok(Capability::MemoryPreview);
+    }
 
     let (kind, value) = spec
         .split_once(':')
@@ -1999,6 +2045,8 @@ fn check_tokens_against_profile(
     tokens: &[CapabilityToken],
     manifest: &CapabilityProfileManifest,
 ) -> nexus::Result<()> {
+    check_tokens_fresh(tokens)?;
+
     for token in tokens {
         let permitted = manifest
             .allowed_capabilities()
@@ -2008,6 +2056,19 @@ fn check_tokens_against_profile(
             return Err(NexusError::CapabilityDenied(format!(
                 "capability not permitted by active profile: {}",
                 token.capability.description()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn check_tokens_fresh(tokens: &[CapabilityToken]) -> nexus::Result<()> {
+    for token in tokens {
+        if !token.is_valid() {
+            return Err(NexusError::InvalidCapability(format!(
+                "Token {} expired at {}",
+                token.id, token.expires_at
             )));
         }
     }
@@ -2312,6 +2373,7 @@ fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capab
         "http_post" => Some(Capability::HttpPost(path?.to_string())),
         "execute" => Some(Capability::ExecuteBinary(PathBuf::from(path?))),
         "mount_tmpfs" => Some(Capability::MountTmpfs(PathBuf::from(path?))),
+        "memory_preview" | NEXUS_MEMORY_PREVIEW_CAPABILITY => Some(Capability::MemoryPreview),
         "all" => Some(Capability::All),
         _ => None,
     }
@@ -2446,6 +2508,64 @@ mod tests {
         let (_, secs) =
             sanitize_token_request(Capability::ReadFile(PathBuf::from("/data")), None).unwrap();
         assert_eq!(secs, MAX_TOKEN_VALIDITY_SECS);
+    }
+
+    #[test]
+    fn token_recheck_fires_before_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile_path = tmp.path().join("token-recheck-profile.toml");
+        std::fs::write(
+            &profile_path,
+            "name = 'token-recheck'\n\n[[capabilities]]\ntype = 'read_file'\npath = '/data'\n",
+        )
+        .unwrap();
+        let profile = load_and_validate(&profile_path).expect("valid profile");
+        let token = CapabilityToken::new(
+            Capability::ReadFile(PathBuf::from("/data")),
+            "test",
+            Duration::from_secs(0),
+            &ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        )
+        .unwrap();
+
+        let error = check_tokens_against_profile(&[token], &profile).unwrap_err();
+
+        match error {
+            NexusError::InvalidCapability(message) => {
+                assert!(message.contains("expired"), "unexpected error: {message}");
+            }
+            other => panic!("expected InvalidCapability, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preview_base64_requires_capability() {
+        let result = nexus::snapshot::RollbackResult {
+            snapshot_id: Uuid::new_v4(),
+            memory: b"secret-memory-preview".to_vec(),
+            execution_state: ExecutionState::default(),
+            fs_operations: Vec::new(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let without_preview = restored_state_summary(&result, caller_has_memory_preview(&[]));
+        assert_eq!(without_preview.memory.preview_len, 0);
+        assert!(without_preview.memory.preview_base64.is_empty());
+
+        let token = CapabilityToken::new(
+            Capability::MemoryPreview,
+            "test",
+            Duration::from_secs(60),
+            &ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        )
+        .unwrap();
+        let with_preview = restored_state_summary(&result, caller_has_memory_preview(&[token]));
+
+        assert_eq!(
+            with_preview.memory.preview_len,
+            result.memory.len().min(RESTORED_MEMORY_PREVIEW_BYTES)
+        );
+        assert!(!with_preview.memory.preview_base64.is_empty());
     }
 
     #[test]

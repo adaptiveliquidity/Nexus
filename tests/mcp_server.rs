@@ -140,6 +140,15 @@ fn write_file_allowlist(path: &Path) -> String {
     .to_string()
 }
 
+fn memory_preview_allowlist() -> String {
+    json!([
+        {
+            "type": "nexus:memory_preview"
+        }
+    ])
+    .to_string()
+}
+
 fn profile_with_capability(dir: &Path, capability_type: &str, path: &Path) -> std::path::PathBuf {
     let profile_path = dir.join(format!("{capability_type}_profile.toml"));
     // Opt the WASI tool in explicitly: McpPolicy is fail-closed, so an absent
@@ -551,14 +560,8 @@ async fn snapshot_create_latest_runtime_rolls_back_restored_state() {
     assert_eq!(memory["byte_len"], WASM_PAGE_SIZE);
     assert_eq!(memory["sha256"], base_checksum);
     assert_ne!(memory["sha256"], diff_checksum);
-
-    let preview = memory["preview_base64"]
-        .as_str()
-        .expect("restored memory preview should be present");
-    let preview = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, preview)
-        .expect("memory preview should be valid base64");
-    assert_eq!(&preview[..4], b"base");
-    assert_ne!(&preview[..4], b"diff");
+    assert_eq!(memory["preview_len"], 0);
+    assert_eq!(memory["preview_base64"], "");
 
     assert!(
         restored["execution_state"]["captured_globals"]
@@ -567,6 +570,80 @@ async fn snapshot_create_latest_runtime_rolls_back_restored_state() {
             > 0,
         "restored execution state summary should report captured globals: {rollback}"
     );
+}
+
+#[tokio::test]
+async fn preview_base64_requires_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("preview_capability_snapshot.wasm");
+    fs::write(&wasm_path, module_with_data("base", 7)).unwrap();
+
+    let mut client = McpClient::spawn_with_module_dir_and_allowlist(
+        Some(tmp.path()),
+        Some(&memory_preview_allowlist()),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let exec_resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": wasm_path }
+            }),
+        )
+        .await;
+    let exec = tool_json(&exec_resp);
+    assert_eq!(exec["success"], true, "execute failed: {exec}");
+    let snapshot_id = exec["snapshot_id"]
+        .as_str()
+        .expect("execute response should expose the runtime snapshot id");
+
+    let without_cap_resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_rollback",
+                "arguments": {
+                    "snapshot_id": snapshot_id,
+                    "include_restored_state": true
+                }
+            }),
+        )
+        .await;
+    let without_cap = tool_json(&without_cap_resp);
+    let memory = &without_cap["restored_state"]["memory"];
+    assert_eq!(memory["preview_len"], 0);
+    assert_eq!(memory["preview_base64"], "");
+
+    let with_cap_resp = client
+        .request(
+            4,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_rollback",
+                "arguments": {
+                    "snapshot_id": snapshot_id,
+                    "include_restored_state": true,
+                    "caller_capabilities": [
+                        { "type": "nexus:memory_preview" }
+                    ]
+                }
+            }),
+        )
+        .await;
+    let with_cap = tool_json(&with_cap_resp);
+    let memory = &with_cap["restored_state"]["memory"];
+    assert_eq!(memory["preview_len"], 64);
+    let preview = memory["preview_base64"]
+        .as_str()
+        .expect("restored memory preview should be present");
+    let preview = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, preview)
+        .expect("memory preview should be valid base64");
+    assert_eq!(&preview[..4], b"base");
 }
 
 #[tokio::test]

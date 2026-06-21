@@ -587,6 +587,7 @@ fn validate_capabilities(
             "mount_tmpfs" => {
                 required_path(raw, original_type, "path", errors).map(Capability::MountTmpfs)
             }
+            "memory_preview" | "nexus:memory_preview" => Some(Capability::MemoryPreview),
             "all" | "none" => {
                 // `Capability::All` and `Capability::None` are runtime sentinels,
                 // not valid profile entries. Allowing "all" in a profile would

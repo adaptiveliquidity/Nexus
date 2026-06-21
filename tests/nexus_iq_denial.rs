@@ -202,10 +202,7 @@ async fn allowlist_denial_skips_memory_recall() {
 
     assert_denied(&parsed);
     assert_eq!(parsed["memory_hits_count"], 0);
-    assert_eq!(
-        parsed["memory_evidence_ref"]["attestation"],
-        "Absent"
-    );
+    assert_eq!(parsed["memory_evidence_ref"]["attestation"], "Absent");
 
     let captured = server.captured_requests();
     let search_req = captured

@@ -364,10 +364,17 @@ async fn timeline_events_delivered_on_success() {
         parsed["proof_capsule_ref"].is_string(),
         "missing proof ref: {parsed}"
     );
-    let events = parsed["events"].as_array().expect("events should be an array");
-    assert!(!events.is_empty(), "events should be non-empty after successful exec");
+    let events = parsed["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        !events.is_empty(),
+        "events should be non-empty after successful exec"
+    );
 
-    server.wait_for_path("/api/v1/agents/agent-1/timeline", 1).await;
+    server
+        .wait_for_path("/api/v1/agents/agent-1/timeline", 1)
+        .await;
     let captured = server.captured.lock().unwrap();
     let timeline_reqs: Vec<_> = captured
         .iter()
@@ -455,10 +462,11 @@ async fn timeline_events_include_proof_ref() {
         .expect("proof_capsule_ref should be present")
         .to_string();
 
-    let events = parsed["events"].as_array().expect("events should be an array");
+    let events = parsed["events"]
+        .as_array()
+        .expect("events should be an array");
     let proof_event = events.iter().find(|event| {
-        event["kind"] == "proof_capsule_emitted"
-            && event["capsule_id"].as_str() == Some(&proof_ref)
+        event["kind"] == "proof_capsule_emitted" && event["capsule_id"].as_str() == Some(&proof_ref)
     });
     assert!(
         proof_event.is_some(),
@@ -488,8 +496,13 @@ async fn timeline_attested_mode_degrades_on_failure() {
         parsed["proof_capsule_ref"].is_string(),
         "proof capsule must be present despite timeline degradation: {parsed}"
     );
-    let events = parsed["events"].as_array().expect("events should be an array");
-    assert!(!events.is_empty(), "events should be present despite timeline degradation");
+    let events = parsed["events"]
+        .as_array()
+        .expect("events should be an array");
+    assert!(
+        !events.is_empty(),
+        "events should be present despite timeline degradation"
+    );
     assert_eq!(parsed["timeline_status"], "required_but_failed");
 }
 
@@ -520,7 +533,9 @@ async fn timeline_events_have_correct_agent_id() {
         "missing proof ref: {parsed}"
     );
 
-    server.wait_for_path("/api/v1/agents/agent-1/timeline", 1).await;
+    server
+        .wait_for_path("/api/v1/agents/agent-1/timeline", 1)
+        .await;
     let captured = server.captured.lock().unwrap();
     let timeline_req = captured
         .iter()
