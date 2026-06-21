@@ -176,3 +176,44 @@ async fn denial_still_posts_timeline() {
     assert_eq!(body["event_type"], "capability_denied");
     assert_eq!(body["session_id"], "session-1");
 }
+
+#[tokio::test]
+async fn allowlist_denial_skips_memory_recall() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[{"id":"mem-1","content":"some context","score":0.95}]}"#,
+        200,
+    ) else {
+        return;
+    };
+    let mut client = McpClient::spawn_with_extra_env(
+        Some(server.base_url()),
+        None,
+        [("NEXUS_IQ_ALLOWLIST", json!(["some_other_tool"]).to_string())],
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let mut args = iq_args_stub();
+    args["tool_name"] = json!("blocked_tool");
+    args["memory_query"] = json!("recall memory query");
+
+    let parsed = call_nexus_iq_execute(&mut client, args).await;
+
+    assert_denied(&parsed);
+    assert_eq!(parsed["memory_hits_count"], 0);
+    assert_eq!(
+        parsed["memory_evidence_ref"]["attestation"],
+        "Absent"
+    );
+
+    let captured = server.captured_requests();
+    let search_req = captured
+        .iter()
+        .find(|request| request.path.contains("search"));
+    assert!(
+        search_req.is_none(),
+        "Expected no memory search requests to be made, but found: {:?}",
+        search_req
+    );
+}
