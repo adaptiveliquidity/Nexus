@@ -364,6 +364,7 @@ pub struct NexusMcpServer {
     hypervisor: Arc<NexusHypervisor>,
     wasm_module_dirs: Arc<Vec<PathBuf>>,
     capability_allowlist: Arc<Option<Vec<Capability>>>,
+    #[cfg_attr(not(feature = "aeon-memory"), allow(dead_code))]
     nexus_iq_allowlist: Arc<Option<Vec<String>>>,
     capability_profile: Option<Arc<CapabilityProfileManifest>>,
 }
@@ -890,6 +891,7 @@ impl NexusMcpServer {
         let memory_client = if params.memory_query.is_some() {
             aeon_config
                 .as_ref()
+                .filter(|c| c.hmac_key.is_some())
                 .and_then(nexus::aeon::AeonMemoryClient::from_enabled_config)
         } else {
             None
@@ -918,7 +920,7 @@ impl NexusMcpServer {
             _ => None,
         };
 
-        if let Some(allowlist) = self.nexus_iq_allowlist.as_ref() {
+        if let Some(allowlist) = (*self.nexus_iq_allowlist).as_ref() {
             if !allowlist.iter().any(|allowed| allowed == &params.tool_name) {
                 return self
                     .nexus_iq_denial_response(NexusIqDenialContext {
