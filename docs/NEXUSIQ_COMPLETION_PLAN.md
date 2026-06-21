@@ -32,9 +32,9 @@ verified against the real tree at `origin/main` (`d8c378c`).
 | 7 | Full-loop integration test suite (stateful mock AEON) | Nexus | pending |
 | 8 | CI hardening (no-secret scan, default-off API compat) | Nexus | pending |
 | 9 | Performance benchmarks (measured, not target) | Nexus | pending |
-| 10 | Security review + threat-model closure + SSRF/TOCTOU/preview fixes | Nexus | pending |
-| 11 | Operator UX: `nexus iq` CLI (run/verify/timeline/incident/replay) | Nexus | pending |
-| 12 | Release hardening v1.0 (gates, honest-language docs, tag) | both | pending |
+| 10 | Security review + threat-model closure + SSRF/TOCTOU/preview fixes | Nexus | complete |
+| 11 | Operator UX: `nexus iq` CLI (run/verify/timeline/incident/replay) | Nexus | complete |
+| 12 | Release hardening v1.0 (gates, honest-language docs, tag) | both | in progress |
 
 ## Per-phase exit criteria (anchors)
 

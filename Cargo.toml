@@ -1,6 +1,6 @@
 [package]
 name = "nexus"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Nexus AI Infrastructure Team"]
 description = "AI-Native WASM Snap-Rollback Sandbox for Agent Execution"
