@@ -239,6 +239,38 @@ impl MockAeonServer {
         })
     }
 
+
+    /// Accepts connections but never sends a response — forces the client's
+    /// NEXUS_AEON_TIMEOUT_MS to elapse, simulating a total AEON-IQ outage.
+    fn try_new_blackhole() -> Option<Self> {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping blackhole AEON mock test: {e}");
+                return None;
+            }
+            Err(e) => panic!("failed to bind loopback AEON mock: {e}"),
+        };
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_for_thread = Arc::clone(&shutdown);
+        std::thread::spawn(move || {
+            let mut held = Vec::new(); // keep sockets open but never reply
+            while !shutdown_for_thread.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => held.push(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Some(Self { addr, captured, shutdown })
+    }
+
     fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }
@@ -559,3 +591,114 @@ async fn verify_memory_evidence_cli_invalid() {
         "expected INVALID output, got: {stdout}"
     );
 }
+
+#[tokio::test]
+async fn nexus_iq_execute_recall_zero_hits_attested_no_hit() {
+    let Some(server) = MockAeonServer::try_new(200, r#"{"results":[]}"#, 200) else {
+        return;
+    };
+    let mut client = McpClient::spawn(&server, None).await;
+    initialize_client(&mut client).await;
+
+    let mut args = iq_args(&server);
+    args["memory_query"] = json!("nothing matches this query");
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_iq_execute", "arguments": args }),
+        )
+        .await;
+    let parsed = tool_json(&resp);
+
+    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
+    assert_eq!(parsed["memory_hits_count"], 0);
+    assert_eq!(
+        parsed["memory_evidence_ref"]["attestation"], "AttestedNoHit",
+        "expected AttestedNoHit: {parsed}"
+    );
+    assert_eq!(parsed["memory_evidence_ref"]["hit_count"], 0);
+    server.wait_for_path("/api/v1/memories/search", 1).await;
+}
+
+#[tokio::test]
+async fn nexus_iq_execute_recall_aeon_outage_degrades_gracefully() {
+    // AEON-IQ is unreachable: execution must still succeed with Degraded attestation.
+    let Some(server) = MockAeonServer::try_new_blackhole() else {
+        return;
+    };
+    let mut client = McpClient::spawn(&server, None).await;
+    initialize_client(&mut client).await;
+
+    let mut args = iq_args(&server);
+    args["memory_query"] = json!("recall under outage");
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_iq_execute", "arguments": args }),
+        )
+        .await;
+    let parsed = tool_json(&resp);
+
+    // Memory failure must not block execution — fail-open semantics.
+    assert_eq!(parsed["denied"], false, "outage must not deny: {parsed}");
+    assert!(
+        parsed["proof_capsule_ref"].is_string(),
+        "execution should succeed despite AEON outage: {parsed}"
+    );
+    assert_eq!(parsed["memory_hits_count"], 0);
+    assert_eq!(
+        parsed["memory_evidence_ref"]["attestation"], "Degraded",
+        "expected Degraded on AEON timeout: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn nexus_iq_execute_recall_two_hits_attested_with_recall() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[
+            {"id":"mem-1","content":"alpha context for tool","score":0.91},
+            {"id":"mem-2","content":"beta context for tool","score":0.82}
+        ]}"#,
+        200,
+    ) else {
+        return;
+    };
+    let mut client = McpClient::spawn(&server, None).await;
+    initialize_client(&mut client).await;
+
+    let mut args = iq_args(&server);
+    args["memory_query"] = json!("two hit recall");
+    args["memory_limit"] = json!(5);
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({ "name": "nexus_iq_execute", "arguments": args }),
+        )
+        .await;
+    let parsed = tool_json(&resp);
+
+    assert_eq!(parsed["denied"], false, "unexpected denial: {parsed}");
+    assert_eq!(parsed["memory_hits_count"], 2);
+    assert_eq!(
+        parsed["memory_evidence_ref"]["attestation"], "AttestedWithRecall",
+        "expected AttestedWithRecall: {parsed}"
+    );
+    assert_eq!(parsed["memory_evidence_ref"]["hit_count"], 2);
+    assert_eq!(
+        parsed["memory_evidence_ref"]["hit_digests"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        2,
+        "expected 2 hit digests: {parsed}"
+    );
+    server.wait_for_path("/api/v1/memories/search", 1).await;
+}
+

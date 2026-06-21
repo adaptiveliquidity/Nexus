@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **C2**: Downgrade self-issued memory evidence from `Attested` to `Advisory` in
+  `attach_memory_evidence_from_receipt` — the digest-only daemon path cannot verify hit count
+  or a counter-signed AEON-IQ receipt; `Attested` will be reinstated in P11 when
+  counter-signature verification is added.
+- **M1**: Add `MemoryRecall` capability variant with gate before `recall_memory_evidence_v1`
+  in the `nexus_iq_execute` MCP path — memory recall now requires an explicit
+  `nexus:memory_recall` capability token.
+
+### Fixed
+- **C1**: `nexus_iq_execute` MCP handler now correctly recognises
+  `AttestedNoHit` and `AttestedWithRecall` modes when extracting the memory digest
+  (match arm previously only covered `Attested`; `memory_digest` was always `None`
+  for the other two modes).
+- **H1**: `NexusIqExecuteResponse` now serialises `MemoryEvidenceForMcp` (omits raw query
+  text) instead of the full `MemoryEvidenceV1` — prevents caller-visible leakage of the
+  search query via MCP responses.
+
+### Added
+- **L2**: `nexus aeon verify-capsule` CLI subcommand validates that a `ProofCapsule` JSON
+  has consistent `memory_mode` and `memory_evidence` fields.
+
 ## [0.2.0] - 2026-06-20
 
 ### Added

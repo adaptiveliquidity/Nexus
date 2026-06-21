@@ -150,6 +150,11 @@ enum AeonCmd {
         /// Path to a MemoryEvidenceV1 JSON file.
         evidence_file: PathBuf,
     },
+    /// Verify that a ProofCapsule JSON has consistent memory_mode and memory_evidence.
+    VerifyCapsule {
+        /// Path to a ProofCapsule JSON file, or "-" for stdin.
+        capsule: PathBuf,
+    },
 }
 
 #[cfg(feature = "aeon-memory")]
@@ -288,6 +293,9 @@ fn run_aeon(cmd: AeonCmd) -> anyhow::Result<()> {
                 Err(error) => println!("INVALID: {error}"),
             }
         }
+        AeonCmd::VerifyCapsule { capsule } => {
+            run_iq_verify(&capsule)?;
+        }
     }
 
     Ok(())
@@ -338,6 +346,37 @@ fn run_iq_verify(capsule_file: &std::path::Path) -> anyhow::Result<()> {
 
     if capsule.limitations.is_empty() {
         warnings.push("limitations is empty".to_string());
+    }
+
+    // L2: validate memory_mode vs memory_evidence consistency
+    #[cfg(feature = "aeon-memory")]
+    {
+        use nexus::proof::schema::MemoryAttestationMode;
+        let mode = capsule.memory_mode.as_ref();
+        let evidence = capsule.memory_evidence.as_ref();
+        match (mode, evidence) {
+            (Some(MemoryAttestationMode::Attested), None)
+            | (Some(MemoryAttestationMode::AttestedNoHit), None)
+            | (Some(MemoryAttestationMode::AttestedWithRecall), None) => {
+                failure = Some(format!(
+                    "memory_mode is {:?} but memory_evidence is absent - capsule is inconsistent",
+                    mode.unwrap()
+                ));
+            }
+            (Some(MemoryAttestationMode::Absent), Some(_)) => {
+                failure = Some(
+                    "memory_mode is Absent but memory_evidence is present - capsule is inconsistent"
+                    .to_string()
+                );
+            }
+            (None, Some(_)) => {
+                failure = Some(
+                    "memory_mode is absent but memory_evidence is present - capsule is inconsistent"
+                    .to_string()
+                );
+            }
+            _ => {}
+        }
     }
 
     match load_proof_verify_key_from_env() {
@@ -1472,3 +1511,4 @@ mod tests {
         assert_eq!(flow, SessionFlow::Continue);
     }
 }
+

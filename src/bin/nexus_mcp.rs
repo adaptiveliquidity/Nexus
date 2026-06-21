@@ -667,10 +667,35 @@ struct AeonTimelineExecuteResponse {
 
 #[cfg(feature = "aeon-memory")]
 #[derive(Serialize)]
+struct MemoryEvidenceForMcp {
+    version: u8,
+    /// Query text is omitted from MCP responses; callers already know their query.
+    hit_count: usize,
+    hit_digests: Vec<String>,
+    attestation: nexus::proof::schema::MemoryAttestationMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capsule_digest: Option<String>,
+}
+
+#[cfg(feature = "aeon-memory")]
+impl From<nexus::aeon::MemoryEvidenceV1> for MemoryEvidenceForMcp {
+    fn from(e: nexus::aeon::MemoryEvidenceV1) -> Self {
+        Self {
+            version: e.version,
+            hit_count: e.hit_count,
+            hit_digests: e.hit_digests,
+            attestation: e.attestation,
+            capsule_digest: e.capsule_digest,
+        }
+    }
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Serialize)]
 struct NexusIqExecuteResponse {
     output: Option<ToolOutputResponse>,
     proof_capsule_ref: Option<String>,
-    memory_evidence_ref: nexus::aeon::MemoryEvidenceV1,
+    memory_evidence_ref: MemoryEvidenceForMcp,
     memory_hits_count: usize,
     timeline_status: nexus::aeon::TimelineDeliveryStatus,
     denial_negotiation: Option<DenialNegotiationResponse>,
@@ -696,7 +721,7 @@ struct NexusIqDenialContext {
     aeon_session_id: Option<String>,
     mode: nexus::aeon::TimelineDeliveryMode,
     attestation_mode: String,
-    memory_evidence_ref: nexus::aeon::MemoryEvidenceV1,
+    memory_evidence_ref: MemoryEvidenceForMcp,
     memory_hits_count: usize,
     reason: String,
 }
@@ -909,7 +934,7 @@ impl NexusMcpServer {
                             "",
                             &[],
                             nexus::proof::schema::MemoryAttestationMode::Absent,
-                        ),
+                        ).into(),
                         memory_hits_count: 0,
                         reason: format!(
                             "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
@@ -930,6 +955,38 @@ impl NexusMcpServer {
             None
         };
 
+        // M1: gate memory recall behind Capability::MemoryRecall before issuing the call
+        if params.memory_query.is_some() {
+            let mem_cap = vec![Capability::MemoryRecall];
+            if let Err(e) = self.iq_caller_tokens_for_required(&mem_cap) {
+                return Err(anyhow::anyhow!(
+                    "memory recall requires nexus:memory_recall capability: {e}"
+                ));
+            }
+        }
+
+        // M3: rate-limit memory recall per agent to prevent unbounded AEON-IQ load
+        if params.memory_query.is_some() {
+            use std::collections::{HashMap, VecDeque};
+            use std::sync::{Mutex, OnceLock};
+            use std::time::{Duration, Instant};
+            const RECALL_RATE_MAX: usize = 10;
+            const RECALL_RATE_WINDOW: Duration = Duration::from_secs(60);
+            static RECALL_RATE_LIMITER: OnceLock<Mutex<HashMap<String, VecDeque<Instant>>>> =
+                OnceLock::new();
+            let limiter = RECALL_RATE_LIMITER.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut map = limiter.lock().unwrap();
+            let now = Instant::now();
+            let bucket = map.entry(params.aeon_agent_id.clone()).or_default();
+            bucket.retain(|&t| now.duration_since(t) < RECALL_RATE_WINDOW);
+            if bucket.len() >= RECALL_RATE_MAX {
+                return Err(anyhow::anyhow!(
+                    "memory recall rate limit exceeded: max {RECALL_RATE_MAX} calls per {}s per agent",
+                    RECALL_RATE_WINDOW.as_secs()
+                ));
+            }
+            bucket.push_back(now);
+        }
         let memory_limit = params.memory_limit.unwrap_or(5);
         let recall = match params.memory_query.as_deref() {
             Some(query) => {
@@ -947,7 +1004,9 @@ impl NexusMcpServer {
         };
         let memory_hits_count = recall.hits.len();
         let memory_digest = match recall.evidence.attestation {
-            nexus::proof::schema::MemoryAttestationMode::Attested => {
+            nexus::proof::schema::MemoryAttestationMode::Attested
+            | nexus::proof::schema::MemoryAttestationMode::AttestedNoHit
+            | nexus::proof::schema::MemoryAttestationMode::AttestedWithRecall => {
                 recall.evidence.evidence_digest()
             }
             _ => None,
@@ -991,7 +1050,7 @@ impl NexusMcpServer {
                             aeon_session_id: params.aeon_session_id,
                             mode,
                             attestation_mode,
-                            memory_evidence_ref: recall.evidence,
+                            memory_evidence_ref: MemoryEvidenceForMcp::from(recall.evidence),
                             memory_hits_count,
                             reason: error.to_string(),
                         })
@@ -1012,9 +1071,9 @@ impl NexusMcpServer {
                     events.clone(),
                 )
                 .await;
-                let memory_evidence_ref = recall
+                let memory_evidence_ref = MemoryEvidenceForMcp::from(recall
                     .evidence
-                    .with_capsule_digest(Some(proof_capsule.capsule_id.to_string()));
+                    .with_capsule_digest(Some(proof_capsule.capsule_id.to_string())));
                 Ok(NexusIqExecuteResponse {
                     output: Some(ToolOutputResponse::from(output)),
                     proof_capsule_ref: Some(proof_capsule.capsule_id.to_string()),
@@ -1040,7 +1099,7 @@ impl NexusMcpServer {
                     aeon_session_id: params.aeon_session_id,
                     mode,
                     attestation_mode,
-                    memory_evidence_ref: recall.evidence,
+                    memory_evidence_ref: MemoryEvidenceForMcp::from(recall.evidence),
                     memory_hits_count,
                     reason: error.to_string(),
                 })
@@ -1990,6 +2049,10 @@ fn parse_iq_capability(spec: &str) -> Result<Capability> {
         "http_post" => parse_capability_from_str("http_post", value),
         "exec" | "execute" => parse_capability_from_str("execute", value),
         "tmpfs" | "mount_tmpfs" => parse_capability_from_str("mount_tmpfs", value),
+        "nexus" => match value {
+            Some("memory_recall") => Some(Capability::MemoryRecall),
+            _ => None,
+        },
         _ => None,
     }
     .ok_or_else(|| anyhow::anyhow!("unknown capability type: {kind}"))
