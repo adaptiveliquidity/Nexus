@@ -934,7 +934,7 @@ impl NexusMcpServer {
                             "",
                             &[],
                             nexus::proof::schema::MemoryAttestationMode::Absent,
-                        ),
+                        ).into(),
                         memory_hits_count: 0,
                         reason: format!(
                             "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
@@ -963,6 +963,29 @@ impl NexusMcpServer {
                     "memory recall requires nexus:memory_recall capability: {e}"
                 ));
             }
+        }
+
+        // M3: rate-limit memory recall per agent to prevent unbounded AEON-IQ load
+        if params.memory_query.is_some() {
+            use std::collections::{HashMap, VecDeque};
+            use std::sync::{Mutex, OnceLock};
+            use std::time::{Duration, Instant};
+            const RECALL_RATE_MAX: usize = 10;
+            const RECALL_RATE_WINDOW: Duration = Duration::from_secs(60);
+            static RECALL_RATE_LIMITER: OnceLock<Mutex<HashMap<String, VecDeque<Instant>>>> =
+                OnceLock::new();
+            let limiter = RECALL_RATE_LIMITER.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut map = limiter.lock().unwrap();
+            let now = Instant::now();
+            let bucket = map.entry(params.aeon_agent_id.clone()).or_default();
+            bucket.retain(|&t| now.duration_since(t) < RECALL_RATE_WINDOW);
+            if bucket.len() >= RECALL_RATE_MAX {
+                return Err(anyhow::anyhow!(
+                    "memory recall rate limit exceeded: max {RECALL_RATE_MAX} calls per {}s per agent",
+                    RECALL_RATE_WINDOW.as_secs()
+                ));
+            }
+            bucket.push_back(now);
         }
         let memory_limit = params.memory_limit.unwrap_or(5);
         let recall = match params.memory_query.as_deref() {

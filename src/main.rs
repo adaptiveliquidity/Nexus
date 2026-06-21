@@ -348,6 +348,37 @@ fn run_iq_verify(capsule_file: &std::path::Path) -> anyhow::Result<()> {
         warnings.push("limitations is empty".to_string());
     }
 
+    // L2: validate memory_mode vs memory_evidence consistency
+    #[cfg(feature = "aeon-memory")]
+    {
+        use nexus::proof::schema::MemoryAttestationMode;
+        let mode = capsule.memory_mode.as_ref();
+        let evidence = capsule.memory_evidence.as_ref();
+        match (mode, evidence) {
+            (Some(MemoryAttestationMode::Attested), None)
+            | (Some(MemoryAttestationMode::AttestedNoHit), None)
+            | (Some(MemoryAttestationMode::AttestedWithRecall), None) => {
+                failure = Some(format!(
+                    "memory_mode is {:?} but memory_evidence is absent - capsule is inconsistent",
+                    mode.unwrap()
+                ));
+            }
+            (Some(MemoryAttestationMode::Absent), Some(_)) => {
+                failure = Some(
+                    "memory_mode is Absent but memory_evidence is present - capsule is inconsistent"
+                    .to_string()
+                );
+            }
+            (None, Some(_)) => {
+                failure = Some(
+                    "memory_mode is absent but memory_evidence is present - capsule is inconsistent"
+                    .to_string()
+                );
+            }
+            _ => {}
+        }
+    }
+
     match load_proof_verify_key_from_env() {
         Ok(Some(vk)) => {
             if let Err(error) = nexus::proof::signing::verify_capsule(&capsule, &vk) {
@@ -1481,47 +1512,3 @@ mod tests {
     }
 }
 
-#[cfg(feature = "aeon-memory")]
-fn run_iq_verify(path: &std::path::Path) -> anyhow::Result<()> {
-    use nexus::proof::schema::{MemoryAttestationMode, ProofCapsule};
-
-    let json = if path == std::path::Path::new("-") {
-        let mut buf = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-        buf
-    } else {
-        std::fs::read_to_string(path)?
-    };
-
-    let capsule: ProofCapsule = serde_json::from_str(&json)
-        .map_err(|e| anyhow::anyhow!("failed to parse ProofCapsule: {e}"))?;
-
-    let mode = capsule.memory_mode.as_ref();
-    let evidence = capsule.memory_evidence.as_ref();
-
-    match (mode, evidence) {
-        (Some(MemoryAttestationMode::Attested), None)
-        | (Some(MemoryAttestationMode::AttestedNoHit), None)
-        | (Some(MemoryAttestationMode::AttestedWithRecall), None) => {
-            anyhow::bail!(
-                "memory_mode is {:?} but memory_evidence is absent ? capsule is inconsistent",
-                mode.unwrap()
-            );
-        }
-        (Some(MemoryAttestationMode::Absent), Some(_)) => {
-            anyhow::bail!(
-                "memory_mode is Absent but memory_evidence is present ? capsule is inconsistent"
-            );
-        }
-        (None, Some(_)) => {
-            anyhow::bail!(
-                "memory_mode is absent but memory_evidence is present ? capsule is inconsistent"
-            );
-        }
-        _ => {
-            println!("memory_mode consistency: OK ({:?})", mode);
-        }
-    }
-
-    Ok(())
-}
