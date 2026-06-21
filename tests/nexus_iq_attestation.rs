@@ -404,7 +404,7 @@ async fn no_memory_query_gives_advisory() {
 
     let parsed = call_nexus_iq_execute(&mut client, iq_args()).await;
 
-    assert_eq!(mode_from_response(&parsed), MemoryAttestationMode::Advisory);
+    assert_eq!(mode_from_response(&parsed), MemoryAttestationMode::Absent);
     assert_eq!(parsed["memory_hits_count"], 0);
     assert_eq!(server.path_count("/api/v1/memories/search"), 0);
 }

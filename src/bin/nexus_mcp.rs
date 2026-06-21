@@ -888,6 +888,7 @@ impl NexusMcpServer {
         let memory_client = if params.memory_query.is_some() {
             aeon_config
                 .as_ref()
+                .filter(|c| c.hmac_key.is_some())
                 .and_then(nexus::aeon::AeonMemoryClient::from_enabled_config)
         } else {
             None
