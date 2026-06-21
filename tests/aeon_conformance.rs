@@ -169,12 +169,22 @@ async fn honest_proof_modes_cover_absent_and_advisory() {
     // - Advisory: AEON correlation is present, but no attested evidence ref is
     //   embedded in this capsule.
     // - Degraded: evidence construction or verification fails.
-    // - Attested: an HMAC-bound MemoryEvidenceRef is embedded.
+    // - AttestedNoHit: an HMAC-bound MemoryEvidenceRef is embedded with no hits.
+    // - AttestedWithRecall: an HMAC-bound MemoryEvidenceRef is embedded with hits.
     let config = unreachable_aeon_config();
-    let (evidence, mode) =
+    let (absent_evidence, absent_mode) =
         nexus::aeon::build_memory_evidence_ref(&config, &[], Some("session-1".to_string()));
-    assert!(evidence.is_none());
-    assert_eq!(mode, MemoryAttestationMode::Absent);
+    assert!(absent_evidence.is_none());
+    assert_eq!(absent_mode, MemoryAttestationMode::Absent);
+
+    let configured = nexus::aeon::AeonConfig {
+        hmac_key: Some(vec![0x01, 0x02, 0x03, 0x04]),
+        ..config
+    };
+    let (zero_hit_evidence, zero_hit_mode) =
+        nexus::aeon::build_memory_evidence_ref(&configured, &[], Some("session-1".to_string()));
+    assert!(zero_hit_evidence.is_some());
+    assert_eq!(zero_hit_mode, MemoryAttestationMode::AttestedNoHit);
 
     let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
     let tool = ToolDefinition::new("aeon_advisory_noop".to_string(), trivial_wasm())

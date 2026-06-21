@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -89,6 +90,93 @@ pub struct MemoryHit {
     pub score: Option<f64>,
 }
 
+/// Versioned evidence bundle describing the memory recall inputs bound into a
+/// proof capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryEvidenceV1 {
+    pub version: u8,
+    pub query: String,
+    pub hit_count: usize,
+    pub hit_digests: Vec<String>,
+    pub attestation: crate::proof::schema::MemoryAttestationMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_digest: Option<String>,
+}
+
+impl MemoryEvidenceV1 {
+    pub const VERSION: u8 = 1;
+
+    pub fn new(
+        query: impl Into<String>,
+        hits: &[MemoryHit],
+        attestation: crate::proof::schema::MemoryAttestationMode,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            query: query.into(),
+            hit_count: hits.len(),
+            hit_digests: hits
+                .iter()
+                .map(|hit| sha256_hex(hit.content.as_bytes()))
+                .collect(),
+            attestation,
+            capsule_digest: None,
+        }
+    }
+
+    pub fn with_capsule_digest(mut self, capsule_digest: Option<String>) -> Self {
+        self.capsule_digest = capsule_digest;
+        self
+    }
+
+    pub fn evidence_digest(&self) -> Option<String> {
+        serde_json::to_vec(self)
+            .ok()
+            .map(|bytes| sha256_hex(bytes.as_slice()))
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        validate_memory_evidence_v1(self)
+    }
+}
+
+pub fn validate_memory_evidence_v1(evidence: &MemoryEvidenceV1) -> std::result::Result<(), String> {
+    if evidence.version != MemoryEvidenceV1::VERSION {
+        return Err(format!(
+            "unsupported version {}; expected {}",
+            evidence.version,
+            MemoryEvidenceV1::VERSION
+        ));
+    }
+    if evidence.hit_count != evidence.hit_digests.len() {
+        return Err(format!(
+            "hit_count {} does not match hit_digests length {}",
+            evidence.hit_count,
+            evidence.hit_digests.len()
+        ));
+    }
+    if evidence
+        .capsule_digest
+        .as_deref()
+        .is_some_and(|digest| digest.trim().is_empty())
+    {
+        return Err("capsule_digest must be non-empty when set".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryRecallEvidence {
+    pub hits: Vec<MemoryHit>,
+    pub evidence: MemoryEvidenceV1,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemorySearchOutcome {
+    pub hits: Vec<MemoryHit>,
+    pub attestation: crate::proof::schema::MemoryAttestationMode,
+}
+
 /// Fail-open HTTP client for the AEON-IQ management memory API.
 ///
 /// Memory is advisory in Nexus. Every method absorbs transport, timeout,
@@ -151,11 +239,23 @@ impl AeonMemoryClient {
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryHit> {
+        self.search_with_status(query, limit).await.hits
+    }
+
+    pub async fn search_with_status(&self, query: &str, limit: usize) -> MemorySearchOutcome {
+        use crate::proof::schema::MemoryAttestationMode;
+
         let Some(management_key) = self.management_key() else {
-            return Vec::new();
+            return MemorySearchOutcome {
+                hits: Vec::new(),
+                attestation: MemoryAttestationMode::Absent,
+            };
         };
         let Some(url) = self.url(&["api", "v1", "memories", "search"]) else {
-            return Vec::new();
+            return MemorySearchOutcome {
+                hits: Vec::new(),
+                attestation: MemoryAttestationMode::Degraded,
+            };
         };
 
         let body = SearchRequest {
@@ -166,7 +266,12 @@ impl AeonMemoryClient {
 
         let response = match self.post_json(url, management_key, &body).await {
             Some(response) => response,
-            None => return Vec::new(),
+            None => {
+                return MemorySearchOutcome {
+                    hits: Vec::new(),
+                    attestation: MemoryAttestationMode::Degraded,
+                };
+            }
         };
 
         if !is_success(response.status) {
@@ -175,26 +280,40 @@ impl AeonMemoryClient {
                 status = response.status,
                 "AEON-IQ memory search returned non-success status; failing open"
             );
-            return Vec::new();
+            return MemorySearchOutcome {
+                hits: Vec::new(),
+                attestation: MemoryAttestationMode::Degraded,
+            };
         }
 
         match serde_json::from_str::<SearchResponse>(&response.body) {
-            Ok(body) => body
-                .results
-                .into_iter()
-                .map(|hit| MemoryHit {
-                    id: hit.id.unwrap_or_default(),
-                    content: hit.content.unwrap_or_default(),
-                    score: hit.score.or(hit.distance).or(hit.similarity),
-                })
-                .collect(),
+            Ok(body) => {
+                let hits = body
+                    .results
+                    .into_iter()
+                    .map(|hit| MemoryHit {
+                        id: hit.id.unwrap_or_default(),
+                        content: hit.content.unwrap_or_default(),
+                        score: hit.score.or(hit.distance).or(hit.similarity),
+                    })
+                    .collect::<Vec<_>>();
+                let attestation = if hits.is_empty() {
+                    MemoryAttestationMode::AttestedNoHit
+                } else {
+                    MemoryAttestationMode::AttestedWithRecall
+                };
+                MemorySearchOutcome { hits, attestation }
+            }
             Err(e) => {
                 debug!(
                     target: "nexus.aeon",
                     error = %e,
                     "AEON-IQ memory search response parse failed; failing open"
                 );
-                Vec::new()
+                MemorySearchOutcome {
+                    hits: Vec::new(),
+                    attestation: MemoryAttestationMode::Degraded,
+                }
             }
         }
     }
@@ -932,7 +1051,14 @@ pub fn build_memory_evidence_ref(
 
     let evidence = mapping.memory_evidence(key, bridge_hits);
     match evidence.to_ref() {
-        Ok(evidence_ref) => (Some(evidence_ref), MemoryAttestationMode::Attested),
+        Ok(evidence_ref) => {
+            let mode = if hits.is_empty() {
+                MemoryAttestationMode::AttestedNoHit
+            } else {
+                MemoryAttestationMode::AttestedWithRecall
+            };
+            (Some(evidence_ref), mode)
+        }
         Err(e) => {
             debug!(
                 target: "nexus.aeon",
@@ -942,6 +1068,34 @@ pub fn build_memory_evidence_ref(
             (None, MemoryAttestationMode::Degraded)
         }
     }
+}
+
+pub async fn recall_memory_evidence_v1(
+    client: Option<&AeonMemoryClient>,
+    query: &str,
+    limit: usize,
+) -> MemoryRecallEvidence {
+    use crate::proof::schema::MemoryAttestationMode;
+
+    let Some(client) = client else {
+        return MemoryRecallEvidence {
+            hits: Vec::new(),
+            evidence: MemoryEvidenceV1::new(query, &[], MemoryAttestationMode::Absent),
+        };
+    };
+
+    let outcome = client.search_with_status(query, limit).await;
+    let evidence = MemoryEvidenceV1::new(query, &outcome.hits, outcome.attestation);
+    MemoryRecallEvidence {
+        hits: outcome.hits,
+        evidence,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 struct HttpResponse {
@@ -1330,6 +1484,10 @@ mod tests {
         }
     }
 
+    fn generated_test_management_key() -> String {
+        format!("test-mgmt-{}", uuid::Uuid::new_v4())
+    }
+
     impl TestHttpRequest {
         fn header(&self, name: &str) -> Option<&str> {
             self.headers
@@ -1552,12 +1710,12 @@ mod tests {
         }];
         let (evidence, mode) = super::build_memory_evidence_ref(&config, &hits, None);
         assert!(evidence.is_some());
-        assert_eq!(mode, MemoryAttestationMode::Attested);
+        assert_eq!(mode, MemoryAttestationMode::AttestedWithRecall);
         assert_eq!(evidence.unwrap().injected_count, 1);
     }
 
     #[test]
-    fn build_memory_evidence_ref_attested_with_no_hits() {
+    fn build_memory_evidence_ref_attested_no_hit_with_no_hits() {
         use crate::proof::schema::MemoryAttestationMode;
         let config = AeonConfig {
             hmac_key: Some(vec![0xde, 0xad, 0xbe, 0xef]),
@@ -1565,7 +1723,66 @@ mod tests {
         };
         let (evidence, mode) = super::build_memory_evidence_ref(&config, &[], None);
         assert!(evidence.is_some());
-        assert_eq!(mode, MemoryAttestationMode::Attested);
+        assert_eq!(mode, MemoryAttestationMode::AttestedNoHit);
         assert_eq!(evidence.unwrap().injected_count, 0);
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_attested_no_hit_on_zero_hits() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let management_key = generated_test_management_key();
+        let (client, _captured) = mock_client(200, r#"{"results":[]}"#, Some(&management_key));
+
+        let recall = super::recall_memory_evidence_v1(Some(&client), "nothing", 5).await;
+
+        assert!(recall.hits.is_empty());
+        assert_eq!(recall.evidence.hit_count, 0);
+        assert_eq!(
+            recall.evidence.attestation,
+            MemoryAttestationMode::AttestedNoHit
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_attested_with_recall_on_hits() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let management_key = generated_test_management_key();
+        let (client, _captured) = mock_client(
+            200,
+            r#"{"results":[{"id":"mem-1","content":"first","score":0.9},{"id":"mem-2","content":"second","score":0.8}]}"#,
+            Some(&management_key),
+        );
+
+        let recall = super::recall_memory_evidence_v1(Some(&client), "context", 5).await;
+
+        assert_eq!(recall.hits.len(), 2);
+        assert_eq!(recall.evidence.hit_count, 2);
+        assert_eq!(recall.evidence.hit_digests.len(), 2);
+        assert_eq!(
+            recall.evidence.attestation,
+            MemoryAttestationMode::AttestedWithRecall
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_degraded_on_error() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let management_key = generated_test_management_key();
+        let (client, _captured) = mock_client(500, r#"{"error":"boom"}"#, Some(&management_key));
+
+        let recall = super::recall_memory_evidence_v1(Some(&client), "context", 5).await;
+
+        assert!(recall.hits.is_empty());
+        assert_eq!(recall.evidence.attestation, MemoryAttestationMode::Degraded);
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_absent_on_no_config() {
+        use crate::proof::schema::MemoryAttestationMode;
+
+        let recall = super::recall_memory_evidence_v1(None, "context", 5).await;
+
+        assert!(recall.hits.is_empty());
+        assert_eq!(recall.evidence.attestation, MemoryAttestationMode::Absent);
     }
 }

@@ -308,6 +308,29 @@ pub struct AeonTimelineExecuteParams {
     pub aeon_session_id: Option<String>,
 }
 
+#[cfg(feature = "aeon-memory")]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NexusIqExecuteParams {
+    #[schemars(description = "Tool name recorded in the proof capsule")]
+    pub tool_name: String,
+    #[schemars(description = "Base64-encoded WASM module bytes")]
+    pub tool_wasm: String,
+    #[schemars(description = "JSON string passed to the WASM module")]
+    pub input: String,
+    #[schemars(description = "AEON-IQ agent id used to correlate recall and timeline events")]
+    pub aeon_agent_id: String,
+    #[schemars(description = "Optional AEON-IQ session id used to correlate the loop")]
+    pub aeon_session_id: Option<String>,
+    #[schemars(description = "Timeline delivery mode: advisory, attested, or offline")]
+    pub attestation_mode: Option<String>,
+    #[schemars(description = "Required capabilities in Nexus description form, e.g. read:/tmp")]
+    pub required_capabilities: Option<Vec<String>>,
+    #[schemars(description = "Optional AEON-IQ memory recall query")]
+    pub memory_query: Option<String>,
+    #[schemars(description = "Maximum memory hits to recall; defaults to 5")]
+    pub memory_limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 struct GetStatsResponse {
     pub telemetry: TelemetryStatsDto,
@@ -552,6 +575,19 @@ impl NexusMcpServer {
 #[tool_router(router = aeon_tool_router, vis = "pub")]
 impl NexusMcpServer {
     #[tool(
+        description = "Execute the canonical NexusIQ loop: recall memory, bind MemoryEvidenceV1, execute with proof and capability negotiation, forward timeline events, and return structured refs."
+    )]
+    async fn nexus_iq_execute(
+        &self,
+        Parameters(params): Parameters<NexusIqExecuteParams>,
+    ) -> String {
+        match self.do_nexus_iq_execute(params).await {
+            Ok(info) => serde_json::to_string_pretty(&info).unwrap_or_else(tool_error_response),
+            Err(e) => tool_anyhow_error_response(e),
+        }
+    }
+
+    #[tool(
         description = "Execute a WASM module with AEON-IQ correlation, return the proof capsule, and surface Nexus execution events for forwarding to POST /agents/:id/timeline."
     )]
     async fn nexus_aeon_execute_timeline(
@@ -617,6 +653,42 @@ struct AeonTimelineExecuteResponse {
     aeon_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     aeon_timeline_path: Option<String>,
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Serialize)]
+struct NexusIqExecuteResponse {
+    output: Option<ToolOutputResponse>,
+    proof_capsule_ref: Option<String>,
+    memory_evidence_ref: nexus::aeon::MemoryEvidenceV1,
+    memory_hits_count: usize,
+    timeline_status: nexus::aeon::TimelineDeliveryStatus,
+    denial_negotiation: Option<DenialNegotiationResponse>,
+    attestation_mode: String,
+    denied: bool,
+    events: Vec<nexus::daemon::NexusExecutionEvent>,
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Serialize)]
+struct DenialNegotiationResponse {
+    denied: bool,
+    negotiated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rounds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[cfg(feature = "aeon-memory")]
+struct NexusIqDenialContext {
+    aeon_agent_id: String,
+    aeon_session_id: Option<String>,
+    mode: nexus::aeon::TimelineDeliveryMode,
+    attestation_mode: String,
+    memory_evidence_ref: nexus::aeon::MemoryEvidenceV1,
+    memory_hits_count: usize,
+    reason: String,
 }
 
 impl From<ToolOutput> for ToolOutputResponse {
@@ -800,6 +872,144 @@ impl NexusMcpServer {
             #[cfg(feature = "aeon-memory")]
             events,
         })
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    async fn do_nexus_iq_execute(
+        &self,
+        params: NexusIqExecuteParams,
+    ) -> Result<NexusIqExecuteResponse> {
+        self.ensure_tool_allowed("nexus_iq_execute")?;
+        self.ensure_proof_enabled()?;
+
+        let mode = nexus::aeon::TimelineDeliveryMode::parse(params.attestation_mode.as_deref());
+        let attestation_mode = timeline_mode_label(mode).to_string();
+        let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+        let memory_client = if params.memory_query.is_some() {
+            aeon_config
+                .as_ref()
+                .and_then(nexus::aeon::AeonMemoryClient::from_enabled_config)
+        } else {
+            None
+        };
+
+        let memory_limit = params.memory_limit.unwrap_or(5);
+        let recall = match params.memory_query.as_deref() {
+            Some(query) => {
+                nexus::aeon::recall_memory_evidence_v1(memory_client.as_ref(), query, memory_limit)
+                    .await
+            }
+            None => nexus::aeon::MemoryRecallEvidence {
+                hits: Vec::new(),
+                evidence: nexus::aeon::MemoryEvidenceV1::new(
+                    "",
+                    &[],
+                    nexus::proof::schema::MemoryAttestationMode::Absent,
+                ),
+            },
+        };
+        let memory_hits_count = recall.hits.len();
+        let memory_digest = match recall.evidence.attestation {
+            nexus::proof::schema::MemoryAttestationMode::Attested => {
+                recall.evidence.evidence_digest()
+            }
+            _ => None,
+        };
+
+        use base64::Engine as _;
+        let wasm_bytes = base64::engine::general_purpose::STANDARD
+            .decode(params.tool_wasm.trim())
+            .map_err(|e| anyhow::anyhow!("tool_wasm is not valid base64: {e}"))?;
+        let input = serde_json::from_str::<serde_json::Value>(&params.input)
+            .map_err(|e| anyhow::anyhow!("input is not valid JSON: {e}"))?;
+        let required_capabilities = params
+            .required_capabilities
+            .unwrap_or_default()
+            .into_iter()
+            .map(|spec| parse_iq_capability(&spec))
+            .collect::<Result<Vec<_>>>()?;
+
+        let tool = ToolDefinition::new(params.tool_name, wasm_bytes)
+            .with_capabilities(required_capabilities.clone())
+            .with_aeon_context(
+                Some(params.aeon_agent_id.clone()),
+                params.aeon_session_id.clone(),
+            )
+            .with_aeon_memory_evidence_digest(memory_digest);
+
+        let execution = if required_capabilities.is_empty() {
+            self.hypervisor.execute_tool_proof(tool, input).await
+        } else {
+            match self.iq_caller_tokens_for_required(&required_capabilities) {
+                Ok(caller_tokens) => {
+                    self.hypervisor
+                        .execute_tool_proof_with_tokens(tool, input, &caller_tokens)
+                        .await
+                }
+                Err(error) => {
+                    return self
+                        .nexus_iq_denial_response(NexusIqDenialContext {
+                            aeon_agent_id: params.aeon_agent_id,
+                            aeon_session_id: params.aeon_session_id,
+                            mode,
+                            attestation_mode,
+                            memory_evidence_ref: recall.evidence,
+                            memory_hits_count,
+                            reason: error.to_string(),
+                        })
+                        .await;
+                }
+            }
+        };
+
+        match execution {
+            Ok((output, proof_capsule)) => {
+                let negotiation_rounds = proof_capsule.capabilities.negotiation_rounds;
+                let events = proof_events(&output, proof_capsule.capsule_id, negotiation_rounds);
+                let timeline_status = deliver_nexus_iq_timeline(
+                    aeon_config.as_ref(),
+                    params.aeon_agent_id,
+                    params.aeon_session_id,
+                    mode,
+                    events.clone(),
+                )
+                .await;
+                let memory_evidence_ref = recall
+                    .evidence
+                    .with_capsule_digest(Some(proof_capsule.capsule_id.to_string()));
+                Ok(NexusIqExecuteResponse {
+                    output: Some(ToolOutputResponse::from(output)),
+                    proof_capsule_ref: Some(proof_capsule.capsule_id.to_string()),
+                    memory_evidence_ref,
+                    memory_hits_count,
+                    timeline_status,
+                    denial_negotiation: negotiation_rounds.map(|rounds| {
+                        DenialNegotiationResponse {
+                            denied: false,
+                            negotiated: true,
+                            rounds: Some(rounds),
+                            reason: None,
+                        }
+                    }),
+                    attestation_mode,
+                    denied: false,
+                    events,
+                })
+            }
+            Err(error) if is_capability_denial(&error) => {
+                self.nexus_iq_denial_response(NexusIqDenialContext {
+                    aeon_agent_id: params.aeon_agent_id,
+                    aeon_session_id: params.aeon_session_id,
+                    mode,
+                    attestation_mode,
+                    memory_evidence_ref: recall.evidence,
+                    memory_hits_count,
+                    reason: error.to_string(),
+                })
+                .await
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     #[cfg(feature = "aeon-memory")]
@@ -1434,6 +1644,70 @@ impl NexusMcpServer {
         Ok(())
     }
 
+    #[cfg(feature = "aeon-memory")]
+    fn iq_caller_tokens_for_required(
+        &self,
+        capabilities: &[Capability],
+    ) -> Result<Vec<CapabilityToken>> {
+        if capabilities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let Some(allowlist) = self.capability_allowlist.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let mut tokens = Vec::new();
+        for capability in capabilities {
+            let (capability, validity_secs) = sanitize_token_request(capability.clone(), None)?;
+            if capability_allowed_by(allowlist, &capability) {
+                tokens.push(self.hypervisor.issue_token(
+                    capability,
+                    "mcp_nexus_iq_allowlist",
+                    Duration::from_secs(validity_secs),
+                )?);
+            }
+        }
+        self.check_tokens_against_active_profile(&tokens)?;
+        Ok(tokens)
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    async fn nexus_iq_denial_response(
+        &self,
+        context: NexusIqDenialContext,
+    ) -> Result<NexusIqExecuteResponse> {
+        let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+        let events = vec![nexus::daemon::NexusExecutionEvent::CapabilityDenied {
+            denied_category: "capability_denied".to_string(),
+        }];
+        let timeline_status = deliver_nexus_iq_timeline(
+            aeon_config.as_ref(),
+            context.aeon_agent_id,
+            context.aeon_session_id,
+            context.mode,
+            events.clone(),
+        )
+        .await;
+
+        Ok(NexusIqExecuteResponse {
+            output: None,
+            proof_capsule_ref: None,
+            memory_evidence_ref: context.memory_evidence_ref,
+            memory_hits_count: context.memory_hits_count,
+            timeline_status,
+            denial_negotiation: Some(DenialNegotiationResponse {
+                denied: true,
+                negotiated: false,
+                rounds: None,
+                reason: Some(context.reason),
+            }),
+            attestation_mode: context.attestation_mode,
+            denied: true,
+            events,
+        })
+    }
+
     /// Deny a tool call when the active profile's `[mcp].tool_allowlist` excludes it.
     fn ensure_tool_allowed(&self, tool: &str) -> Result<()> {
         let Some(profile) = self.capability_profile.as_deref() else {
@@ -1575,6 +1849,80 @@ fn proof_events(
     events.push(nexus::daemon::NexusExecutionEvent::ProofCapsuleEmitted { capsule_id });
 
     events
+}
+
+#[cfg(feature = "aeon-memory")]
+async fn deliver_nexus_iq_timeline(
+    config: Option<&nexus::aeon::AeonConfig>,
+    agent_id: String,
+    session_id: Option<String>,
+    mode: nexus::aeon::TimelineDeliveryMode,
+    events: Vec<nexus::daemon::NexusExecutionEvent>,
+) -> nexus::aeon::TimelineDeliveryStatus {
+    let Some(sink) = config
+        .and_then(nexus::aeon::AeonTimelineSink::from_enabled_config)
+        .map(|sink| sink.with_mode(mode))
+    else {
+        return match mode {
+            nexus::aeon::TimelineDeliveryMode::Attested => {
+                nexus::aeon::TimelineDeliveryStatus::RequiredButFailed
+            }
+            nexus::aeon::TimelineDeliveryMode::Advisory
+            | nexus::aeon::TimelineDeliveryMode::Offline => {
+                nexus::aeon::TimelineDeliveryStatus::FailedOpen
+            }
+        };
+    };
+
+    if matches!(mode, nexus::aeon::TimelineDeliveryMode::Attested) {
+        return sink
+            .deliver(&agent_id, session_id.as_deref(), &events)
+            .await;
+    }
+
+    tokio::spawn(async move {
+        let _ = sink
+            .deliver(&agent_id, session_id.as_deref(), &events)
+            .await;
+    });
+    nexus::aeon::TimelineDeliveryStatus::Queued
+}
+
+#[cfg(feature = "aeon-memory")]
+fn timeline_mode_label(mode: nexus::aeon::TimelineDeliveryMode) -> &'static str {
+    match mode {
+        nexus::aeon::TimelineDeliveryMode::Advisory => "advisory",
+        nexus::aeon::TimelineDeliveryMode::Attested => "attested",
+        nexus::aeon::TimelineDeliveryMode::Offline => "offline",
+    }
+}
+
+#[cfg(feature = "aeon-memory")]
+fn parse_iq_capability(spec: &str) -> Result<Capability> {
+    if let Ok(value) = serde_json::from_str::<CapabilitySpec>(spec) {
+        return parse_capability(&value);
+    }
+
+    let (kind, value) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid capability '{spec}'; expected kind:value"))?;
+    let value = Some(value);
+    match kind {
+        "read" | "read_file" => parse_capability_from_str("read_file", value),
+        "write" | "write_file" => parse_capability_from_str("write_file", value),
+        "list" | "list_dir" => parse_capability_from_str("list_dir", value),
+        "http_get" => parse_capability_from_str("http_get", value),
+        "http_post" => parse_capability_from_str("http_post", value),
+        "exec" | "execute" => parse_capability_from_str("execute", value),
+        "tmpfs" | "mount_tmpfs" => parse_capability_from_str("mount_tmpfs", value),
+        _ => None,
+    }
+    .ok_or_else(|| anyhow::anyhow!("unknown capability type: {kind}"))
+}
+
+#[cfg(feature = "aeon-memory")]
+fn is_capability_denial(error: &NexusError) -> bool {
+    matches!(error, NexusError::CapabilityDenied(_))
 }
 
 fn failure_mode_from_category(category: &str) -> anyhow::Result<FailureMode> {
@@ -1925,7 +2273,11 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Nexus MCP server");
 
-    let config = HypervisorConfig::default();
+    let config = HypervisorConfig {
+        #[cfg(feature = "aeon-memory")]
+        aeon_config: nexus::aeon::AeonConfig::from_env().ok(),
+        ..HypervisorConfig::default()
+    };
     let hypervisor = Arc::new(NexusHypervisor::new(config)?);
 
     let server = NexusMcpServer::new(hypervisor)?;

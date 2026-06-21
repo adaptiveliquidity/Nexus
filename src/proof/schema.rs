@@ -148,6 +148,10 @@ pub enum MemoryAttestationMode {
     Advisory,
     /// Memory was consulted and evidence is cryptographically attested.
     Attested,
+    /// Memory was queried, an HMAC key was present, and zero hits were found.
+    AttestedNoHit,
+    /// Memory was queried, an HMAC key was present, and hits were found.
+    AttestedWithRecall,
     /// Memory was consulted but the evidence could not be fully attested.
     Degraded,
     /// Memory sidecar is not configured; no HMAC key present.

@@ -1,0 +1,48 @@
+{
+  "schema": "nexusiq-baseline/v1",
+  "created": "2026-06-20T00:00:00Z",
+  "plan": "docs/NEXUSIQ_COMPLETION_PLAN.md",
+  "repos": {
+    "nexus": {
+      "sha": "64d3ebefe45ae8f7471b9340b7d13b619990cea5",
+      "version": "0.2.0",
+      "branch": "feat/nexusiq-batchB",
+      "cargo_lock_sha256": "c24e3a35fa31ee29cfa091e6ddd8f765be47c99ea1a10f3a34de28267729bffe3"
+    },
+    "aeon_iq": {
+      "sha": "ea5ce0074a5b",
+      "note": "partial SHA — full SHA from gh api repos/adaptiveliquidity/AEON-IQ/commits/main"
+    }
+  },
+  "features": {
+    "default": [],
+    "aeon_memory": ["aeon-memory"],
+    "ci_required": "--features aeon-memory --locked"
+  },
+  "phases_complete": ["P0", "P1", "P1b", "P2", "P3", "P4"],
+  "phases_in_progress": ["P5"],
+  "phases_pending": ["P6", "P7", "P8", "P9", "P10", "P11", "P12"],
+  "merged_prs": [
+    {"pr": 121, "title": "Phase 1 proof-capsule honesty hardening + adopt NexusIQ completion plan", "phases": ["P1"]},
+    {"pr": 122, "title": "Batch A — AeonTimelineSink (P2), daemon proof path (P3), CI aeon-memory gate (P1b)", "phases": ["P1b", "P2", "P3"]}
+  ],
+  "gaps": [
+    "P5: AttestedNoHit + AttestedWithRecall enum variants not yet in MemoryAttestationMode",
+    "P6: AEON-IQ timeline schema v2 (branch model, digest chain) — AEON-IQ repo",
+    "P7: Full-loop integration test suite (stateful mock AEON) — tests/nexus_iq_mcp.rs started",
+    "P8: no-secret scan CI job + default-off API-shape test",
+    "P9: Performance benchmarks (p50/p95/p99 for recall, execution, proof, forwarding)",
+    "P10: SSRF egress filter, token TOCTOU re-check, preview_base64 permission gate",
+    "P11: nexus iq CLI (run/verify/timeline/incident/replay subcommands)",
+    "P12: Release hardening v1.0 — honest-language docs, final gate sweep, tag"
+  ],
+  "test_commands": {
+    "default_build": "cargo test --locked",
+    "aeon_memory_build": "cargo test --features aeon-memory --locked",
+    "clippy": "cargo clippy --features aeon-memory --locked -- -D warnings",
+    "integration": "cargo test --features aeon-memory --test nexus_iq_mcp --locked"
+  },
+  "bench_commands": {
+    "placeholder": "cargo bench --features aeon-memory (no bench targets yet — P9)"
+  }
+}
