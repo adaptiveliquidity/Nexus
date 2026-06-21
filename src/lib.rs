@@ -18,7 +18,10 @@ pub mod telemetry;
 
 // Re-export commonly used types
 #[cfg(feature = "aeon-memory")]
-pub use aeon::{AeonConfig, AeonMemoryClient, MemoryHit};
+pub use aeon::{
+    AeonConfig, AeonMemoryClient, AeonTimelineSink, MemoryHit, TimelineDeliveryMode,
+    TimelineDeliveryStatus, TimelineReplayReport,
+};
 pub use error::{NexusError, Result};
 pub use hypervisor::{
     fork_and_race, BranchOutcome, FailureMode, HypervisorConfig, NexusHypervisor, RecoveryConfig,

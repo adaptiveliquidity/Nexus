@@ -94,6 +94,11 @@ enum Commands {
     /// Validate capability profile manifests.
     #[command(subcommand)]
     Profile(ProfileCmd),
+
+    /// AEON-IQ integration utilities.
+    #[cfg(feature = "aeon-memory")]
+    #[command(subcommand)]
+    Aeon(AeonCmd),
 }
 
 #[derive(Subcommand)]
@@ -117,6 +122,20 @@ enum ProfileCmd {
     Validate {
         /// Path to a capability profile TOML file.
         path: PathBuf,
+    },
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Subcommand)]
+enum AeonCmd {
+    /// Replay locally spooled AEON-IQ timeline events.
+    ReplayEvents {
+        /// AEON-IQ agent id whose spooled events should be replayed.
+        #[arg(long)]
+        agent_id: String,
+        /// Optional RFC3339 lower bound for spooled event creation time.
+        #[arg(long)]
+        since: Option<String>,
     },
 }
 
@@ -167,6 +186,39 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Profile(cmd) => {
             run_profile(cmd)?;
+        }
+        #[cfg(feature = "aeon-memory")]
+        Commands::Aeon(cmd) => {
+            run_aeon(cmd)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_aeon(cmd: AeonCmd) -> anyhow::Result<()> {
+    match cmd {
+        AeonCmd::ReplayEvents { agent_id, since } => {
+            let since = match since.as_deref() {
+                Some(value) => {
+                    Some(chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc))
+                }
+                None => None,
+            };
+            let Some(sink) = nexus::aeon::AeonConfig::from_env()
+                .ok()
+                .and_then(|config| nexus::aeon::AeonTimelineSink::from_enabled_config(&config))
+            else {
+                println!("timeline replay skipped: AEON-IQ sink is not configured");
+                return Ok(());
+            };
+            let rt = tokio::runtime::Runtime::new()?;
+            let report = rt.block_on(sink.replay_spooled_events(&agent_id, since));
+            println!(
+                "timeline replay: delivered={}, failed={}, skipped={}",
+                report.delivered, report.failed, report.skipped
+            );
         }
     }
 
@@ -295,11 +347,7 @@ fn run_via_daemon(
             input: serde_json::json!({}),
             auth_token: std::env::var("NEXUS_AGENTD_AUTH_TOKEN").ok(),
             #[cfg(feature = "aeon-memory")]
-            aeon_agent_id: None,
-            #[cfg(feature = "aeon-memory")]
-            aeon_session_id: None,
-            #[cfg(feature = "aeon-memory")]
-            aeon_memory_evidence_digest: None,
+            aeon: Box::default(),
         };
         write_frame(&mut wr, &req).await?;
         let resp: DaemonResponse = read_frame(&mut rd).await?;

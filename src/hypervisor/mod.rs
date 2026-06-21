@@ -67,6 +67,12 @@ pub struct ToolDefinition {
     #[cfg(feature = "aeon-memory")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aeon_session_id: Option<String>,
+    /// Precomputed memory-evidence digest supplied by an AEON-IQ recall path.
+    /// When proof mode is enabled, this is bound into the signed capsule before
+    /// signing so daemon callers cannot pass evidence that is silently ignored.
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_memory_evidence_digest: Option<String>,
 }
 
 impl ToolDefinition {
@@ -81,6 +87,8 @@ impl ToolDefinition {
             aeon_agent_id: None,
             #[cfg(feature = "aeon-memory")]
             aeon_session_id: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: None,
         }
     }
 
@@ -105,6 +113,12 @@ impl ToolDefinition {
     ) -> Self {
         self.aeon_agent_id = agent_id;
         self.aeon_session_id = session_id;
+        self
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    pub fn with_aeon_memory_evidence_digest(mut self, digest: Option<String>) -> Self {
+        self.aeon_memory_evidence_digest = digest;
         self
     }
 }
@@ -666,6 +680,8 @@ impl NexusHypervisor {
             aeon_session_id: tool.aeon_session_id.clone(),
             #[cfg(feature = "aeon-memory")]
             negotiation_rounds: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: tool.aeon_memory_evidence_digest.clone(),
         };
 
         let capsule = self.capsule_from_receipt(&receipt, &output, &input_bytes);
@@ -785,6 +801,7 @@ impl NexusHypervisor {
             aeon_agent_id: tool.aeon_agent_id.clone(),
             aeon_session_id: tool.aeon_session_id.clone(),
             negotiation_rounds,
+            aeon_memory_evidence_digest: tool.aeon_memory_evidence_digest.clone(),
         };
 
         let capsule = if negotiation_rounds.is_some() {
@@ -876,12 +893,15 @@ impl NexusHypervisor {
         output: &ToolOutput,
         input_bytes: &[u8],
     ) -> ProofCapsule {
-        let capsule = Self::unsigned_capsule_from_receipt(
+        #[cfg_attr(not(feature = "aeon-memory"), allow(unused_mut))]
+        let mut capsule = Self::unsigned_capsule_from_receipt(
             receipt,
             output,
             input_bytes,
             &self.config.proof_hmac_key,
         );
+        #[cfg(feature = "aeon-memory")]
+        self.attach_memory_evidence_from_receipt(&mut capsule, receipt);
         sign_capsule(capsule, &self.proof_signing_key)
     }
 
@@ -900,9 +920,71 @@ impl NexusHypervisor {
             input_bytes,
             &self.config.proof_hmac_key,
         );
-        capsule.memory_evidence = memory_evidence;
-        capsule.memory_mode = memory_mode;
+        let attached_from_receipt = self.attach_memory_evidence_from_receipt(&mut capsule, receipt);
+        if memory_evidence.is_some() {
+            capsule.memory_evidence = memory_evidence;
+            capsule.memory_mode = memory_mode;
+        } else if !attached_from_receipt {
+            capsule.memory_mode = memory_mode;
+        }
         sign_capsule(capsule, &self.proof_signing_key)
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn attach_memory_evidence_from_receipt(
+        &self,
+        capsule: &mut ProofCapsule,
+        receipt: &ExecutionReceipt,
+    ) -> bool {
+        if receipt.aeon_memory_evidence_digest.is_none() {
+            return false;
+        }
+
+        match self.memory_evidence_ref_from_digest(receipt) {
+            Some(evidence) => {
+                capsule.memory_evidence = Some(evidence);
+                capsule.memory_mode = Some(crate::proof::schema::MemoryAttestationMode::Attested);
+            }
+            None => {
+                capsule.memory_mode = Some(crate::proof::schema::MemoryAttestationMode::Degraded);
+            }
+        }
+
+        true
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn memory_evidence_ref_from_digest(
+        &self,
+        receipt: &ExecutionReceipt,
+    ) -> Option<aeon_nexus_bridge::MemoryEvidenceRef> {
+        let digest = receipt.aeon_memory_evidence_digest.as_deref()?.trim();
+        if !is_hex_digest(digest) {
+            return None;
+        }
+
+        let config = self.config.aeon_config.as_ref()?;
+        let hmac_key = config.hmac_key.as_deref()?;
+        let agent_id = receipt
+            .aeon_agent_id
+            .as_deref()
+            .unwrap_or(config.agent_id.as_str());
+        let session_id = receipt
+            .aeon_session_id
+            .clone()
+            .or_else(|| config.session_id.clone());
+
+        Some(aeon_nexus_bridge::MemoryEvidenceRef {
+            evidence_version: aeon_nexus_bridge::MEMORY_EVIDENCE_VERSION.to_string(),
+            digest: aeon_nexus_bridge::TypedDigest {
+                algorithm: aeon_nexus_bridge::HMAC_SHA256_ALGORITHM.to_string(),
+                value: digest.to_ascii_lowercase(),
+                public_recomputable: false,
+            },
+            agent_handle: aeon_nexus_bridge::hmac_agent_id(hmac_key, agent_id),
+            session_id,
+            injected_count: 0,
+        })
     }
 
     fn unsigned_capsule_from_receipt(
@@ -1917,6 +1999,13 @@ impl NexusHypervisor {
     }
 }
 
+#[cfg(feature = "aeon-memory")]
+fn is_hex_digest(value: &str) -> bool {
+    !value.is_empty()
+        && value.len().is_multiple_of(2)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1983,6 +2072,8 @@ mod tests {
             aeon_session_id: None,
             #[cfg(feature = "aeon-memory")]
             negotiation_rounds: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: None,
         }
     }
 
