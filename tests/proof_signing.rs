@@ -2,9 +2,9 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use nexus::proof::{
-    sign_capsule, verify_capsule, CapabilityEvidence, InputIdentity, PolicyEnforcementMode,
-    PolicyProfileRef, ProofCapsule, ProofScorecard, ProofSigningConfig, ProofSubject,
-    RedactionReport, ToolIdentity, TypedDigest,
+    default_proof_capsule_limitations, sign_capsule, verify_capsule, CapabilityEvidence,
+    InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofScorecard,
+    ProofSigningConfig, ProofSubject, RedactionReport, ToolIdentity, TypedDigest,
 };
 use nexus::{HypervisorConfig, NexusHypervisor, ToolDefinition};
 use rand::rngs::OsRng;
@@ -43,7 +43,7 @@ fn sample_capsule() -> ProofCapsule {
             entrypoint: "_start".to_owned(),
         },
         input: InputIdentity {
-            digest: typed_digest("sha256", "input-digest", true),
+            digest: typed_digest("hmac-sha256", "input-hmac", false),
             media_type: "application/json".to_owned(),
             raw_included: false,
         },
@@ -64,12 +64,12 @@ fn sample_capsule() -> ProofCapsule {
         rollback: None,
         branches: None,
         redaction: RedactionReport {
-            hashed_fields: vec!["input.body".to_owned()],
+            hashed_fields: Vec::new(),
             truncated_fields: Vec::new(),
             removed_fields: Vec::new(),
-            hmac_fields: Vec::new(),
+            hmac_fields: vec!["input.digest".to_owned()],
         },
-        limitations: vec!["runtime attestation only".to_owned()],
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]
@@ -144,6 +144,15 @@ async fn ephemeral_proof_key_signs_and_verifies() {
 
 #[tokio::test]
 async fn proof_key_is_separate_from_capability_key() {
+    assert_signature_uses_proof_key_not_capability_key().await;
+}
+
+#[tokio::test]
+async fn test_signature_uses_proof_key_not_capability_key() {
+    assert_signature_uses_proof_key_not_capability_key().await;
+}
+
+async fn assert_signature_uses_proof_key_not_capability_key() {
     let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
     let capability_key_bytes: [u8; 32] = hypervisor.capability_public_key().try_into().unwrap();
     let capability_verifying_key = VerifyingKey::from_bytes(&capability_key_bytes).unwrap();

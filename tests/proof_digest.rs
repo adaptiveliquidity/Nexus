@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use nexus::proof::{
-    canonical_bytes, capsule_digest, digest_with_key, CapabilityEvidence, InputIdentity,
-    PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofHmacKey, ProofSubject,
-    RedactionReport, SignatureEnvelope, ToolIdentity, TypedDigest,
+    canonical_bytes, capsule_digest, default_proof_capsule_limitations, digest_with_key,
+    CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
+    ProofHmacKey, ProofSubject, RedactionReport, SignatureEnvelope, ToolIdentity, TypedDigest,
 };
 use uuid::Uuid;
 
@@ -74,7 +74,7 @@ fn sample_capsule(signature: Option<SignatureEnvelope>) -> ProofCapsule {
             removed_fields: Vec::new(),
             hmac_fields: vec!["input.digest".to_owned()],
         },
-        limitations: vec!["runtime attestation only".to_owned()],
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]

@@ -2,6 +2,27 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const DEFAULT_PROOF_CAPSULE_LIMITATIONS: &[&str] = &[
+    "runtime_attestation_only",
+    "does_not_prove_correct_execution",
+    "does_not_prove_absence_of_external_side_effects",
+    "does_not_prove_external_side_effects_absent",
+    "does_not_include_raw_snapshot_memory",
+    "does_not_guarantee_full_deterministic_replay",
+    "does_not_restore_stack_or_registers",
+    "execution_state_is_memory_globals_and_table_metadata",
+    "blocked_sync_wasi_io_cancellation_is_cooperative",
+    "trusts_nexus_runtime_and_host_boundary",
+    "proof_trusts_nexus_runtime_and_host_boundary",
+];
+
+pub fn default_proof_capsule_limitations() -> Vec<String> {
+    DEFAULT_PROOF_CAPSULE_LIMITATIONS
+        .iter()
+        .map(|limitation| (*limitation).to_owned())
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedDigest {
     pub algorithm: String,

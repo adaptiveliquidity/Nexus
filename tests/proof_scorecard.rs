@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use nexus::proof::{
-    CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
-    ProofScorecard, ProofSubject, RedactionReport, RollbackEvidence, ToolIdentity, TypedDigest,
+    default_proof_capsule_limitations, CapabilityEvidence, InputIdentity, PolicyEnforcementMode,
+    PolicyProfileRef, ProofCapsule, ProofScorecard, ProofSubject, RedactionReport,
+    RollbackEvidence, ToolIdentity, TypedDigest,
 };
 use uuid::Uuid;
 
@@ -62,9 +63,9 @@ fn sample_capsule() -> ProofCapsule {
             hashed_fields: Vec::new(),
             truncated_fields: Vec::new(),
             removed_fields: Vec::new(),
-            hmac_fields: Vec::new(),
+            hmac_fields: vec!["input.digest".to_owned()],
         },
-        limitations: Vec::new(),
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]
