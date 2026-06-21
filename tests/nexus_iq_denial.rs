@@ -163,7 +163,7 @@ async fn denial_still_posts_timeline() {
     let parsed = call_nexus_iq_execute(&mut client, args).await;
 
     assert_denied(&parsed);
-    assert_eq!(parsed["timeline_status"], "queued");
+    assert_eq!(parsed["timeline_status"], "fire_and_forget");
     server
         .wait_for_path("/api/v1/agents/agent-1/timeline", 1)
         .await;

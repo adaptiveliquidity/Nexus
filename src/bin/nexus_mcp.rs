@@ -1095,7 +1095,7 @@ impl NexusMcpServer {
                             .deliver(&agent_id, session_id.as_deref(), &events)
                             .await;
                     });
-                    Some(nexus::aeon::TimelineDeliveryStatus::Queued)
+                    Some(nexus::aeon::TimelineDeliveryStatus::FireAndForget)
                 }
                 None => Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen),
             }
@@ -1909,7 +1909,7 @@ async fn deliver_nexus_iq_timeline(
             .deliver(&agent_id, session_id.as_deref(), &events)
             .await;
     });
-    nexus::aeon::TimelineDeliveryStatus::Queued
+    nexus::aeon::TimelineDeliveryStatus::FireAndForget
 }
 
 #[cfg(feature = "aeon-memory")]
