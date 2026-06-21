@@ -378,7 +378,7 @@ async fn nexus_iq_execute_full_loop() {
         "AttestedWithRecall"
     );
     assert!(parsed["memory_evidence_ref"]["capsule_digest"].is_string());
-    assert_eq!(parsed["timeline_status"], "queued");
+    assert_eq!(parsed["timeline_status"], "fire_and_forget");
     server.wait_for_path("/api/v1/memories/search", 1).await;
     server
         .wait_for_path("/api/v1/agents/agent-1/timeline", 1)

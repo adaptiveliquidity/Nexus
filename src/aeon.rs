@@ -530,8 +530,8 @@ impl AeonMemoryClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineDeliveryStatus {
-    /// Delivery has been queued onto a non-blocking task or local spool.
-    Queued,
+    /// Fire-and-forget delivery; success is not guaranteed.
+    FireAndForget,
     /// All requested events were delivered.
     Delivered,
     /// Delivery failed in advisory mode; execution remains unaffected.
@@ -637,7 +637,7 @@ impl AeonTimelineSink {
 
         if matches!(self.mode, TimelineDeliveryMode::Offline) {
             return if self.spool_events(agent_id, session_id, events).await {
-                TimelineDeliveryStatus::Queued
+                TimelineDeliveryStatus::FireAndForget
             } else {
                 TimelineDeliveryStatus::FailedOpen
             };
@@ -1653,7 +1653,7 @@ mod tests {
         }];
 
         let queued = offline.deliver("agent-1", Some("session-1"), &event).await;
-        assert_eq!(queued, TimelineDeliveryStatus::Queued);
+        assert_eq!(queued, TimelineDeliveryStatus::FireAndForget);
 
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_for_responder = Arc::clone(&captured);
