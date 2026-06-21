@@ -288,6 +288,39 @@ fn run_aeon(cmd: AeonCmd) -> anyhow::Result<()> {
                 Err(error) => println!("INVALID: {error}"),
             }
         }
+        AeonCmd::VerifyMemoryEvidence {
+            capsule_id,
+            evidence_file,
+        } => {
+            let content = std::fs::read_to_string(&evidence_file)?;
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(value) => {
+                    let capsule_check = match capsule_id.as_deref() {
+                        Some(expected) => match value.get("capsule_id") {
+                            Some(actual) => match actual.as_str() {
+                                Some(actual) if actual == expected => Ok(()),
+                                Some(actual) => Err(format!(
+                                    "capsule_id mismatch: expected {expected}, found {actual}"
+                                )),
+                                None => Err("capsule_id must be a string when set".to_string()),
+                            },
+                            None => Ok(()),
+                        },
+                        None => Ok(()),
+                    };
+
+                    match capsule_check.and_then(|()| {
+                        serde_json::from_value::<nexus::aeon::MemoryEvidenceV1>(value)
+                            .map_err(|error| error.to_string())
+                            .and_then(|evidence| evidence.validate())
+                    }) {
+                        Ok(()) => println!("VALID"),
+                        Err(reason) => println!("INVALID: {reason}"),
+                    }
+                }
+                Err(error) => println!("INVALID: {error}"),
+            }
+        }
     }
 
     Ok(())

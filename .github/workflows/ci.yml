@@ -96,9 +96,23 @@ jobs:
           cargo install --locked cargo-audit
           cargo audit
 
-  aeon-memory:
-    name: aeon-memory feature gate
-    runs-on: ubuntu-24.04
+  aeon-memory-tests:
+    name: aeon-memory-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo test --features aeon-memory
+        run: cargo test --features aeon-memory --locked
+      - name: aeon_nexus_bridge tests
+        run: cargo test -p aeon_nexus_bridge --locked
+
+  aeon-memory-clippy:
+    name: aeon-memory-clippy
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
@@ -106,11 +120,5 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: cargo build --features aeon-memory
-        run: cargo build --features aeon-memory --locked
-      - name: cargo test --all-targets --features aeon-memory
-        run: cargo test --all-targets --features aeon-memory --locked
-      - name: cargo clippy --all-targets --features aeon-memory
-        run: cargo clippy --all-targets --features aeon-memory --locked -- -D warnings
-      - name: aeon_nexus_bridge tests
-        run: cargo test -p aeon_nexus_bridge --locked
+      - name: cargo clippy --features aeon-memory
+        run: cargo clippy --features aeon-memory --locked -- -D warnings

@@ -190,6 +190,77 @@ pub struct ProofCapsule {
     pub signature: Option<SignatureEnvelope>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProofCapsuleBuilder {
+    capsule: ProofCapsule,
+}
+
+impl ProofCapsuleBuilder {
+    pub fn new(
+        tool_name: impl Into<String>,
+        module_digest: TypedDigest,
+        input_digest: TypedDigest,
+    ) -> Self {
+        let tool_name = tool_name.into();
+        let now = Utc::now();
+        Self {
+            capsule: ProofCapsule {
+                version: "1".to_owned(),
+                capsule_id: Uuid::new_v4(),
+                subject: ProofSubject {
+                    run_id: Uuid::new_v4(),
+                    tool_name: tool_name.clone(),
+                    started_at: now,
+                    finished_at: now,
+                    duration_ms: 0,
+                },
+                tool: ToolIdentity {
+                    module_digest,
+                    module_name: tool_name.clone(),
+                    entrypoint: "_start".to_owned(),
+                },
+                input: InputIdentity {
+                    digest: input_digest,
+                    media_type: "application/json".to_owned(),
+                    raw_included: false,
+                },
+                policy: PolicyProfileRef {
+                    profile_digest: None,
+                    profile_name: None,
+                    mode: PolicyEnforcementMode::UnprofiledDev,
+                },
+                capabilities: CapabilityEvidence {
+                    required: Vec::new(),
+                    granted: Vec::new(),
+                    mismatch: None,
+                    #[cfg(feature = "aeon-memory")]
+                    negotiation_rounds: None,
+                },
+                snapshot: None,
+                failure: None,
+                rollback: None,
+                branches: None,
+                redaction: RedactionReport {
+                    hashed_fields: Vec::new(),
+                    truncated_fields: Vec::new(),
+                    removed_fields: Vec::new(),
+                    hmac_fields: vec!["input.digest".to_owned()],
+                },
+                limitations: default_proof_capsule_limitations(),
+                #[cfg(feature = "aeon-memory")]
+                memory_evidence: None,
+                #[cfg(feature = "aeon-memory")]
+                memory_mode: None,
+                signature: None,
+            },
+        }
+    }
+
+    pub fn build(self) -> ProofCapsule {
+        self.capsule
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofScorecard {
     pub capsule_id: Uuid,
