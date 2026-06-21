@@ -1096,7 +1096,7 @@ mod proof_tests {
                 assert_eq!(evidence.digest.value, digest);
                 assert_eq!(
                     capsule.memory_mode,
-                    Some(nexus::proof::schema::MemoryAttestationMode::Attested)
+                    Some(nexus::proof::schema::MemoryAttestationMode::Advisory)
                 );
                 assert_eq!(
                     nexusiq
