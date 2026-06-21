@@ -31,6 +31,8 @@ pub enum Capability {
     MountTmpfs(PathBuf),
     /// Read a raw restored WASM memory preview from MCP rollback responses
     MemoryPreview,
+    /// Access AEON memory recall
+    MemoryRecall,
     /// All capabilities (admin)
     All,
     /// No capability (deny all)
@@ -79,6 +81,7 @@ impl Capability {
             (Capability::ExecuteBinary(p1), Capability::ExecuteBinary(p2)) => p1 == p2,
             (Capability::MountTmpfs(p1), Capability::MountTmpfs(p2)) => p1 == p2,
             (Capability::MemoryPreview, Capability::MemoryPreview) => true,
+            (Capability::MemoryRecall, Capability::MemoryRecall) => true,
 
             // Default deny
             _ => false,
@@ -109,6 +112,7 @@ impl Capability {
             Capability::ExecuteBinary(p) => format!("exec:{}", p.display()),
             Capability::MountTmpfs(p) => format!("tmpfs:{}", p.display()),
             Capability::MemoryPreview => "nexus:memory_preview".to_string(),
+            Capability::MemoryRecall => "nexus:memory_recall".to_string(),
             Capability::All => "all".to_string(),
             Capability::None => "none".to_string(),
         }

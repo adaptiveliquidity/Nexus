@@ -943,7 +943,9 @@ impl NexusHypervisor {
         match self.memory_evidence_ref_from_digest(receipt) {
             Some(evidence) => {
                 capsule.memory_evidence = Some(evidence);
-                capsule.memory_mode = Some(crate::proof::schema::MemoryAttestationMode::Attested);
+                // C2: digest-only path cannot verify hit count or counter-signed receipt;
+                // Advisory correctly reflects that AEON context was present without full attestation.
+                capsule.memory_mode = Some(crate::proof::schema::MemoryAttestationMode::Advisory);
             }
             None => {
                 capsule.memory_mode = Some(crate::proof::schema::MemoryAttestationMode::Degraded);
