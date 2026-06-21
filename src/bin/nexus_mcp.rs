@@ -364,6 +364,7 @@ pub struct NexusMcpServer {
     hypervisor: Arc<NexusHypervisor>,
     wasm_module_dirs: Arc<Vec<PathBuf>>,
     capability_allowlist: Arc<Option<Vec<Capability>>>,
+    #[cfg_attr(not(feature = "aeon-memory"), allow(dead_code))]
     nexus_iq_allowlist: Arc<Option<Vec<String>>>,
     capability_profile: Option<Arc<CapabilityProfileManifest>>,
 }
