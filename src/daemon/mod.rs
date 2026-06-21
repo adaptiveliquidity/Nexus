@@ -69,21 +69,9 @@ pub enum DaemonRequest {
         /// request value only; replay protection remains future work.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_token: Option<String>,
-        /// AEON-IQ tenant agent-id. Used to correlate this execution with an
-        /// AEON-IQ memory session. The raw id is never logged above `debug!`.
         #[cfg(feature = "aeon-memory")]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aeon_agent_id: Option<String>,
-        /// AEON-IQ session-id. Paired with `aeon_agent_id` to form the
-        /// `AgentSessionMapping` that anchors the proof-capsule namespace.
-        #[cfg(feature = "aeon-memory")]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aeon_session_id: Option<String>,
-        /// Pre-computed HMAC digest of the memory-evidence bundle, produced by
-        /// the AEON-IQ recall path before dispatch. Reserved for Phase 6+.
-        #[cfg(feature = "aeon-memory")]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aeon_memory_evidence_digest: Option<String>,
+        #[serde(default, flatten)]
+        aeon: Box<DaemonAeonExecuteOptions>,
     },
     /// Graceful shutdown. Server replies `Pong` then exits.
     Shutdown {
@@ -95,6 +83,42 @@ pub enum DaemonRequest {
     },
 }
 
+/// AEON-IQ proof/timeline request options flattened into
+/// `DaemonRequest::Execute`. Boxing this feature-only group preserves the old
+/// daemon request enum size in default builds and keeps feature clippy clean
+/// without changing the JSON wire shape.
+#[cfg(feature = "aeon-memory")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DaemonAeonExecuteOptions {
+    /// AEON-IQ tenant agent-id. Used to correlate this execution with an
+    /// AEON-IQ memory session. The raw id is never logged above `debug!`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_agent_id: Option<String>,
+    /// AEON-IQ session-id. Paired with `aeon_agent_id` to form the
+    /// `AgentSessionMapping` that anchors the proof-capsule namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_session_id: Option<String>,
+    /// Pre-computed HMAC digest of the memory-evidence bundle, produced by
+    /// the AEON-IQ recall path before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_memory_evidence_digest: Option<String>,
+    /// Capabilities required by this tool when proof mode is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_capabilities: Option<Vec<crate::security::Capability>>,
+    /// Opt into proof-producing daemon execution. Defaults to false so legacy
+    /// precompiled execution stays unchanged.
+    #[serde(default)]
+    pub emit_proof: bool,
+    /// Caller capability tokens used by proof mode. When absent, proof mode
+    /// falls back to `execute_tool_proof`; when present, the token path can
+    /// negotiate denied capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_capabilities: Option<Vec<crate::security::CapabilityToken>>,
+    /// Advisory, attested, or offline timeline delivery mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_mode: Option<String>,
+}
+
 fn default_entry() -> String {
     "_start".into()
 }
@@ -104,7 +128,7 @@ fn default_entry() -> String {
 /// best-effort on the AEON-IQ side — a ledger outage degrades
 /// auditability but never blocks execution (G3 fail-open invariant).
 #[cfg(feature = "aeon-memory")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NexusExecutionEvent {
     /// A required capability was denied during execution.
@@ -113,6 +137,32 @@ pub enum NexusExecutionEvent {
     SnapshotCreated { snapshot_id: uuid::Uuid },
     /// A proof capsule was emitted for this execution (wired in Phase 9).
     ProofCapsuleEmitted { capsule_id: uuid::Uuid },
+}
+
+/// Structured NexusIQ proof/timeline metadata returned by proof-mode daemon
+/// execution. Compiled only with `aeon-memory`; default daemon responses do
+/// not carry this section.
+#[cfg(feature = "aeon-memory")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonNexusIqEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_capsule: Option<Box<crate::proof::ProofCapsule>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_capsule_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_evidence_ref: Option<aeon_nexus_bridge::MemoryEvidenceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline_delivery_status: Option<crate::aeon::TimelineDeliveryStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denial_negotiation: Option<DaemonDenialNegotiation>,
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonDenialNegotiation {
+    pub negotiated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<u32>,
 }
 
 /// Single response frame.
@@ -129,6 +179,9 @@ pub enum DaemonResponse {
         #[cfg(feature = "aeon-memory")]
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         events: Vec<NexusExecutionEvent>,
+        #[cfg(feature = "aeon-memory")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nexusiq: Option<DaemonNexusIqEvidence>,
     },
     Error {
         message: String,
@@ -137,6 +190,9 @@ pub enum DaemonResponse {
         #[cfg(feature = "aeon-memory")]
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         events: Vec<NexusExecutionEvent>,
+        #[cfg(feature = "aeon-memory")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nexusiq: Option<DaemonNexusIqEvidence>,
     },
 }
 
@@ -203,19 +259,19 @@ mod tests {
             DaemonRequest::Execute {
                 name,
                 #[cfg(feature = "aeon-memory")]
-                aeon_agent_id,
-                #[cfg(feature = "aeon-memory")]
-                aeon_session_id,
-                #[cfg(feature = "aeon-memory")]
-                aeon_memory_evidence_digest,
+                aeon,
                 ..
             } => {
                 assert_eq!(name, "tool");
                 #[cfg(feature = "aeon-memory")]
                 {
-                    assert!(aeon_agent_id.is_none());
-                    assert!(aeon_session_id.is_none());
-                    assert!(aeon_memory_evidence_digest.is_none());
+                    assert!(aeon.aeon_agent_id.is_none());
+                    assert!(aeon.aeon_session_id.is_none());
+                    assert!(aeon.aeon_memory_evidence_digest.is_none());
+                    assert!(aeon.required_capabilities.is_none());
+                    assert!(!aeon.emit_proof);
+                    assert!(aeon.caller_capabilities.is_none());
+                    assert!(aeon.attestation_mode.is_none());
                 }
             }
             _ => panic!("expected Execute variant"),
@@ -232,22 +288,32 @@ mod tests {
             entry: "_start".to_string(),
             input: serde_json::json!({}),
             auth_token: None,
-            aeon_agent_id: Some("agent-42".to_string()),
-            aeon_session_id: Some("session-99".to_string()),
-            aeon_memory_evidence_digest: Some("abc123digest".to_string()),
+            aeon: Box::new(DaemonAeonExecuteOptions {
+                aeon_agent_id: Some("agent-42".to_string()),
+                aeon_session_id: Some("session-99".to_string()),
+                aeon_memory_evidence_digest: Some("abc123digest".to_string()),
+                required_capabilities: Some(vec![crate::security::Capability::ReadFile(
+                    std::path::PathBuf::from("/data"),
+                )]),
+                emit_proof: true,
+                caller_capabilities: Some(Vec::new()),
+                attestation_mode: Some("attested".to_string()),
+            }),
         };
         let json = serde_json::to_string(&req).unwrap();
         let req2: DaemonRequest = serde_json::from_str(&json).unwrap();
         match req2 {
-            DaemonRequest::Execute {
-                aeon_agent_id,
-                aeon_session_id,
-                aeon_memory_evidence_digest,
-                ..
-            } => {
-                assert_eq!(aeon_agent_id.as_deref(), Some("agent-42"));
-                assert_eq!(aeon_session_id.as_deref(), Some("session-99"));
-                assert_eq!(aeon_memory_evidence_digest.as_deref(), Some("abc123digest"));
+            DaemonRequest::Execute { aeon, .. } => {
+                assert_eq!(aeon.aeon_agent_id.as_deref(), Some("agent-42"));
+                assert_eq!(aeon.aeon_session_id.as_deref(), Some("session-99"));
+                assert_eq!(
+                    aeon.aeon_memory_evidence_digest.as_deref(),
+                    Some("abc123digest")
+                );
+                assert!(aeon.required_capabilities.is_some());
+                assert!(aeon.emit_proof);
+                assert_eq!(aeon.caller_capabilities.as_ref().map(Vec::len), Some(0));
+                assert_eq!(aeon.attestation_mode.as_deref(), Some("attested"));
             }
             _ => panic!("expected Execute variant"),
         }

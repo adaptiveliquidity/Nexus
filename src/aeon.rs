@@ -5,11 +5,13 @@
 //! the AEON-IQ management API key is read only from explicit `NEXUS_AEON_*`
 //! environment configuration.
 
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -23,6 +25,8 @@ const SESSION_ID_ENV: &str = "NEXUS_AEON_SESSION_ID";
 const TIMEOUT_MS_ENV: &str = "NEXUS_AEON_TIMEOUT_MS";
 const MANAGEMENT_KEY_ENV: &str = "NEXUS_AEON_MANAGEMENT_KEY";
 const HMAC_KEY_ENV: &str = "NEXUS_AEON_HMAC_KEY";
+const TIMELINE_SPOOL_ENV: &str = "NEXUS_AEON_TIMELINE_SPOOL";
+const TIMELINE_MAX_ATTEMPTS: usize = 3;
 static MISSING_MANAGEMENT_KEY_WARN: Once = Once::new();
 
 /// Configuration for routing ai-recovery LLM calls through AEON-IQ.
@@ -140,6 +144,10 @@ impl AeonMemoryClient {
         let mut client = Self::from_config(config);
         client.test_responder = Some(responder);
         client
+    }
+
+    pub fn timeline_sink(&self) -> AeonTimelineSink {
+        AeonTimelineSink::from_memory_client(self)
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryHit> {
@@ -399,6 +407,491 @@ impl AeonMemoryClient {
     }
 }
 
+/// Best-effort AEON-IQ timeline delivery status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineDeliveryStatus {
+    /// Delivery has been queued onto a non-blocking task or local spool.
+    Queued,
+    /// All requested events were delivered.
+    Delivered,
+    /// Delivery failed in advisory mode; execution remains unaffected.
+    FailedOpen,
+    /// Delivery failed in attested mode; callers may mark proof evidence degraded.
+    RequiredButFailed,
+}
+
+/// Delivery mode for AEON-IQ timeline events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineDeliveryMode {
+    /// Advisory delivery never blocks execution and maps failures to `FailedOpen`.
+    Advisory,
+    /// Required delivery maps failures to `RequiredButFailed`; callers decide
+    /// whether that degrades proof evidence.
+    Attested,
+    /// Do not contact AEON-IQ now; append events to the local replay spool.
+    Offline,
+}
+
+impl TimelineDeliveryMode {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value
+            .unwrap_or("advisory")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "attested" | "required" => Self::Attested,
+            "offline" | "spool" => Self::Offline,
+            _ => Self::Advisory,
+        }
+    }
+}
+
+/// Summary returned by offline timeline replay.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineReplayReport {
+    pub delivered: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
+/// Fail-open sink for forwarding Nexus execution events to AEON-IQ's timeline.
+#[derive(Clone)]
+pub struct AeonTimelineSink {
+    http: reqwest::Client,
+    base_url: String,
+    management_key: Option<String>,
+    mode: TimelineDeliveryMode,
+    spool_path: PathBuf,
+    #[cfg(test)]
+    test_responder: Option<TestResponder>,
+}
+
+impl AeonTimelineSink {
+    pub fn from_config(config: &AeonConfig) -> Self {
+        AeonMemoryClient::from_config(config).timeline_sink()
+    }
+
+    pub fn from_enabled_config(config: &AeonConfig) -> Option<Self> {
+        AeonMemoryClient::from_enabled_config(config).map(|client| client.timeline_sink())
+    }
+
+    pub fn from_memory_client(client: &AeonMemoryClient) -> Self {
+        Self {
+            http: client.http.clone(),
+            base_url: client.base_url.clone(),
+            management_key: client.management_key.clone(),
+            mode: TimelineDeliveryMode::Advisory,
+            spool_path: default_timeline_spool_path(),
+            #[cfg(test)]
+            test_responder: client.test_responder.clone(),
+        }
+    }
+
+    pub fn with_mode(mut self, mode: TimelineDeliveryMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_spool_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.spool_path = path.into();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_responder(config: &AeonConfig, responder: TestResponder) -> Self {
+        let mut sink = Self::from_config(config);
+        sink.test_responder = Some(responder);
+        sink
+    }
+
+    pub async fn deliver(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        events: &[crate::daemon::NexusExecutionEvent],
+    ) -> TimelineDeliveryStatus {
+        if events.is_empty() {
+            return TimelineDeliveryStatus::Delivered;
+        }
+
+        if matches!(self.mode, TimelineDeliveryMode::Offline) {
+            return if self.spool_events(agent_id, session_id, events).await {
+                TimelineDeliveryStatus::Queued
+            } else {
+                TimelineDeliveryStatus::FailedOpen
+            };
+        }
+
+        let mut delivered_all = true;
+        for event in events {
+            let body = TimelineEventBody::from_event(session_id, event);
+            if !self.post_event_with_retry(agent_id, &body).await {
+                delivered_all = false;
+            }
+        }
+
+        if delivered_all {
+            TimelineDeliveryStatus::Delivered
+        } else {
+            match self.mode {
+                TimelineDeliveryMode::Attested => TimelineDeliveryStatus::RequiredButFailed,
+                TimelineDeliveryMode::Advisory | TimelineDeliveryMode::Offline => {
+                    TimelineDeliveryStatus::FailedOpen
+                }
+            }
+        }
+    }
+
+    pub async fn replay_spooled_events(
+        &self,
+        agent_id: &str,
+        since: Option<DateTime<Utc>>,
+    ) -> TimelineReplayReport {
+        let content = match tokio::fs::read_to_string(&self.spool_path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return TimelineReplayReport::default();
+            }
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool read failed; failing open"
+                );
+                return TimelineReplayReport {
+                    failed: 1,
+                    ..TimelineReplayReport::default()
+                };
+            }
+        };
+
+        let mut report = TimelineReplayReport::default();
+        let mut retained = Vec::new();
+
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            let record = match serde_json::from_str::<TimelineSpoolRecord>(line) {
+                Ok(record) => record,
+                Err(error) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        error = %error,
+                        "AEON-IQ timeline spool record parse failed; retaining record"
+                    );
+                    report.failed += 1;
+                    retained.push(line.to_string());
+                    continue;
+                }
+            };
+
+            if record.agent_id != agent_id || since.is_some_and(|since| record.created_at < since) {
+                report.skipped += 1;
+                retained.push(line.to_string());
+                continue;
+            }
+
+            if self
+                .post_event_with_retry(&record.agent_id, &record.event)
+                .await
+            {
+                report.delivered += 1;
+            } else {
+                report.failed += 1;
+                retained.push(line.to_string());
+            }
+        }
+
+        if let Err(error) = rewrite_spool(&self.spool_path, &retained).await {
+            debug!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON-IQ timeline spool rewrite failed after replay; failing open"
+            );
+        }
+
+        report
+    }
+
+    async fn spool_events(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        events: &[crate::daemon::NexusExecutionEvent],
+    ) -> bool {
+        let records = events.iter().map(|event| TimelineSpoolRecord {
+            created_at: Utc::now(),
+            agent_id: agent_id.to_string(),
+            event: TimelineEventBody::from_event(session_id, event),
+        });
+
+        if let Some(parent) = self.spool_path.parent() {
+            if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool directory create failed; failing open"
+                );
+                return false;
+            }
+        }
+
+        let mut file = match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.spool_path)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool open failed; failing open"
+                );
+                return false;
+            }
+        };
+
+        for record in records {
+            let mut bytes = match serde_json::to_vec(&record) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        error = %error,
+                        "AEON-IQ timeline spool serialization failed; failing open"
+                    );
+                    return false;
+                }
+            };
+            bytes.push(b'\n');
+            if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool write failed; failing open"
+                );
+                return false;
+            }
+        }
+
+        true
+    }
+
+    async fn post_event_with_retry(&self, agent_id: &str, body: &TimelineEventBody) -> bool {
+        let Some(management_key) = self.management_key.as_deref() else {
+            debug!(
+                target: "nexus.aeon",
+                "AEON-IQ management key is not configured; timeline delivery disabled"
+            );
+            return false;
+        };
+        let Some(url) = self.url(&["api", "v1", "agents", agent_id, "timeline"]) else {
+            return false;
+        };
+
+        for attempt in 0..TIMELINE_MAX_ATTEMPTS {
+            match self.post_json(url.clone(), management_key, body).await {
+                Some(response) if is_success(response.status) => return true,
+                Some(response) if response.status >= 500 && attempt + 1 < TIMELINE_MAX_ATTEMPTS => {
+                    tokio::time::sleep(timeline_retry_delay(attempt)).await;
+                }
+                Some(response) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        status = response.status,
+                        "AEON-IQ timeline post returned non-success status; failing open"
+                    );
+                    return false;
+                }
+                None if attempt + 1 < TIMELINE_MAX_ATTEMPTS => {
+                    tokio::time::sleep(timeline_retry_delay(attempt)).await;
+                }
+                None => return false,
+            }
+        }
+
+        false
+    }
+
+    async fn post_json<T>(
+        &self,
+        url: reqwest::Url,
+        management_key: &str,
+        body: &T,
+    ) -> Option<HttpResponse>
+    where
+        T: Serialize + ?Sized,
+    {
+        #[cfg(test)]
+        if let Some(responder) = &self.test_responder {
+            let body = match serde_json::to_string(body) {
+                Ok(body) => body,
+                Err(error) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        error = %error,
+                        "AEON-IQ timeline request serialization failed; failing open"
+                    );
+                    return None;
+                }
+            };
+            let response = responder(TestHttpRequest {
+                method: "POST".to_string(),
+                path: url.path().to_string(),
+                headers: vec![("X-Management-Key".to_string(), management_key.to_string())],
+                body,
+            });
+            return Some(HttpResponse {
+                status: response.status,
+                body: response.body,
+            });
+        }
+
+        match self
+            .http
+            .post(url)
+            .header("X-Management-Key", management_key)
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                match response.text().await {
+                    Ok(body) => Some(HttpResponse { status, body }),
+                    Err(error) => {
+                        debug!(
+                            target: "nexus.aeon",
+                            error = %error,
+                            "AEON-IQ timeline response body read failed; failing open"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline request failed open"
+                );
+                None
+            }
+        }
+    }
+
+    fn url(&self, segments: &[&str]) -> Option<reqwest::Url> {
+        let mut url = match reqwest::Url::parse(&format!("{}/", self.base_url)) {
+            Ok(url) => url,
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "invalid AEON-IQ base URL; timeline delivery failing open"
+                );
+                return None;
+            }
+        };
+
+        {
+            let mut path = match url.path_segments_mut() {
+                Ok(path) => path,
+                Err(()) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        "AEON-IQ base URL cannot be a base URL; timeline delivery failing open"
+                    );
+                    return None;
+                }
+            };
+
+            path.clear();
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+
+        Some(url)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimelineSpoolRecord {
+    created_at: DateTime<Utc>,
+    agent_id: String,
+    event: TimelineEventBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineEventBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nexus_snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capsule_digest: Option<String>,
+    event_type: String,
+}
+
+impl TimelineEventBody {
+    fn from_event(session_id: Option<&str>, event: &crate::daemon::NexusExecutionEvent) -> Self {
+        match event {
+            crate::daemon::NexusExecutionEvent::SnapshotCreated { snapshot_id } => Self {
+                session_id: session_id.map(str::to_string),
+                nexus_snapshot_id: Some(snapshot_id.to_string()),
+                capsule_digest: None,
+                event_type: "snapshot_created".to_string(),
+            },
+            crate::daemon::NexusExecutionEvent::CapabilityDenied { .. } => Self {
+                session_id: session_id.map(str::to_string),
+                nexus_snapshot_id: None,
+                capsule_digest: None,
+                event_type: "capability_denied".to_string(),
+            },
+            crate::daemon::NexusExecutionEvent::ProofCapsuleEmitted { capsule_id } => Self {
+                session_id: session_id.map(str::to_string),
+                nexus_snapshot_id: None,
+                capsule_digest: Some(capsule_id.to_string()),
+                event_type: "proof_capsule_emitted".to_string(),
+            },
+        }
+    }
+}
+
+fn default_timeline_spool_path() -> PathBuf {
+    std::env::var_os(TIMELINE_SPOOL_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("nexus-aeon-timeline-events.jsonl"))
+}
+
+fn timeline_retry_delay(attempt: usize) -> Duration {
+    #[cfg(test)]
+    {
+        let _ = attempt;
+        Duration::from_millis(1)
+    }
+    #[cfg(not(test))]
+    {
+        Duration::from_millis(25 * (1_u64 << attempt.min(5)))
+    }
+}
+
+async fn rewrite_spool(path: &Path, retained: &[String]) -> std::io::Result<()> {
+    if retained.is_empty() {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    } else {
+        let mut content = retained.join("\n");
+        content.push('\n');
+        tokio::fs::write(path, content).await
+    }
+}
+
 /// Builds a `MemoryEvidenceRef` from the resolved memory hits for inclusion in
 /// a `ProofCapsule`. Requires the `aeon-memory` feature.
 ///
@@ -632,7 +1125,9 @@ fn hex_nibble(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::NexusExecutionEvent;
     use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
@@ -871,6 +1366,164 @@ mod tests {
         let mut requests = captured.lock().unwrap();
         assert_eq!(requests.len(), 1);
         requests.remove(0)
+    }
+
+    fn timeline_events() -> Vec<NexusExecutionEvent> {
+        vec![
+            NexusExecutionEvent::SnapshotCreated {
+                snapshot_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            },
+            NexusExecutionEvent::CapabilityDenied {
+                denied_category: "read:/secret".to_string(),
+            },
+            NexusExecutionEvent::ProofCapsuleEmitted {
+                capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_posts_expected_event_shape() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let sink = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        );
+
+        let status = sink
+            .deliver("agent-1", Some("session-1"), &timeline_events())
+            .await;
+
+        assert_eq!(status, TimelineDeliveryStatus::Delivered);
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| request.method == "POST"));
+        assert!(requests
+            .iter()
+            .all(|request| request.path == "/api/v1/agents/agent-1/timeline"));
+        assert!(requests
+            .iter()
+            .all(|request| request.header("x-management-key") == Some("mgmt-key")));
+
+        let bodies = requests
+            .iter()
+            .map(|request| serde_json::from_str::<Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies[0]["event_type"], "snapshot_created");
+        assert_eq!(bodies[0]["session_id"], "session-1");
+        assert_eq!(
+            bodies[0]["nexus_snapshot_id"],
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(bodies[1]["event_type"], "capability_denied");
+        assert!(bodies[1].get("denied_category").is_none());
+        assert_eq!(bodies[2]["event_type"], "proof_capsule_emitted");
+        assert_eq!(
+            bodies[2]["capsule_digest"],
+            "550e8400-e29b-41d4-a716-446655440001"
+        );
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_retries_5xx_then_delivers() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_responder = Arc::clone(&attempts);
+        let sink = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |_request| {
+                let attempt = attempts_for_responder.fetch_add(1, Ordering::SeqCst);
+                TestHttpResponse {
+                    status: if attempt == 0 { 500 } else { 200 },
+                    body: "{}".to_string(),
+                }
+            }),
+        );
+        let event = [NexusExecutionEvent::CapabilityDenied {
+            denied_category: "read:/secret".to_string(),
+        }];
+
+        let status = sink.deliver("agent-1", None, &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::Delivered);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_transport_error_fails_open() {
+        let sink =
+            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")));
+        let event = [NexusExecutionEvent::CapabilityDenied {
+            denied_category: "read:/secret".to_string(),
+        }];
+
+        let status = sink.deliver("agent-1", None, &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::FailedOpen);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_attested_mode_reports_required_failure() {
+        let sink =
+            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")))
+                .with_mode(TimelineDeliveryMode::Attested);
+        let event = [NexusExecutionEvent::CapabilityDenied {
+            denied_category: "read:/secret".to_string(),
+        }];
+
+        let status = sink.deliver("agent-1", None, &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::RequiredButFailed);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_replay_removes_delivered_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("timeline.jsonl");
+        let offline =
+            AeonTimelineSink::from_config(&test_config("http://aeon.test", Some("mgmt-key")))
+                .with_mode(TimelineDeliveryMode::Offline)
+                .with_spool_path(&spool);
+        let event = [NexusExecutionEvent::ProofCapsuleEmitted {
+            capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+        }];
+
+        let queued = offline.deliver("agent-1", Some("session-1"), &event).await;
+        assert_eq!(queued, TimelineDeliveryStatus::Queued);
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let online = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        )
+        .with_spool_path(&spool);
+
+        let first = online.replay_spooled_events("agent-1", None).await;
+        let second = online.replay_spooled_events("agent-1", None).await;
+
+        assert_eq!(
+            first,
+            TimelineReplayReport {
+                delivered: 1,
+                failed: 0,
+                skipped: 0,
+            }
+        );
+        assert_eq!(second, TimelineReplayReport::default());
+        assert_eq!(captured.lock().unwrap().len(), 1);
     }
 
     #[test]

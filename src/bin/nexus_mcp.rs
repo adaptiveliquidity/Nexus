@@ -610,6 +610,8 @@ struct AeonTimelineExecuteResponse {
     proof_capsule: nexus::proof::ProofCapsule,
     events: Vec<nexus::daemon::NexusExecutionEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    timeline_delivery_status: Option<nexus::aeon::TimelineDeliveryStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     aeon_agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     aeon_session_id: Option<String>,
@@ -847,11 +849,32 @@ impl NexusMcpServer {
             .aeon_agent_id
             .as_ref()
             .map(|agent_id| format!("/agents/{agent_id}/timeline"));
+        let timeline_delivery_status = if let Some(agent_id) = params.aeon_agent_id.clone() {
+            match nexus::aeon::AeonConfig::from_env()
+                .ok()
+                .and_then(|config| nexus::aeon::AeonTimelineSink::from_enabled_config(&config))
+            {
+                Some(sink) => {
+                    let events = events.clone();
+                    let session_id = params.aeon_session_id.clone();
+                    tokio::spawn(async move {
+                        let _ = sink
+                            .deliver(&agent_id, session_id.as_deref(), &events)
+                            .await;
+                    });
+                    Some(nexus::aeon::TimelineDeliveryStatus::Queued)
+                }
+                None => Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen),
+            }
+        } else {
+            None
+        };
 
         Ok(AeonTimelineExecuteResponse {
             output: ToolOutputResponse::from(output),
             proof_capsule,
             events,
+            timeline_delivery_status,
             aeon_agent_id: params.aeon_agent_id,
             aeon_session_id: params.aeon_session_id,
             aeon_timeline_path,
