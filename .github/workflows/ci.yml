@@ -106,9 +106,20 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: cargo test --features aeon-memory
-        run: cargo test --features aeon-memory --locked
+        run: cargo test --features aeon-memory --all-targets --locked
       - name: aeon_nexus_bridge tests
         run: cargo test -p aeon_nexus_bridge --locked
+      - name: no-leak artifact scan
+        run: |
+          cargo build --features aeon-memory --locked --quiet 2>/dev/null || true
+          bin=target/debug/nexus
+          if [ -f "" ]; then
+            if strings "" | grep -qE '(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN (RSA |EC )?PRIVATE KEY)'; then
+              echo "::error::Potential secret pattern found in compiled binary"
+              exit 1
+            fi
+            echo "Artifact scan: no known secret patterns found"
+          fi
 
   aeon-memory-clippy:
     name: aeon-memory-clippy
