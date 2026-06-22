@@ -239,7 +239,6 @@ impl MockAeonServer {
         })
     }
 
-
     /// Accepts connections but never sends a response — forces the client's
     /// NEXUS_AEON_TIMEOUT_MS to elapse, simulating a total AEON-IQ outage.
     fn try_new_blackhole() -> Option<Self> {
@@ -268,7 +267,11 @@ impl MockAeonServer {
                 }
             }
         });
-        Some(Self { addr, captured, shutdown })
+        Some(Self {
+            addr,
+            captured,
+            shutdown,
+        })
     }
 
     fn base_url(&self) -> String {
@@ -701,4 +704,3 @@ async fn nexus_iq_execute_recall_two_hits_attested_with_recall() {
     );
     server.wait_for_path("/api/v1/memories/search", 1).await;
 }
-

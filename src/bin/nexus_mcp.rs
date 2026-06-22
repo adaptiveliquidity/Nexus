@@ -935,7 +935,8 @@ impl NexusMcpServer {
                             "",
                             &[],
                             nexus::proof::schema::MemoryAttestationMode::Absent,
-                        ).into(),
+                        )
+                        .into(),
                         memory_hits_count: 0,
                         reason: format!(
                             "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
@@ -1007,9 +1008,16 @@ impl NexusMcpServer {
         let memory_digest = match recall.evidence.attestation {
             nexus::proof::schema::MemoryAttestationMode::Attested
             | nexus::proof::schema::MemoryAttestationMode::AttestedNoHit
-            | nexus::proof::schema::MemoryAttestationMode::AttestedWithRecall => {
-                recall.evidence.evidence_digest()
-            }
+            | nexus::proof::schema::MemoryAttestationMode::AttestedWithRecall => Some(
+                aeon_config
+                    .as_ref()
+                    .and_then(|config| config.hmac_key.as_deref())
+                    .map_or_else(
+                        || recall.evidence.evidence_sha256_digest(),
+                        |key| Some(recall.evidence.evidence_hmac_digest(key)),
+                    )
+                    .ok_or_else(|| anyhow::anyhow!("failed to digest AEON memory evidence"))?,
+            ),
             _ => None,
         };
 
@@ -1032,7 +1040,7 @@ impl NexusMcpServer {
                 Some(params.aeon_agent_id.clone()),
                 params.aeon_session_id.clone(),
             )
-            .with_aeon_memory_evidence_digest(memory_digest);
+            .with_aeon_memory_evidence_digest(memory_digest.clone());
 
         let execution = if required_capabilities.is_empty() {
             self.hypervisor.execute_tool_proof(tool, input).await
@@ -1062,6 +1070,9 @@ impl NexusMcpServer {
 
         match execution {
             Ok((output, proof_capsule)) => {
+                if let Some(expected_digest) = memory_digest.as_deref() {
+                    verify_proof_capsule_memory_digest(&proof_capsule, expected_digest)?;
+                }
                 let negotiation_rounds = proof_capsule.capabilities.negotiation_rounds;
                 let events = proof_events(&output, proof_capsule.capsule_id, negotiation_rounds);
                 let timeline_status = deliver_nexus_iq_timeline(
@@ -1072,9 +1083,11 @@ impl NexusMcpServer {
                     events.clone(),
                 )
                 .await;
-                let memory_evidence_ref = MemoryEvidenceForMcp::from(recall
-                    .evidence
-                    .with_capsule_digest(Some(proof_capsule.capsule_id.to_string())));
+                let memory_evidence_ref = MemoryEvidenceForMcp::from(
+                    recall
+                        .evidence
+                        .with_capsule_digest(Some(proof_capsule.capsule_id.to_string())),
+                );
                 Ok(NexusIqExecuteResponse {
                     output: Some(ToolOutputResponse::from(output)),
                     proof_capsule_ref: Some(proof_capsule.capsule_id.to_string()),
@@ -1981,6 +1994,30 @@ fn proof_events(
     events.push(nexus::daemon::NexusExecutionEvent::ProofCapsuleEmitted { capsule_id });
 
     events
+}
+
+#[cfg(feature = "aeon-memory")]
+fn verify_proof_capsule_memory_digest(
+    proof_capsule: &nexus::proof::ProofCapsule,
+    expected_digest: &str,
+) -> Result<()> {
+    let Some(actual_digest) = proof_capsule
+        .memory_evidence
+        .as_ref()
+        .map(|evidence| evidence.digest.value.as_str())
+    else {
+        anyhow::bail!(
+            "proof capsule missing AEON memory evidence digest; expected {expected_digest}"
+        );
+    };
+
+    if !actual_digest.eq_ignore_ascii_case(expected_digest) {
+        anyhow::bail!(
+            "proof capsule AEON memory evidence digest mismatch: expected {expected_digest}, got {actual_digest}"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "aeon-memory")]

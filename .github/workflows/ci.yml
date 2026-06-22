@@ -113,12 +113,14 @@ jobs:
         run: |
           cargo build --features aeon-memory --locked --quiet 2>/dev/null || true
           bin=target/debug/nexus
-          if [ -f "" ]; then
-            if strings "" | grep -qE '(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN (RSA |EC )?PRIVATE KEY)'; then
+          if [ -f "$bin" ]; then
+            if strings "$bin" | grep -qE '(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN (RSA |EC )?PRIVATE KEY)'; then
               echo "::error::Potential secret pattern found in compiled binary"
               exit 1
             fi
             echo "Artifact scan: no known secret patterns found"
+          else
+            echo "::warning::Binary $bin not found after build, skipping artifact scan"
           fi
 
   aeon-memory-clippy:
