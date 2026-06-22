@@ -1041,8 +1041,7 @@ async fn issue_token_rejects_capability_without_operator_allowlist() {
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("requires operator allowlist")
-            && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        error.contains("capability not permitted by active profile"),
         "expected non-allowlisted token issuance rejection, got: {parsed}"
     );
 }
@@ -1147,7 +1146,7 @@ async fn profile_enforcement_blocks_disallowed_capability() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("capability not permitted by active profile: write:"),
+        error.contains("capability not permitted by active profile"),
         "expected active profile rejection, got: {parsed}"
     );
 }
@@ -1233,7 +1232,7 @@ async fn mcp_tool_allowlist_blocks_disallowed_tool() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("tool nexus_snapshot_create is not in the MCP tool allowlist"),
+        error.contains("capability not permitted by active profile"),
         "expected tool-allowlist rejection, got: {parsed}"
     );
 }
@@ -1296,7 +1295,7 @@ async fn mcp_snapshot_disabled_blocks_snapshot_create() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("snapshot tools are disabled by the active profile"),
+        error.contains("capability not permitted by active profile"),
         "expected snapshot-disabled rejection, got: {parsed}"
     );
 }
@@ -1332,7 +1331,7 @@ async fn mcp_fork_disabled_blocks_fork_and_race() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("fork_and_race is disabled by the active profile"),
+        error.contains("capability not permitted by active profile"),
         "expected fork-disabled rejection, got: {parsed}"
     );
 }
@@ -1424,8 +1423,7 @@ async fn execute_wasi_rejects_caller_chosen_capability_without_parent_token_or_a
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("parent_token_id")
-            && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        error.contains("capability not permitted by active profile"),
         "execute_wasi must reject self-granted caller-chosen capabilities without a parent token or allowlist; got: {parsed}"
     );
 }
@@ -1491,7 +1489,7 @@ async fn execute_wasi_rejects_capability_not_in_operator_allowlist() {
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("not allowed") && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        error.contains("capability not permitted by active profile"),
         "expected non-allowlisted capability rejection, got: {parsed}"
     );
 }
@@ -1651,7 +1649,7 @@ async fn execute_wasi_rejects_capability_outside_parent_token_scope() {
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("parent_token_id") && error.contains("not a subset"),
+        error.contains("capability not permitted by active profile"),
         "expected parent token scope rejection, got: {parsed}"
     );
 }

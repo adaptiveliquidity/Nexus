@@ -489,8 +489,9 @@ async fn serve(
             let guard = match pool.acquire().await {
                 Ok(g) => g,
                 Err(e) => {
+                    tracing::error!(error = %e, "pool acquire failed");
                     return DaemonResponse::Error {
-                        message: format!("pool acquire failed: {e}"),
+                        message: "service temporarily unavailable".to_string(),
                         #[cfg(feature = "aeon-memory")]
                         events: vec![],
                         #[cfg(feature = "aeon-memory")]
@@ -502,8 +503,9 @@ async fn serve(
             let module = match module_cache.get_or_compile(&engine, &bytes) {
                 Ok(m) => m,
                 Err(e) => {
+                    tracing::error!(error = %e, "module compile failed");
                     return DaemonResponse::Error {
-                        message: format!("module compile failed: {e}"),
+                        message: "module load failed".to_string(),
                         #[cfg(feature = "aeon-memory")]
                         events: vec![],
                         #[cfg(feature = "aeon-memory")]
