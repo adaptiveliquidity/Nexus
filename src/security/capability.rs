@@ -519,6 +519,11 @@ impl CapabilityManager {
         self.active_tokens.remove(&token_id);
     }
 
+    /// Check whether a token has been explicitly revoked.
+    pub fn is_revoked(&self, token_id: &Uuid) -> bool {
+        self.revoked_tokens.contains_key(token_id)
+    }
+
     /// Get the public key for external verification
     pub fn public_key(&self) -> Vec<u8> {
         self.verifying_key.as_bytes().to_vec()

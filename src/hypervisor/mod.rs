@@ -556,6 +556,16 @@ impl NexusHypervisor {
         Ok(result)
     }
 
+    /// Check whether a capability token has been explicitly revoked.
+    pub fn is_token_revoked(&self, token_id: &uuid::Uuid) -> bool {
+        self.capability_manager.read().unwrap().is_revoked(token_id)
+    }
+
+    /// Return the stored memory checksum for a snapshot, or `None` if not found.
+    pub fn snapshot_content_digest(&self, id: &uuid::Uuid) -> Option<String> {
+        self.snapshot_manager.snapshot_content_digest(id)
+    }
+
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();
