@@ -151,9 +151,18 @@ enum AeonCmd {
         evidence_file: PathBuf,
     },
     /// Verify that a ProofCapsule JSON has consistent memory_mode and memory_evidence.
-    VerifyCapsule {
+    VerifyProofCapsule {
         /// Path to a ProofCapsule JSON file, or "-" for stdin.
         capsule: PathBuf,
+    },
+    /// Verify a MemoryEvidenceV1 bundle: invariant check + optional signature verification.
+    VerifyCapsule {
+        /// Capsule ID to associate with the evidence.
+        #[arg(long)]
+        capsule_id: String,
+        /// Path to a MemoryEvidenceV1 JSON file. Reads from stdin if omitted.
+        #[arg(long)]
+        evidence_file: Option<PathBuf>,
     },
 }
 
@@ -293,11 +302,82 @@ fn run_aeon(cmd: AeonCmd) -> anyhow::Result<()> {
                 Err(error) => println!("INVALID: {error}"),
             }
         }
-        AeonCmd::VerifyCapsule { capsule } => {
-            run_iq_verify(&capsule)?;
+        AeonCmd::VerifyProofCapsule { capsule } => {
+            run_iq_verify(&capsule)?
+        }
+        AeonCmd::VerifyCapsule {
+            capsule_id,
+            evidence_file,
+        } => {
+            run_aeon_verify_capsule(&capsule_id, evidence_file.as_deref())?;
         }
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_aeon_verify_capsule(capsule_id: &str, evidence_file: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use std::io::Read as _;
+    use nexus::aeon::MemoryEvidenceV1;
+    use nexus::proof::schema::MemoryAttestationMode;
+
+    let json = match evidence_file {
+        Some(path) => std::fs::read_to_string(path)?,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+
+    let evidence: MemoryEvidenceV1 = match serde_json::from_str(&json) {
+        Ok(ev) => ev,
+        Err(e) => {
+            println!("INVALID: failed to parse MemoryEvidenceV1: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(reason) = evidence.validate() {
+        println!("INVALID: {reason}");
+        std::process::exit(1);
+    }
+
+    let invalid_reason: Option<String> = match &evidence.attestation {
+        MemoryAttestationMode::Attested
+        | MemoryAttestationMode::AttestedWithRecall
+        | MemoryAttestationMode::AttestedNoHit => {
+            if evidence.capsule_digest.is_none() {
+                Some(format!(
+                    "attestation is {:?} but evidence digest (capsule_digest) is absent",
+                    evidence.attestation
+                ))
+            } else {
+                None
+            }
+        }
+        MemoryAttestationMode::Advisory | MemoryAttestationMode::Absent => {
+            if evidence.capsule_digest.is_some() {
+                eprintln!(
+                    "WARN: attestation is {:?} but capsule_digest is present for capsule {capsule_id}",
+                    evidence.attestation
+                );
+            }
+            None
+        }
+        MemoryAttestationMode::Degraded => {
+            eprintln!("WARN: attestation is Degraded for capsule {capsule_id}");
+            None
+        }
+    };
+
+    if let Some(reason) = invalid_reason {
+        println!("INVALID: {reason}");
+        std::process::exit(1);
+    }
+
+    println!("VALID");
     Ok(())
 }
 
