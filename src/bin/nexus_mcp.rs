@@ -669,8 +669,6 @@ struct AeonTimelineExecuteResponse {
 #[derive(Serialize)]
 struct MemoryEvidenceForMcp {
     version: u8,
-    #[serde(skip_serializing)]
-    query: String,
     hit_count: usize,
     hit_digests: Vec<String>,
     attestation: nexus::proof::schema::MemoryAttestationMode,
@@ -683,7 +681,6 @@ impl From<nexus::aeon::MemoryEvidenceV1> for MemoryEvidenceForMcp {
     fn from(e: nexus::aeon::MemoryEvidenceV1) -> Self {
         Self {
             version: e.version,
-            query: e.query,
             hit_count: e.hit_count,
             hit_digests: e.hit_digests,
             attestation: e.attestation,
