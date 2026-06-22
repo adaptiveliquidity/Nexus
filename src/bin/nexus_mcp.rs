@@ -669,6 +669,7 @@ struct AeonTimelineExecuteResponse {
 #[derive(Serialize)]
 struct MemoryEvidenceForMcp {
     version: u8,
+    #[serde(skip_serializing)]
     query: String,
     hit_count: usize,
     hit_digests: Vec<String>,

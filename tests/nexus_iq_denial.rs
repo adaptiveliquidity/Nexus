@@ -137,9 +137,10 @@ async fn denial_still_returns_memory_evidence() {
         parsed["memory_evidence_ref"]["attestation"],
         "AttestedWithRecall"
     );
-    assert_eq!(
-        parsed["memory_evidence_ref"]["query"],
-        "recall context before denial"
+    // query field must be redacted from wire responses (skip_serializing on MemoryEvidenceForMcp)
+    assert!(
+        parsed["memory_evidence_ref"]["query"].is_null(),
+        "query must not appear in wire response (privacy redaction): {parsed}"
     );
     assert!(
         parsed["memory_evidence_ref"]["hit_digests"]
