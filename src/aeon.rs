@@ -6,12 +6,11 @@
 //! environment configuration.
 
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
@@ -175,7 +174,15 @@ impl MemoryEvidenceV1 {
         self
     }
 
-    pub fn evidence_digest(&self) -> Option<String> {
+    pub fn evidence_hmac_digest(&self, key: &[u8]) -> String {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(&self.canonical_digest_bytes());
+        format!("{:x}", mac.finalize().into_bytes())
+    }
+
+    #[doc(hidden)]
+    pub fn evidence_sha256_digest(&self) -> Option<String> {
         serde_json::to_vec(self)
             .ok()
             .map(|bytes| sha256_hex(bytes.as_slice()))
@@ -184,6 +191,24 @@ impl MemoryEvidenceV1 {
     pub fn validate(&self) -> std::result::Result<(), String> {
         validate_memory_evidence_v1(self)
     }
+
+    fn canonical_digest_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(&MemoryEvidenceDigestBody {
+            query: &self.query,
+            hit_count: self.hit_count,
+            hit_digests: &self.hit_digests,
+            attestation: &self.attestation,
+        })
+        .expect("memory evidence digest body is serializable")
+    }
+}
+
+#[derive(Serialize)]
+struct MemoryEvidenceDigestBody<'a> {
+    query: &'a str,
+    hit_count: usize,
+    hit_digests: &'a [String],
+    attestation: &'a crate::proof::schema::MemoryAttestationMode,
 }
 
 pub fn validate_memory_evidence_v1(evidence: &MemoryEvidenceV1) -> std::result::Result<(), String> {
@@ -629,6 +654,7 @@ pub struct AeonTimelineSink {
     management_key: Option<String>,
     mode: TimelineDeliveryMode,
     spool_path: PathBuf,
+    last_event_digest: Arc<Mutex<Option<String>>>,
     #[cfg(test)]
     test_responder: Option<TestResponder>,
 }
@@ -649,6 +675,7 @@ impl AeonTimelineSink {
             management_key: client.management_key.clone(),
             mode: TimelineDeliveryMode::Advisory,
             spool_path: default_timeline_spool_path(),
+            last_event_digest: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             test_responder: client.test_responder.clone(),
         }
@@ -691,8 +718,11 @@ impl AeonTimelineSink {
 
         let mut delivered_all = true;
         for event in events {
-            let body = TimelineEventBody::from_event(session_id, event);
-            if !self.post_event_with_retry(agent_id, &body).await {
+            let mut body = TimelineEventBody::from_event(session_id, event);
+            self.link_timeline_event(&mut body);
+            if self.post_event_with_retry(agent_id, &body).await {
+                self.record_timeline_event_digest(&body);
+            } else {
                 delivered_all = false;
             }
         }
@@ -756,10 +786,11 @@ impl AeonTimelineSink {
                 continue;
             }
 
-            if self
-                .post_event_with_retry(&record.agent_id, &record.event)
-                .await
-            {
+            let mut event = record.event;
+            self.link_timeline_event(&mut event);
+
+            if self.post_event_with_retry(&record.agent_id, &event).await {
+                self.record_timeline_event_digest(&event);
                 report.delivered += 1;
             } else {
                 report.failed += 1;
@@ -842,6 +873,41 @@ impl AeonTimelineSink {
         }
 
         true
+    }
+
+    fn link_timeline_event(&self, body: &mut TimelineEventBody) {
+        body.prev_event_digest = match self.last_event_digest.lock() {
+            Ok(last_event_digest) => last_event_digest.clone(),
+            Err(_) => {
+                debug!(
+                    target: "nexus.aeon",
+                    "AEON-IQ timeline chain state is poisoned; omitting previous digest"
+                );
+                None
+            }
+        };
+    }
+
+    fn record_timeline_event_digest(&self, body: &TimelineEventBody) {
+        let digest = match timeline_event_body_digest(body) {
+            Ok(digest) => digest,
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline digest serialization failed; chain state not advanced"
+                );
+                return;
+            }
+        };
+
+        match self.last_event_digest.lock() {
+            Ok(mut last_event_digest) => *last_event_digest = Some(digest),
+            Err(_) => debug!(
+                target: "nexus.aeon",
+                "AEON-IQ timeline chain state is poisoned; chain state not advanced"
+            ),
+        }
     }
 
     async fn post_event_with_retry(&self, agent_id: &str, body: &TimelineEventBody) -> bool {
@@ -990,7 +1056,7 @@ struct TimelineSpoolRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct TimelineEventBody {
+pub struct TimelineEventBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -998,6 +1064,8 @@ struct TimelineEventBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     capsule_digest: Option<String>,
     event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_event_digest: Option<String>,
 }
 
 impl TimelineEventBody {
@@ -1008,21 +1076,44 @@ impl TimelineEventBody {
                 nexus_snapshot_id: Some(snapshot_id.to_string()),
                 capsule_digest: None,
                 event_type: "snapshot_created".to_string(),
+                prev_event_digest: None,
             },
             crate::daemon::NexusExecutionEvent::CapabilityDenied { .. } => Self {
                 session_id: session_id.map(str::to_string),
                 nexus_snapshot_id: None,
                 capsule_digest: None,
                 event_type: "capability_denied".to_string(),
+                prev_event_digest: None,
             },
             crate::daemon::NexusExecutionEvent::ProofCapsuleEmitted { capsule_id } => Self {
                 session_id: session_id.map(str::to_string),
                 nexus_snapshot_id: None,
                 capsule_digest: Some(capsule_id.to_string()),
                 event_type: "proof_capsule_emitted".to_string(),
+                prev_event_digest: None,
             },
         }
     }
+}
+
+pub fn verify_timeline_chain(events: &[TimelineEventBody]) -> std::result::Result<(), String> {
+    let mut previous_digest = None;
+    for (index, event) in events.iter().enumerate() {
+        if event.prev_event_digest != previous_digest {
+            return Err(format!(
+                "timeline event {index} prev_event_digest mismatch: expected {:?}, got {:?}",
+                previous_digest, event.prev_event_digest
+            ));
+        }
+        previous_digest = Some(timeline_event_body_digest(event)?);
+    }
+    Ok(())
+}
+
+fn timeline_event_body_digest(body: &TimelineEventBody) -> std::result::Result<String, String> {
+    serde_json::to_vec(body)
+        .map(|bytes| sha256_hex(bytes.as_slice()))
+        .map_err(|error| format!("timeline event serialization failed: {error}"))
 }
 
 fn default_timeline_spool_path() -> PathBuf {
@@ -1665,6 +1756,16 @@ mod tests {
         }
     }
 
+    fn memory_evidence_with_hit(content: &str) -> MemoryEvidenceV1 {
+        use crate::proof::schema::MemoryAttestationMode;
+        let hit = MemoryHit {
+            id: "mem-1".to_string(),
+            content: content.to_string(),
+            score: Some(0.9),
+        };
+        MemoryEvidenceV1::new("context", &[hit], MemoryAttestationMode::AttestedWithRecall)
+    }
+
     fn timeline_events() -> Vec<NexusExecutionEvent> {
         vec![
             NexusExecutionEvent::SnapshotCreated {
@@ -1726,6 +1827,56 @@ mod tests {
             bodies[2]["capsule_digest"],
             "550e8400-e29b-41d4-a716-446655440001"
         );
+    }
+
+    #[tokio::test]
+    async fn timeline_chain_links_consecutive_events() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let sink = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        );
+
+        let status = sink
+            .deliver("agent-1", Some("session-1"), &timeline_events())
+            .await;
+
+        assert_eq!(status, TimelineDeliveryStatus::Delivered);
+        let requests = captured.lock().unwrap();
+        let bodies = requests
+            .iter()
+            .map(|request| serde_json::from_str::<TimelineEventBody>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies[0].prev_event_digest, None);
+        assert_eq!(
+            bodies[1].prev_event_digest.as_deref(),
+            Some(timeline_event_body_digest(&bodies[0]).unwrap().as_str())
+        );
+        assert_eq!(
+            bodies[2].prev_event_digest.as_deref(),
+            Some(timeline_event_body_digest(&bodies[1]).unwrap().as_str())
+        );
+        verify_timeline_chain(&bodies).unwrap();
+    }
+
+    #[test]
+    fn verify_timeline_chain_detects_tampering() {
+        let mut first = TimelineEventBody::from_event(None, &timeline_events()[0]);
+        let mut second = TimelineEventBody::from_event(None, &timeline_events()[1]);
+        second.prev_event_digest = Some(timeline_event_body_digest(&first).unwrap());
+        first.event_type = "tampered".to_string();
+
+        let error = verify_timeline_chain(&[first, second]).unwrap_err();
+
+        assert!(error.contains("prev_event_digest mismatch"));
     }
 
     #[tokio::test]
@@ -1864,6 +2015,38 @@ mod tests {
         assert!(evidence.is_some());
         assert_eq!(mode, MemoryAttestationMode::AttestedNoHit);
         assert_eq!(evidence.unwrap().injected_count, 0);
+    }
+
+    #[test]
+    fn evidence_hmac_digest_is_deterministic() {
+        let evidence = memory_evidence_with_hit("some context");
+
+        let first = evidence.evidence_hmac_digest(b"test-key");
+        let second = evidence.evidence_hmac_digest(b"test-key");
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn evidence_hmac_digest_differs_for_different_key() {
+        let evidence = memory_evidence_with_hit("some context");
+
+        let first = evidence.evidence_hmac_digest(b"test-key-1");
+        let second = evidence.evidence_hmac_digest(b"test-key-2");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn evidence_hmac_digest_changes_with_hit_digests_change() {
+        let first = memory_evidence_with_hit("some context");
+        let second = memory_evidence_with_hit("changed context");
+
+        assert_ne!(
+            first.evidence_hmac_digest(b"test-key"),
+            second.evidence_hmac_digest(b"test-key")
+        );
     }
 
     #[tokio::test]
