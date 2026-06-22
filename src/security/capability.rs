@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{NexusError, Result};
+use crate::security::denial::DenialReason;
 
 /// Represents a specific capability that can be granted
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -390,7 +391,8 @@ impl CapabilityManager {
         validity_duration: std::time::Duration,
     ) -> Result<CapabilityToken> {
         let parent = self.active_tokens.get(&parent_id).ok_or_else(|| {
-            NexusError::InvalidCapability(format!("parent token {parent_id} not found"))
+            tracing::warn!(parent_id = %parent_id, "attenuate: parent token not found");
+            NexusError::InvalidCapability("capability chain validation failed".to_string())
         })?;
         let child = parent.attenuate(
             narrower,
@@ -407,26 +409,26 @@ impl CapabilityManager {
     pub fn validate(&self, token: &CapabilityToken, requested: &Capability) -> Result<()> {
         // Check if revoked
         if let Some(revoked_at) = self.revoked_tokens.get(&token.id) {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} was revoked at {}",
-                token.id, revoked_at
-            )));
+            tracing::warn!(token_id = %token.id, revoked_at = %revoked_at, "token is revoked");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::TokenRevoked.safe_message().to_string(),
+            ));
         }
 
         // Check expiration
         if !token.is_valid() {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} expired at {}",
-                token.id, token.expires_at
-            )));
+            tracing::warn!(token_id = %token.id, expires_at = %token.expires_at, "token is expired");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::TokenExpired.safe_message().to_string(),
+            ));
         }
 
         // Verify signature
         if !token.verify_signature(&self.verifying_key) {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} has invalid signature",
-                token.id
-            )));
+            tracing::warn!(token_id = %token.id, "token has invalid signature");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::CapabilityNotPermitted.safe_message().to_string(),
+            ));
         }
 
         // Walk and verify the attenuation chain (no-op for root tokens).
@@ -436,10 +438,10 @@ impl CapabilityManager {
 
         // Check capability
         if !token.allows(requested) {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} does not grant {:?}",
-                token.id, requested
-            )));
+            tracing::warn!(token_id = %token.id, requested = ?requested, "token does not grant capability");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::CapabilityNotPermitted.safe_message().to_string(),
+            ));
         }
 
         Ok(())
@@ -461,14 +463,14 @@ impl CapabilityManager {
             // Check revocation before the active_tokens lookup: revoke() removes
             // the token from active_tokens but records it in revoked_tokens.
             if let Some(at) = self.revoked_tokens.get(&pid) {
-                return Err(NexusError::InvalidCapability(format!(
-                    "ancestor {pid} was revoked at {at}"
-                )));
+                tracing::warn!(ancestor_id = %pid, invalidated_at = %at, "ancestor token is no longer valid");
+                return Err(NexusError::InvalidCapability(
+                    DenialReason::TokenRevoked.safe_message().to_string(),
+                ));
             }
             let parent = self.active_tokens.get(&pid).ok_or_else(|| {
-                NexusError::InvalidCapability(format!(
-                    "broken attenuation chain: parent {pid} not found"
-                ))
+                tracing::warn!(parent_id = %pid, "broken attenuation chain: parent not found");
+                NexusError::InvalidCapability("capability chain validation failed".to_string())
             })?;
             if !parent.verify_signature(&self.verifying_key) {
                 return Err(NexusError::InvalidCapability(format!(

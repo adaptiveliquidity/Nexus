@@ -52,7 +52,7 @@ async fn tool_not_in_allowlist() {
         parsed["denial_negotiation"]["reason"]
             .as_str()
             .unwrap_or_default()
-            .contains("NEXUS_IQ_ALLOWLIST"),
+            .contains("tool is not in the MCP tool allowlist"),
         "denial should identify the IQ allowlist: {parsed}"
     );
 }

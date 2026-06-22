@@ -24,7 +24,7 @@ use nexus::hypervisor::{
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
 use nexus::profile::{load_and_validate, CapabilityProfileManifest};
-use nexus::security::{Capability, CapabilityToken};
+use nexus::security::{Capability, CapabilityToken, DenialReason};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
 use nexus::telemetry::{ExecutionRecord, TelemetryStats};
 use nexus::NexusError;
@@ -748,22 +748,67 @@ fn tool_error_response(error: impl std::fmt::Display) -> String {
 }
 
 fn tool_anyhow_error_response(error: anyhow::Error) -> String {
-    let message = error.to_string();
-    if let Some(code) = mcp_error_code(&error) {
-        return serde_json::json!({ "code": code, "error": message }).to_string();
-    }
-    tool_error_response(message)
-}
+    let (safe_msg, code): (std::borrow::Cow<str>, Option<i64>) =
+        if let Some(e) = error.downcast_ref::<NexusError>() {
+            match e {
+                NexusError::InvalidCapability(detail) => {
+                    // Decide between TokenExpired / TokenRevoked based on internal detail,
+                    // but never surface the raw detail (token ids, timestamps) to the client.
+                    let denial = if detail.contains("expired") {
+                        DenialReason::TokenExpired
+                    } else if detail.contains("revoked") {
+                        DenialReason::TokenRevoked
+                    } else {
+                        DenialReason::CapabilityNotPermitted
+                    };
+                    (denial.safe_message().into(), None)
+                }
+                NexusError::CapabilityDenied(detail) => {
+                    // Profile-level denials get -32602 (Invalid Params) for MCP callers.
+                    let safe = DenialReason::CapabilityNotPermitted.safe_message();
+                    let code = if detail.starts_with("capability not permitted by active profile:") {
+                        Some(-32602_i64)
+                    } else {
+                        None
+                    };
+                    (safe.into(), code)
+                }
+                NexusError::FilesystemError(_) => {
+                    (DenialReason::WasmPathInaccessible.safe_message().into(), None)
+                }
+                NexusError::ResourceExhausted(_)
+                | NexusError::MemoryLimitExceeded(_)
+                | NexusError::FuelExhausted(_)
+                | NexusError::Timeout(_) => {
+                    // Resource limits are safe to report generically.
+                    (e.to_string().into(), None)
+                }
+                _ => {
+                    let id = uuid::Uuid::new_v4();
+                    tracing::error!(
+                        correlation_id = %id,
+                        error = ?error,
+                        "internal nexus error"
+                    );
+                    (format!("internal error [{}]", id).into(), None)
+                }
+            }
+        } else {
+            let id = uuid::Uuid::new_v4();
+            tracing::error!(
+                correlation_id = %id,
+                error = ?error,
+                "unhandled internal error"
+            );
+            (format!("internal error [{}]", id).into(), None)
+        };
 
-fn mcp_error_code(error: &anyhow::Error) -> Option<i64> {
-    match error.downcast_ref::<NexusError>() {
-        Some(NexusError::CapabilityDenied(message))
-            if message.starts_with("capability not permitted by active profile:") =>
-        {
-            Some(-32602)
-        }
-        _ => None,
-    }
+    let json = match code {
+        Some(c) => serde_json::json!({ "code": c, "error": safe_msg.as_ref() }),
+        None => serde_json::json!({ "error": safe_msg.as_ref() }),
+    };
+    serde_json::to_string(&json)
+        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
 }
 
 #[derive(Serialize)]
@@ -854,7 +899,8 @@ impl NexusMcpServer {
         self.ensure_tool_allowed("nexus_execute")?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+            tracing::warn!(error = %e, "wasm file read failed");
+            anyhow::anyhow!("{}", DenialReason::WasmPathInaccessible.safe_message())
         })?;
 
         let mut tool = ToolDefinition::new("mcp_tool".to_string(), wasm_bytes);
@@ -873,7 +919,8 @@ impl NexusMcpServer {
         self.ensure_tool_allowed("nexus_execute_retry")?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+            tracing::warn!(error = %e, "wasm file read failed");
+            anyhow::anyhow!("{}", DenialReason::WasmPathInaccessible.safe_message())
         })?;
 
         let mut tool = ToolDefinition::new("mcp_tool".to_string(), wasm_bytes);
@@ -891,7 +938,8 @@ impl NexusMcpServer {
         self.ensure_proof_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+            tracing::warn!(error = %e, "wasm file read failed");
+            anyhow::anyhow!("{}", DenialReason::WasmPathInaccessible.safe_message())
         })?;
 
         let tool = ToolDefinition::new("mcp_tool_proof".to_string(), wasm_bytes);
@@ -936,10 +984,7 @@ impl NexusMcpServer {
                         )
                         .into(),
                         memory_hits_count: 0,
-                        reason: format!(
-                            "tool {} is not in {NEXUS_IQ_ALLOWLIST_ENV}",
-                            params.tool_name
-                        ),
+                        reason: DenialReason::ToolNotAllowed.safe_message().to_string(),
                     })
                     .await;
             }
@@ -1051,6 +1096,7 @@ impl NexusMcpServer {
                         .await
                 }
                 Err(error) => {
+                    tracing::warn!(error = %error, "nexus_iq capability check failed");
                     return self
                         .nexus_iq_denial_response(NexusIqDenialContext {
                             aeon_agent_id: params.aeon_agent_id,
@@ -1059,7 +1105,7 @@ impl NexusMcpServer {
                             attestation_mode,
                             memory_evidence_ref: MemoryEvidenceForMcp::from(recall.evidence),
                             memory_hits_count,
-                            reason: error.to_string(),
+                            reason: DenialReason::CapabilityNotPermitted.safe_message().to_string(),
                         })
                         .await;
                 }
@@ -1106,6 +1152,7 @@ impl NexusMcpServer {
                 })
             }
             Err(error) if is_capability_denial(&error) => {
+                tracing::warn!(error = %error, "nexus_iq execution capability denied");
                 self.nexus_iq_denial_response(NexusIqDenialContext {
                     aeon_agent_id: params.aeon_agent_id,
                     aeon_session_id: params.aeon_session_id,
@@ -1113,7 +1160,7 @@ impl NexusMcpServer {
                     attestation_mode,
                     memory_evidence_ref: MemoryEvidenceForMcp::from(recall.evidence),
                     memory_hits_count,
-                    reason: error.to_string(),
+                    reason: DenialReason::CapabilityNotPermitted.safe_message().to_string(),
                 })
                 .await
             }
@@ -1130,7 +1177,8 @@ impl NexusMcpServer {
         self.ensure_proof_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+            tracing::warn!(error = %e, "wasm file read failed");
+            anyhow::anyhow!("{}", DenialReason::WasmPathInaccessible.safe_message())
         })?;
 
         let required_capabilities = params
@@ -1206,7 +1254,8 @@ impl NexusMcpServer {
         self.ensure_wasi_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+            tracing::warn!(error = %e, "wasm file read failed");
+            anyhow::anyhow!("{}", DenialReason::WasmPathInaccessible.safe_message())
         })?;
 
         let mut tool = ToolDefinition::new("mcp_tool_wasi".to_string(), wasm_bytes);
@@ -1372,7 +1421,8 @@ impl NexusMcpServer {
         self.ensure_fork_enabled()?;
         let wasm_path = self.resolve_wasm_path(&params.wasm_path)?;
         let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read wasm file '{}': {}", params.wasm_path, e)
+            tracing::warn!(error = %e, "wasm file read failed");
+            anyhow::anyhow!("{}", DenialReason::WasmPathInaccessible.safe_message())
         })?;
 
         let (base_snapshot_id, base_snapshot_source, semantics) =
@@ -1719,27 +1769,33 @@ impl NexusMcpServer {
                             Duration::from_secs(validity_secs),
                         )
                         .map_err(|e| {
-                            anyhow::anyhow!(
-                                "parent_token_id {parent_id} does not authorize requested capability: {e}"
-                            )
+                            tracing::warn!(
+                                parent_id = %parent_id,
+                                error = %e,
+                                "attenuate_token: capability outside parent scope"
+                            );
+                            anyhow::Error::from(NexusError::CapabilityDenied(
+                                "capability not permitted by active profile: requested capability outside parent token scope".to_string(),
+                            ))
                         })
                 })
                 .collect();
         }
 
         let Some(allowlist) = self.capability_allowlist.as_ref() else {
-            anyhow::bail!(
-                "execute_wasi capability requests require parent_token_id or operator allowlist {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}"
-            );
+            return Err(NexusError::CapabilityDenied(
+                "capability not permitted by active profile: no operator allowlist configured".to_string(),
+            )
+            .into());
         };
 
         let mut tokens = Vec::with_capacity(sanitized.len());
         for (capability, validity_secs) in sanitized {
             if !capability_allowed_by(allowlist, &capability) {
-                anyhow::bail!(
-                    "requested capability {:?} is not allowed by {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}",
-                    capability
-                );
+                return Err(NexusError::CapabilityDenied(
+                    "capability not permitted by active profile: requested capability not in allowlist".to_string(),
+                )
+                .into());
             }
             tokens.push(self.hypervisor.issue_token(
                 capability,
@@ -1752,16 +1808,17 @@ impl NexusMcpServer {
 
     fn ensure_operator_allowlisted(&self, capability: &Capability) -> Result<()> {
         let Some(allowlist) = self.capability_allowlist.as_ref() else {
-            anyhow::bail!(
-                "capability token issuance requires operator allowlist {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}"
-            );
+            return Err(NexusError::CapabilityDenied(
+                "capability not permitted by active profile: no operator allowlist configured".to_string(),
+            )
+            .into());
         };
 
         if !capability_allowed_by(allowlist, capability) {
-            anyhow::bail!(
-                "requested capability {:?} is not allowed by {NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV}",
-                capability
-            );
+            return Err(NexusError::CapabilityDenied(
+                "capability not permitted by active profile: requested capability not in allowlist".to_string(),
+            )
+            .into());
         }
         Ok(())
     }
@@ -2187,10 +2244,9 @@ fn check_tokens_against_profile(
 fn check_tokens_fresh(tokens: &[CapabilityToken]) -> nexus::Result<()> {
     for token in tokens {
         if !token.is_valid() {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} expired at {}",
-                token.id, token.expires_at
-            )));
+            return Err(NexusError::InvalidCapability(
+                DenialReason::TokenExpired.safe_message().to_string(),
+            ));
         }
     }
 
@@ -2357,35 +2413,37 @@ fn canonicalize_module_dirs(dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
 fn resolve_wasm_path(wasm_path: &Path, allowed_dirs: &[PathBuf]) -> Result<PathBuf> {
     let requested_path = absolute_request_path(wasm_path)?;
     if !path_is_lexically_allowed(&requested_path, allowed_dirs) {
-        anyhow::bail!(
+        return Err(NexusError::FilesystemError(format!(
             "wasm path '{}' is outside allowed MCP module directories",
             wasm_path.display()
-        );
+        ))
+        .into());
     }
 
-    let canonical = std::fs::canonicalize(wasm_path).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to canonicalize wasm file '{}': {e}",
+    let canonical = std::fs::canonicalize(wasm_path).map_err(|_| {
+        NexusError::FilesystemError(format!(
+            "wasm path '{}' not found or inaccessible",
             wasm_path.display()
-        )
+        ))
     })?;
 
     if !canonical.is_file() {
-        anyhow::bail!(
-            "wasm path '{}' resolved to non-file '{}'",
-            wasm_path.display(),
-            canonical.display()
-        );
+        return Err(NexusError::FilesystemError(format!(
+            "wasm path '{}' is not a file",
+            wasm_path.display()
+        ))
+        .into());
     }
 
     if allowed_dirs.iter().any(|dir| canonical.starts_with(dir)) {
         return Ok(canonical);
     }
 
-    anyhow::bail!(
+    Err(NexusError::FilesystemError(format!(
         "wasm path '{}' is outside allowed MCP module directories",
         wasm_path.display()
-    )
+    ))
+    .into())
 }
 
 fn absolute_request_path(path: &Path) -> Result<PathBuf> {
@@ -2667,6 +2725,33 @@ mod tests {
     }
 
     #[test]
+    fn expired_token_error_omits_identifier_and_expiry() {
+        let token = CapabilityToken::new(
+            Capability::ReadFile(PathBuf::from("/data")),
+            "test",
+            Duration::from_secs(0),
+            &ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        )
+        .unwrap();
+
+        let error = check_tokens_fresh(&[token]).unwrap_err();
+        let message = match error {
+            NexusError::InvalidCapability(message) => message,
+            other => panic!("expected InvalidCapability, got: {other:?}"),
+        };
+
+        assert_eq!(message, DenialReason::TokenExpired.safe_message());
+        assert!(
+            !message.contains('-'),
+            "expired token denial must not include token UUID: {message}"
+        );
+        assert!(
+            !message.contains("expired at"),
+            "expired token denial must not include expiry timestamp: {message}"
+        );
+    }
+
+    #[test]
     fn preview_base64_requires_capability() {
         let result = nexus::snapshot::RollbackResult {
             snapshot_id: Uuid::new_v4(),
@@ -2755,6 +2840,110 @@ mod tests {
         assert!(
             !message.contains("No such file"),
             "outside-root misses must not reveal host path existence: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_wasm_path_inside_allowed_module_dir_without_os_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let wasm_path = allowed.join("missing.wasm");
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_wasm_path(&wasm_path, &allowed_dirs).unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("not found or inaccessible"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !message.contains("Failed to canonicalize"),
+            "canonicalization failure detail must not be exposed: {err}"
+        );
+        assert!(
+            !message.contains("No such file") && !message.contains("os error"),
+            "OS error detail must not be exposed: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_wasm_directory_without_canonical_path_leak() {
+        let tmp = tempfile::Builder::new()
+            .prefix("nexus-mcp-path-leak")
+            .tempdir_in(".")
+            .unwrap();
+        let allowed = tmp.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let wasm_path = allowed.join("module-dir.wasm");
+        std::fs::create_dir_all(&wasm_path).unwrap();
+        let relative_wasm_path = wasm_path
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let canonical = std::fs::canonicalize(&wasm_path).unwrap();
+        let err = resolve_wasm_path(&relative_wasm_path, &allowed_dirs).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("is not a file"), "unexpected error: {err}");
+        assert!(
+            !message.contains("non-file"),
+            "directory denial must not use the canonical-path leak wording: {err}"
+        );
+        assert!(
+            !message.contains(&canonical.to_string_lossy().to_string()),
+            "directory denial must not expose canonical host path: {err}"
+        );
+        assert!(
+            !message_contains_quoted_absolute_path(&message),
+            "directory denial must not expose absolute host paths: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn message_contains_quoted_absolute_path(message: &str) -> bool {
+        message.contains("'/") || message.contains("\"/")
+    }
+
+    #[cfg(windows)]
+    fn message_contains_quoted_absolute_path(message: &str) -> bool {
+        let contains_drive_path = message.as_bytes().windows(3).any(|window| {
+            matches!(window[0], b'\'' | b'"')
+                && window[1].is_ascii_alphabetic()
+                && window[2] == b':'
+        });
+        contains_drive_path || message.contains(r#"'\\"#) || message.contains(r#""\\"#)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_wasm_path_symlink_to_directory_without_canonical_path_leak() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let linked_wasm = allowed.join("linked-dir.wasm");
+        symlink(&outside, &linked_wasm).unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let canonical = std::fs::canonicalize(&linked_wasm).unwrap();
+        let err = resolve_wasm_path(&linked_wasm, &allowed_dirs).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("is not a file"), "unexpected error: {err}");
+        assert!(
+            !message.contains("non-file"),
+            "directory symlink denial must not use the canonical-path leak wording: {err}"
+        );
+        assert!(
+            !message.contains(&canonical.to_string_lossy().to_string()),
+            "directory symlink denial must not expose canonical host path: {err}"
         );
     }
 
