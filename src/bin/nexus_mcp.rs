@@ -2490,9 +2490,16 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Nexus MCP server");
 
+    #[cfg(feature = "aeon-memory")]
+    let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+    #[cfg(feature = "aeon-memory")]
+    if matches!(aeon_config.as_ref(), Some(config) if config.enabled && config.hmac_key.is_none()) {
+        eprintln!("[nexus] SECURITY WARNING: aeon-memory is active but NEXUS_AEON_HMAC_KEY is not set — memory_digest will use unauthenticated SHA-256 (forgeable). Set NEXUS_AEON_HMAC_KEY (>=32 bytes) in production.");
+    }
+
     let config = HypervisorConfig {
         #[cfg(feature = "aeon-memory")]
-        aeon_config: nexus::aeon::AeonConfig::from_env().ok(),
+        aeon_config,
         ..HypervisorConfig::default()
     };
     let hypervisor = Arc::new(NexusHypervisor::new(config)?);
