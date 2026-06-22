@@ -237,6 +237,68 @@ Monitors three dimensions during execution:
 4. **Attenuation chains** — tokens can be narrowed and re-delegated, never widened
 5. **Denial on failure** — missing, expired, revoked, or incorrectly-signed tokens produce `CapabilityDenied`
 
+## AEON-IQ Memory Plane (`aeon-memory` feature)
+
+The `aeon-memory` feature wires Nexus to AEON-IQ as a persistent memory plane. When enabled, every execution that involves an LLM recovery call routes through the AEON-IQ proxy, attaches a cryptographically-bound `MemoryEvidenceV1` bundle to the proof capsule, and appends a signed entry to the AEON-IQ timeline chain.
+
+### What it enables
+
+- **Memory attestation** — each execution receipt carries a `memory_mode` field (`Attested`, `AttestedWithRecall`, `Advisory`, or `Absent`) that records whether the capsule digest was bound to a verified AEON-IQ memory hit.
+- **Evidence digests** — `MemoryEvidenceV1` bundles contain per-hit SHA-256 digests and, when `NEXUS_AEON_HMAC_KEY` is set, an HMAC-SHA256 digest over the full evidence body that AEON-IQ can independently verify.
+- **Timeline chain** — execution events are forwarded to the AEON-IQ timeline endpoint; a local spool (`NEXUS_AEON_TIMELINE_SPOOL`) buffers events during outages and replays them on restart.
+
+### Build
+
+```bash
+cargo build --release --features aeon-memory
+```
+
+`aeon-memory` implies `ai-recovery` (LLM-backed recovery policies).
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `NEXUS_AEON_BASE_URL` | Yes | AEON-IQ service URL (http or https). Defaults to `http://localhost:8080`. |
+| `NEXUS_AEON_HMAC_KEY` | **Production: mandatory** | Hex-encoded HMAC-SHA256 shared secret (minimum 32 bytes / 64 hex chars). Without it, `memory_digest` falls back to unauthenticated SHA-256 — forgeable. Set in all production deployments. |
+| `NEXUS_AEON_MANAGEMENT_KEY` | Optional | Management API key for AEON-IQ administrative endpoints. |
+| `NEXUS_AEON_AGENT_ID` | Optional | Agent identifier forwarded to AEON-IQ. Defaults to `nexus`. |
+| `NEXUS_AEON_SESSION_ID` | Optional | Session identifier for memory scoping. Auto-generated when omitted. |
+| `NEXUS_AEON_TIMEOUT_MS` | Optional | HTTP timeout in milliseconds for AEON-IQ calls. Defaults to `30000`. |
+| `NEXUS_AEON_TIMELINE_SPOOL` | Optional | Path to a local directory for offline timeline event buffering. |
+| `NEXUS_AEON_ENABLED` | Optional | Set to `false` to disable the integration without removing env vars. Defaults to `true` when other vars are present. |
+
+### CLI: `nexus aeon verify-capsule`
+
+Verify and validate a `MemoryEvidenceV1` bundle:
+
+```bash
+# Read evidence from a file
+nexus aeon verify-capsule --capsule-id <ID> --evidence-file evidence.json
+
+# Read evidence from stdin
+cat evidence.json | nexus aeon verify-capsule --capsule-id <ID>
+```
+
+Returns `VALID` on success, or `INVALID: <reason>` on failure.
+
+Additional `aeon` subcommands:
+
+```bash
+# Validate a MemoryEvidenceV1 JSON file
+nexus aeon verify-memory-evidence --evidence-file evidence.json
+
+# Verify a ProofCapsule JSON has consistent memory_mode and memory_evidence
+nexus aeon verify-proof-capsule capsule.json
+
+# Replay locally spooled timeline events
+nexus aeon replay-events --agent-id nexus
+```
+
+### Security
+
+See [docs/AEON_NEXUS_THREAT_MODEL.md](docs/AEON_NEXUS_THREAT_MODEL.md) for the full threat model, including SSRF egress controls, HMAC key provisioning guidance, and the degraded-proof advisory assertion policy.
+
 ## Benchmark Results
 
 > See the [live dashboard](https://adaptiveliquidity.github.io/Nexus/) for the latest numbers and head-to-head competitor comparison with cited sources.

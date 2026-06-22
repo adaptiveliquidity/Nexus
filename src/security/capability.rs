@@ -205,6 +205,9 @@ impl CapabilityToken {
         validity_duration: std::time::Duration,
         signing_key: &SigningKey,
     ) -> Result<Self> {
+        if let Capability::HttpGet(ref p) | Capability::HttpPost(ref p) = capability {
+            crate::security::url_guard::validate_http_capability_pattern(p)?;
+        }
         let now = Utc::now();
         let mut token = CapabilityToken {
             id: Uuid::new_v4(),
@@ -289,6 +292,9 @@ impl CapabilityToken {
             return Err(NexusError::InvalidCapability(format!(
                 "attenuation chain depth {child_depth} exceeds max {max_depth}"
             )));
+        }
+        if let Capability::HttpGet(ref p) | Capability::HttpPost(ref p) = narrower {
+            crate::security::url_guard::validate_http_capability_pattern(p)?;
         }
         let now = Utc::now();
         let expires_at = (now + validity_duration).min(self.expires_at);

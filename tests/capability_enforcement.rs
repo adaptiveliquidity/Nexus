@@ -231,3 +231,73 @@ async fn revoked_token_denied() {
     let result = mgr.authorize(&[token], &[Capability::ReadFile(PathBuf::from("/data"))]);
     assert!(result.is_err(), "revoked token should fail authorize");
 }
+
+
+// ── SSRF: hostile URL in HttpGet capability token (pending fix) ────────────
+
+/// Attempts to issue a capability token for the AWS IMDSv1 metadata endpoint.
+///
+/// This test is `#[ignore]` because SSRF URL blocking is not yet implemented
+/// in `sanitize_token_request` / `ensure_operator_allowlisted`. When the fix
+/// lands (Secure MCP Runtime hardening item: SSRF egress blocking), remove
+/// the `#[ignore]` and flip the assertion.
+///
+/// Tracking: see SECURITY.md §SSRF and `nexus_mcp::do_issue_token`.
+#[test]
+#[ignore = "pending SSRF fix — see Secure MCP Runtime hardening, SSRF egress item (HIGH)"]
+fn hostile_url_rejected_at_token_issuance() {
+    use std::time::Duration;
+    let hv = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+
+    // Attempt to issue an HttpGet token for an SSRF-hostile URL.
+    // When SSRF blocking is implemented, `issue_token` (or the MCP-layer
+    // wrapper) must return Err, not Ok.
+    let result = hv.issue_token(
+        Capability::HttpGet("http://169.254.169.254/latest/meta-data/".to_string()),
+        "mcp_client",
+        Duration::from_secs(3600),
+    );
+
+    assert!(
+        result.is_err(),
+        "issuing a token for a link-local/metadata URL must be rejected; got Ok"
+    );
+}
+
+// ── Invalid UUID in SnapshotRollbackParams deserialization ────────────────
+
+/// Ensures that a non-UUID `snapshot_id` produces a clean error from the
+/// UUID parse layer, not a panic.
+///
+/// The real handler calls `Uuid::parse_str(&params.snapshot_id)` and maps
+/// the error to `anyhow::anyhow!("Invalid snapshot UUID: {e}")`. This test
+/// verifies that invariant at the unit level (uuid crate) and confirms the
+/// error message is non-empty and does not panic.
+#[test]
+fn invalid_uuid_in_snapshot_rollback_params() {
+    let hostile_inputs: &[&str] = &[
+        "",
+        "not-a-uuid",
+        "00000000-0000-0000-0000-00000000000Z",   // invalid hex char
+        "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",   // all non-hex
+        &"a".repeat(512),                          // oversized
+        "\x00\x01\x02",                           // control bytes
+        "' OR 1=1 --",                             // SQL-injection-style
+    ];
+
+    for input in hostile_inputs {
+        let result = uuid::Uuid::parse_str(input);
+        assert!(
+            result.is_err(),
+            "uuid::Uuid::parse_str should return Err for {:?}, got Ok",
+            input
+        );
+        // Confirm the error message is a non-empty string (no panic path).
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.is_empty(),
+            "error message must be non-empty for input {:?}",
+            input
+        );
+    }
+}

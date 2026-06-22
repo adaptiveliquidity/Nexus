@@ -1752,6 +1752,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
