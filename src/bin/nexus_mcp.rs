@@ -1317,6 +1317,12 @@ impl NexusMcpServer {
 
     fn do_issue_token(&self, params: IssueTokenParams) -> Result<TokenResponse> {
         self.ensure_tool_allowed("nexus_issue_token")?;
+        if matches!(params.capability.as_str(), "http_get" | "http_post") {
+            if let Some(ref url) = params.path {
+                nexus::security::validate_http_capability_pattern(url)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+            }
+        }
         let capability = parse_capability_from_str(&params.capability, params.path.as_deref())
             .ok_or_else(|| anyhow::anyhow!("Unknown capability type: {}", params.capability))?;
 
@@ -2081,8 +2087,24 @@ fn parse_iq_capability(spec: &str) -> Result<Capability> {
         "read" | "read_file" => parse_capability_from_str("read_file", value),
         "write" | "write_file" => parse_capability_from_str("write_file", value),
         "list" | "list_dir" => parse_capability_from_str("list_dir", value),
-        "http_get" => parse_capability_from_str("http_get", value),
-        "http_post" => parse_capability_from_str("http_post", value),
+        "http_get" => {
+            if let Some(url) = value {
+                nexus::security::validate_http_capability_pattern(url)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                Some(Capability::HttpGet(url.to_string()))
+            } else {
+                None
+            }
+        }
+        "http_post" => {
+            if let Some(url) = value {
+                nexus::security::validate_http_capability_pattern(url)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                Some(Capability::HttpPost(url.to_string()))
+            } else {
+                None
+            }
+        }
         "exec" | "execute" => parse_capability_from_str("execute", value),
         "tmpfs" | "mount_tmpfs" => parse_capability_from_str("mount_tmpfs", value),
         "nexus" => match value {
