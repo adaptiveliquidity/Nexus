@@ -161,7 +161,7 @@ async fn wasm_path_outside_module_dir_is_rejected() {
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("outside allowed MCP module directories"),
+        error.contains("wasm path is not accessible"),
         "expected MCP module-dir allowlist rejection, got: {parsed}"
     );
 }
