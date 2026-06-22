@@ -95,6 +95,10 @@ enum Commands {
     #[command(subcommand)]
     Profile(ProfileCmd),
 
+    /// Operator utilities for the `nexus-agentd` daemon.
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
+
     /// AEON-IQ integration utilities.
     #[cfg(feature = "aeon-memory")]
     #[command(subcommand)]
@@ -127,6 +131,20 @@ enum ProfileCmd {
     Validate {
         /// Path to a capability profile TOML file.
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Probe a running `nexus-agentd`: connect, send Ping, expect Pong.
+    /// Exits 0 and prints the daemon version on success, non-zero on
+    /// any connection/timeout/protocol failure. Suitable as a container
+    /// healthcheck.
+    Ping {
+        /// Custom daemon socket (defaults to NEXUS_AGENTD_SOCKET or the
+        /// platform default).
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
 }
 
@@ -249,6 +267,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Profile(cmd) => {
             run_profile(cmd)?;
+        }
+        Commands::Daemon(cmd) => {
+            run_daemon_cmd(cmd)?;
         }
         #[cfg(feature = "aeon-memory")]
         Commands::Aeon(cmd) => {
@@ -937,6 +958,64 @@ fn spawn_daemon_in_background(socket: &std::path::Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn run_via_daemon(_wasm: PathBuf, _entry: String, _socket: Option<PathBuf>) -> anyhow::Result<()> {
     anyhow::bail!("`nexus run` requires a Unix-socket daemon; run on Linux or WSL2")
+}
+
+fn run_daemon_cmd(cmd: DaemonCmd) -> anyhow::Result<()> {
+    match cmd {
+        DaemonCmd::Ping { socket } => daemon_ping(socket),
+    }
+}
+
+/// Connect to `nexus-agentd`, send `Ping`, and expect `Pong`. On success
+/// prints `nexus-agentd OK (version <v>)` to stdout and returns `Ok(())`
+/// (exit 0). On any failure prints `nexus-agentd unreachable: <err>` to
+/// stderr and exits the process with code 1. This never spawns a daemon —
+/// it is a pure healthcheck probe.
+#[cfg(unix)]
+fn daemon_ping(socket: Option<PathBuf>) -> anyhow::Result<()> {
+    use nexus::daemon::protocol::{read_frame, write_frame};
+    use nexus::daemon::{default_socket_path, DaemonRequest, DaemonResponse};
+    use std::time::Duration;
+    use tokio::io::{BufReader, BufWriter};
+    use tokio::net::UnixStream;
+
+    let socket = socket.unwrap_or_else(default_socket_path);
+    let rt = tokio::runtime::Runtime::new()?;
+    let result: anyhow::Result<String> = rt.block_on(async move {
+        let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&socket))
+            .await
+            .map_err(|_| anyhow::anyhow!("connect timed out for {}", socket.display()))?
+            .map_err(|e| anyhow::anyhow!("could not connect to {}: {e}", socket.display()))?;
+        let (rd, wr) = stream.into_split();
+        let mut rd = BufReader::new(rd);
+        let mut wr = BufWriter::new(wr);
+        write_frame(&mut wr, &DaemonRequest::Ping).await?;
+        let resp: DaemonResponse =
+            tokio::time::timeout(Duration::from_secs(5), read_frame(&mut rd))
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out waiting for Pong"))??;
+        match resp {
+            DaemonResponse::Pong { version } => Ok(version),
+            other => Err(anyhow::anyhow!("unexpected reply to Ping: {other:?}")),
+        }
+    });
+
+    match result {
+        Ok(version) => {
+            println!("nexus-agentd OK (version {version})");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("nexus-agentd unreachable: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn daemon_ping(_socket: Option<PathBuf>) -> anyhow::Result<()> {
+    eprintln!("nexus-agentd unreachable: `nexus daemon ping` requires a Unix-socket daemon; run on Linux or WSL2");
+    std::process::exit(1);
 }
 
 fn execute_wasm(wasm_path: PathBuf, entry: String, _snapshot: bool) -> anyhow::Result<()> {
