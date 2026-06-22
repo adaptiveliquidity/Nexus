@@ -434,6 +434,10 @@ async fn timeline_fail_open_aeon_500() {
         parsed["proof_capsule_ref"].is_string(),
         "execution must still produce proof capsule despite AEON 500: {parsed}"
     );
+    assert_eq!(
+        parsed["timeline_status"], "fire_and_forget",
+        "AEON 500 must not block execution and must report fire_and_forget: {parsed}"
+    );
 }
 
 #[tokio::test]
@@ -553,5 +557,44 @@ async fn timeline_events_have_correct_agent_id() {
     assert_eq!(
         body["session_id"], "session-1",
         "timeline event body should carry session_id: {body}"
+    );
+}
+
+
+#[tokio::test]
+async fn timeline_503_is_non_fatal() {
+    let Some(server) = MockAeonServer::try_new(
+        200,
+        r#"{"results":[{"id":"mem-1","content":"previous context","score":0.91}]}"#,
+        503,
+    ) else {
+        return;
+    };
+    let mut client = McpClient::spawn(&server, None).await;
+    initialize_client(&mut client).await;
+
+    let mut args = iq_args_stub();
+    args["memory_query"] = serde_json::json!("recall timeline 503 context");
+
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            serde_json::json!({ "name": "nexus_iq_execute", "arguments": args }),
+        )
+        .await;
+    let parsed = tool_json(&resp);
+
+    assert!(
+        parsed["proof_capsule_ref"].is_string(),
+        "execution must succeed despite AEON timeline 503: {parsed}"
+    );
+    assert_eq!(
+        parsed["timeline_status"], "fire_and_forget",
+        "AEON 503 must be treated as non-fatal and report fire_and_forget: {parsed}"
+    );
+    assert_eq!(
+        parsed["memory_hits_count"], 1,
+        "memory recall must still return 1 hit despite timeline 503: {parsed}"
     );
 }
