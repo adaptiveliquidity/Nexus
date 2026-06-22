@@ -24,7 +24,7 @@ use nexus::hypervisor::{
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
 use nexus::profile::{load_and_validate, CapabilityProfileManifest};
-use nexus::security::{Capability, CapabilityToken};
+use nexus::security::{Capability, CapabilityToken, DenialReason};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
 use nexus::telemetry::{ExecutionRecord, TelemetryStats};
 use nexus::NexusError;
@@ -2165,10 +2165,9 @@ fn check_tokens_against_profile(
 fn check_tokens_fresh(tokens: &[CapabilityToken]) -> nexus::Result<()> {
     for token in tokens {
         if !token.is_valid() {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} expired at {}",
-                token.id, token.expires_at
-            )));
+            return Err(NexusError::InvalidCapability(
+                DenialReason::TokenExpired.safe_message().to_string(),
+            ));
         }
     }
 
@@ -2341,19 +2340,15 @@ fn resolve_wasm_path(wasm_path: &Path, allowed_dirs: &[PathBuf]) -> Result<PathB
         );
     }
 
-    let canonical = std::fs::canonicalize(wasm_path).map_err(|e| {
+    let canonical = std::fs::canonicalize(wasm_path).map_err(|_| {
         anyhow::anyhow!(
-            "Failed to canonicalize wasm file '{}': {e}",
+            "wasm path '{}' not found or inaccessible",
             wasm_path.display()
         )
     })?;
 
     if !canonical.is_file() {
-        anyhow::bail!(
-            "wasm path '{}' resolved to non-file '{}'",
-            wasm_path.display(),
-            canonical.display()
-        );
+        anyhow::bail!("wasm path '{}' is not a file", wasm_path.display());
     }
 
     if allowed_dirs.iter().any(|dir| canonical.starts_with(dir)) {
@@ -2645,6 +2640,33 @@ mod tests {
     }
 
     #[test]
+    fn expired_token_error_omits_identifier_and_expiry() {
+        let token = CapabilityToken::new(
+            Capability::ReadFile(PathBuf::from("/data")),
+            "test",
+            Duration::from_secs(0),
+            &ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng),
+        )
+        .unwrap();
+
+        let error = check_tokens_fresh(&[token]).unwrap_err();
+        let message = match error {
+            NexusError::InvalidCapability(message) => message,
+            other => panic!("expected InvalidCapability, got: {other:?}"),
+        };
+
+        assert_eq!(message, DenialReason::TokenExpired.safe_message());
+        assert!(
+            !message.contains('-'),
+            "expired token denial must not include token UUID: {message}"
+        );
+        assert!(
+            !message.contains("expired at"),
+            "expired token denial must not include expiry timestamp: {message}"
+        );
+    }
+
+    #[test]
     fn preview_base64_requires_capability() {
         let result = nexus::snapshot::RollbackResult {
             snapshot_id: Uuid::new_v4(),
@@ -2733,6 +2755,110 @@ mod tests {
         assert!(
             !message.contains("No such file"),
             "outside-root misses must not reveal host path existence: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_wasm_path_inside_allowed_module_dir_without_os_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let wasm_path = allowed.join("missing.wasm");
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let err = resolve_wasm_path(&wasm_path, &allowed_dirs).unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("not found or inaccessible"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !message.contains("Failed to canonicalize"),
+            "canonicalization failure detail must not be exposed: {err}"
+        );
+        assert!(
+            !message.contains("No such file") && !message.contains("os error"),
+            "OS error detail must not be exposed: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_wasm_directory_without_canonical_path_leak() {
+        let tmp = tempfile::Builder::new()
+            .prefix("nexus-mcp-path-leak")
+            .tempdir_in(".")
+            .unwrap();
+        let allowed = tmp.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let wasm_path = allowed.join("module-dir.wasm");
+        std::fs::create_dir_all(&wasm_path).unwrap();
+        let relative_wasm_path = wasm_path
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .to_path_buf();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let canonical = std::fs::canonicalize(&wasm_path).unwrap();
+        let err = resolve_wasm_path(&relative_wasm_path, &allowed_dirs).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("is not a file"), "unexpected error: {err}");
+        assert!(
+            !message.contains("non-file"),
+            "directory denial must not use the canonical-path leak wording: {err}"
+        );
+        assert!(
+            !message.contains(&canonical.to_string_lossy().to_string()),
+            "directory denial must not expose canonical host path: {err}"
+        );
+        assert!(
+            !message_contains_quoted_absolute_path(&message),
+            "directory denial must not expose absolute host paths: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn message_contains_quoted_absolute_path(message: &str) -> bool {
+        message.contains("'/") || message.contains("\"/")
+    }
+
+    #[cfg(windows)]
+    fn message_contains_quoted_absolute_path(message: &str) -> bool {
+        let contains_drive_path = message.as_bytes().windows(3).any(|window| {
+            matches!(window[0], b'\'' | b'"')
+                && window[1].is_ascii_alphabetic()
+                && window[2] == b':'
+        });
+        contains_drive_path || message.contains(r#"'\\"#) || message.contains(r#""\\"#)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_wasm_path_symlink_to_directory_without_canonical_path_leak() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let linked_wasm = allowed.join("linked-dir.wasm");
+        symlink(&outside, &linked_wasm).unwrap();
+
+        let allowed_dirs = vec![std::fs::canonicalize(&allowed).unwrap()];
+        let canonical = std::fs::canonicalize(&linked_wasm).unwrap();
+        let err = resolve_wasm_path(&linked_wasm, &allowed_dirs).unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("is not a file"), "unexpected error: {err}");
+        assert!(
+            !message.contains("non-file"),
+            "directory symlink denial must not use the canonical-path leak wording: {err}"
+        );
+        assert!(
+            !message.contains(&canonical.to_string_lossy().to_string()),
+            "directory symlink denial must not expose canonical host path: {err}"
         );
     }
 
