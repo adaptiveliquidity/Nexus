@@ -121,6 +121,10 @@ pub struct SnapshotRollbackParams {
         description = "Optional parent capability token UUID. When set, requested caller_capabilities are attenuated from this token."
     )]
     pub parent_token_id: Option<String>,
+    #[schemars(
+        description = "Optional SHA-256 hex digest of the snapshot memory content. When provided, rollback is rejected unless the stored digest matches exactly, preventing TOCTOU substitution attacks."
+    )]
+    pub expected_digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1342,6 +1346,12 @@ impl NexusMcpServer {
             .into_iter()
             .map(|spec| parse_capability(&spec))
             .collect::<Result<_>>()?;
+        if let Some(ref expected) = params.expected_digest {
+            match self.hypervisor.snapshot_content_digest(&id) {
+                Some(ref actual) if actual.eq_ignore_ascii_case(expected) => {}
+                _ => return Err(anyhow::anyhow!("snapshot digest mismatch")),
+            }
+        }
         let caller_tokens =
             self.execute_wasi_tokens(&caller_capabilities, params.parent_token_id.as_deref())?;
         self.check_tokens_against_active_profile(&caller_tokens)?;
@@ -1824,6 +1834,11 @@ impl NexusMcpServer {
     }
 
     fn check_tokens_against_active_profile(&self, tokens: &[CapabilityToken]) -> Result<()> {
+        for token in tokens {
+            if self.hypervisor.is_token_revoked(&token.id) {
+                return Err(anyhow::anyhow!("capability token has been revoked"));
+            }
+        }
         if let Some(profile) = self.capability_profile.as_deref() {
             check_tokens_against_profile(tokens, profile)?;
         } else {

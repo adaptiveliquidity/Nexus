@@ -515,6 +515,11 @@ impl SnapshotManager {
         self.diff_buffer.read().unwrap().len()
     }
 
+    /// Return the stored memory checksum for a snapshot, or `None` if not found.
+    pub fn snapshot_content_digest(&self, id: &Uuid) -> Option<String> {
+        self.buffer.read().unwrap().get(id).map(|s| s.memory_checksum.clone())
+    }
+
     /// Create a differential snapshot against a base full snapshot.
     ///
     /// If the resulting diff's generation would exceed `max_diff_depth`, the
