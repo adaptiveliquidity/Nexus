@@ -236,15 +236,9 @@ async fn revoked_token_denied() {
 // ── SSRF: hostile URL in HttpGet capability token (pending fix) ────────────
 
 /// Attempts to issue a capability token for the AWS IMDSv1 metadata endpoint.
-///
-/// This test is `#[ignore]` because SSRF URL blocking is not yet implemented
-/// in `sanitize_token_request` / `ensure_operator_allowlisted`. When the fix
-/// lands (Secure MCP Runtime hardening item: SSRF egress blocking), remove
-/// the `#[ignore]` and flip the assertion.
-///
-/// Tracking: see SECURITY.md §SSRF and `nexus_mcp::do_issue_token`.
+/// SSRF URL blocking is enforced in `CapabilityToken::new()` via
+/// `validate_http_capability_pattern` (Secure MCP Runtime hardening item #1).
 #[test]
-#[ignore = "pending SSRF fix — see Secure MCP Runtime hardening, SSRF egress item (HIGH)"]
 fn hostile_url_rejected_at_token_issuance() {
     use std::time::Duration;
     let hv = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
