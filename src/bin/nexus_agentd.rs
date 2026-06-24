@@ -1016,6 +1016,12 @@ mod profile_auth_tests {
 
     /// Run `test` with the given env vars set, restoring originals afterward.
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], test: F) {
+        // Serialize env-mutating tests: enforce_profile_auth_requirement reads
+        // process-global NEXUS_AGENTD_* vars, so running these concurrently races
+        // (a sibling test's NEXUS_AGENTD_PROFILE leaks in and fails the file read).
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+
         let saved: Vec<(&str, Option<std::ffi::OsString>)> = vars
             .iter()
             .map(|(k, _)| (*k, std::env::var_os(k)))
