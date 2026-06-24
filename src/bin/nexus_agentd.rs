@@ -33,6 +33,11 @@ const AUTH_TOKEN_ENV: &str = "NEXUS_AGENTD_AUTH_TOKEN";
 const MODULE_DIR_ENV: &str = "NEXUS_AGENTD_MODULE_DIR";
 /// Profile env var for the daemon (Slice 3 — daemon_auth_required enforcement).
 const AGENTD_PROFILE_ENV: &str = "NEXUS_AGENTD_PROFILE";
+/// Set to any non-empty value to activate the release/production execution
+/// profile.  When active the daemon refuses to start without
+/// `NEXUS_AGENTD_AUTH_TOKEN` configured, regardless of any profile file.
+/// This is the fail-closed gate for production deployments.
+const AGENTD_RELEASE_ENV: &str = "NEXUS_AGENTD_RELEASE";
 const UNAUTHORIZED_MESSAGE: &str = "Unauthorized: daemon request authentication failed";
 const WASM_PATH_REJECTED_MESSAGE: &str =
     "wasm_path rejected: configure an allowed module directory";
@@ -117,6 +122,20 @@ fn configured_auth_token() -> anyhow::Result<AuthToken> {
 }
 
 fn enforce_profile_auth_requirement(auth_token: &AuthToken) -> anyhow::Result<()> {
+    // Release/production gate: if NEXUS_AGENTD_RELEASE is set to any non-empty
+    // value, require an auth token unconditionally before consulting any profile
+    // file.  This is the fail-closed production posture — a misconfigured
+    // deployment cannot silently run unauthenticated.
+    let release_active = std::env::var_os(AGENTD_RELEASE_ENV)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if release_active && auth_token.is_none() {
+        anyhow::bail!(
+            "release profile is active ({AGENTD_RELEASE_ENV} is set) but \
+             {AUTH_TOKEN_ENV} is not configured — refusing to start unauthenticated"
+        );
+    }
+
     let Some(profile_path) = std::env::var_os(AGENTD_PROFILE_ENV) else {
         return Ok(());
     };
@@ -496,7 +515,7 @@ async fn serve(
                         events: vec![],
                         #[cfg(feature = "aeon-memory")]
                         nexusiq: None,
-                    }
+                    };
                 }
             };
             let engine = guard.hv().sandbox_engine();
@@ -510,7 +529,7 @@ async fn serve(
                         events: vec![],
                         #[cfg(feature = "aeon-memory")]
                         nexusiq: None,
-                    }
+                    };
                 }
             };
             #[cfg_attr(not(feature = "aeon-memory"), allow(unused_mut))]
@@ -975,6 +994,200 @@ mod auth_tests {
         let err = open_agentd_wasm_path_with_dirs(&traversal, &allowed_dirs).unwrap_err();
 
         assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
+    }
+}
+
+#[cfg(test)]
+mod profile_auth_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_PROFILE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_profile(contents: &str) -> std::path::PathBuf {
+        let id = NEXT_PROFILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "nexus-agentd-profile-test-{}-{id}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).expect("write profile");
+        path
+    }
+
+    /// Run `test` with the given env vars set, restoring originals afterward.
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], test: F) {
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+
+        for (k, v) in vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+
+        for (k, v) in &saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    // ── release-profile (NEXUS_AGENTD_RELEASE) tests ──────────────────────────
+
+    #[test]
+    fn release_profile_without_token_fails_startup() {
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, Some("1")),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, None),
+            ],
+            || {
+                let token: AuthToken = None;
+                let err = enforce_profile_auth_requirement(&token)
+                    .expect_err("should fail without token in release mode");
+                assert!(
+                    err.to_string().contains(AGENTD_RELEASE_ENV),
+                    "error should mention the release env var, got: {err}"
+                );
+                assert!(
+                    err.to_string().contains(AUTH_TOKEN_ENV),
+                    "error should mention the auth token env var, got: {err}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn release_profile_with_token_succeeds() {
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, Some("1")),
+                (AUTH_TOKEN_ENV, Some("supersecret")),
+                (AGENTD_PROFILE_ENV, None),
+            ],
+            || {
+                let token: AuthToken = Some(Arc::from("supersecret"));
+                enforce_profile_auth_requirement(&token)
+                    .expect("should succeed when release mode has token configured");
+            },
+        );
+    }
+
+    #[test]
+    fn no_release_no_profile_is_permissive() {
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, None),
+            ],
+            || {
+                let token: AuthToken = None;
+                enforce_profile_auth_requirement(&token)
+                    .expect("dev/default (no profile, no release flag) should be permissive");
+            },
+        );
+    }
+
+    // ── profile-file daemon_auth_required tests (existing behaviour) ──────────
+
+    #[test]
+    fn profile_file_with_daemon_auth_required_and_no_token_fails() {
+        let path = write_profile(
+            r#"
+name = "production"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[execution]
+daemon_auth_required = true
+"#,
+        );
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, Some(path.to_str().unwrap())),
+            ],
+            || {
+                let token: AuthToken = None;
+                let err = enforce_profile_auth_requirement(&token)
+                    .expect_err("profile with daemon_auth_required=true should fail without token");
+                assert!(
+                    err.to_string().contains("production"),
+                    "error should mention profile name, got: {err}"
+                );
+            },
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn profile_file_with_daemon_auth_required_and_token_succeeds() {
+        let path = write_profile(
+            r#"
+name = "production"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[execution]
+daemon_auth_required = true
+"#,
+        );
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, Some("tok")),
+                (AGENTD_PROFILE_ENV, Some(path.to_str().unwrap())),
+            ],
+            || {
+                let token: AuthToken = Some(Arc::from("tok"));
+                enforce_profile_auth_requirement(&token)
+                    .expect("profile with daemon_auth_required=true + token should succeed");
+            },
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn dev_profile_file_without_daemon_auth_required_is_permissive() {
+        let path = write_profile(
+            r#"
+name = "dev"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+"#,
+        );
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, Some(path.to_str().unwrap())),
+            ],
+            || {
+                let token: AuthToken = None;
+                enforce_profile_auth_requirement(&token)
+                    .expect("dev profile without daemon_auth_required should be permissive");
+            },
+        );
+        std::fs::remove_file(path).ok();
     }
 }
 
