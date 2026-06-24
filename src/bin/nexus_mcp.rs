@@ -29,6 +29,9 @@ use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
 use nexus::telemetry::{ExecutionRecord, TelemetryStats};
 use nexus::NexusError;
 
+const MCP_FUEL_ENV: &str = "NEXUS_MCP_FUEL";
+const MCP_TIMEOUT_MS_ENV: &str = "NEXUS_MCP_TIMEOUT_MS";
+
 // ─── MCP Tool Parameter Types ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2573,6 +2576,29 @@ fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capab
     }
 }
 
+fn apply_mcp_sandbox_env(config: &mut HypervisorConfig) -> Result<()> {
+    if let Some(fuel) = env_u64(MCP_FUEL_ENV)? {
+        config.sandbox_config.max_fuel = fuel;
+    }
+    if let Some(timeout_ms) = env_u64(MCP_TIMEOUT_MS_ENV)? {
+        config.sandbox_config.time_limit = Duration::from_millis(timeout_ms);
+    }
+    Ok(())
+}
+
+fn env_u64(name: &str) -> Result<Option<u64>> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|error| anyhow::anyhow!("{name} must be an unsigned integer: {error}")),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must be valid Unicode")
+        }
+    }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -2592,11 +2618,12 @@ async fn main() -> Result<()> {
         eprintln!("[nexus] SECURITY WARNING: aeon-memory is active but NEXUS_AEON_HMAC_KEY is not set — memory_digest will use unauthenticated SHA-256 (forgeable). Set NEXUS_AEON_HMAC_KEY (>=32 bytes) in production.");
     }
 
-    let config = HypervisorConfig {
+    let mut config = HypervisorConfig {
         #[cfg(feature = "aeon-memory")]
         aeon_config,
         ..HypervisorConfig::default()
     };
+    apply_mcp_sandbox_env(&mut config)?;
     let hypervisor = Arc::new(NexusHypervisor::new(config)?);
 
     let server = NexusMcpServer::new(hypervisor)?;
