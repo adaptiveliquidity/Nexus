@@ -83,6 +83,11 @@ async fn main() -> anyhow::Result<()> {
     let module_cache = Arc::new(ModuleCache::new());
     let auth_token = configured_auth_token()?;
 
+    // Release builds fail closed: a release daemon refuses to start without an
+    // auth token, regardless of profile. Debug/test builds keep the permissive
+    // behavior so local dev and the existing test suite are unaffected.
+    enforce_release_auth_requirement(&auth_token)?;
+
     // Slice 3: if a profile is configured and it requires daemon authentication,
     // refuse to start without an auth token — fail loudly rather than silently
     // running unauthenticated against a posture that requires it.
@@ -99,6 +104,27 @@ fn configured_auth_token() -> anyhow::Result<AuthToken> {
             anyhow::bail!("{AUTH_TOKEN_ENV} must be valid Unicode")
         }
     }
+}
+
+/// Release builds must fail closed: refuse to start an unauthenticated daemon
+/// regardless of profile configuration. This closes the "advisory" gap where a
+/// release daemon with no profile and no token would serve Execute/Shutdown
+/// with zero authentication.
+#[cfg(not(debug_assertions))]
+fn enforce_release_auth_requirement(auth_token: &AuthToken) -> anyhow::Result<()> {
+    if auth_token.is_none() {
+        anyhow::bail!(
+            "release builds refuse to start without daemon authentication ({AUTH_TOKEN_ENV} must be set)"
+        );
+    }
+    Ok(())
+}
+
+/// Debug/test builds retain the permissive behavior so local development and the
+/// existing test suite run without a configured auth token.
+#[cfg(debug_assertions)]
+fn enforce_release_auth_requirement(_auth_token: &AuthToken) -> anyhow::Result<()> {
+    Ok(())
 }
 
 fn enforce_profile_auth_requirement(auth_token: &AuthToken) -> anyhow::Result<()> {
