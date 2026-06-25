@@ -78,7 +78,7 @@ fn sample_receipt() -> ExecutionReceipt {
         tool_name: "test_tool".into(),
         entrypoint: "_start".into(),
         module_sha256: "deadbeef".into(),
-        input_sha256: "cafebabe".into(),
+        input_sha256: sample_typed_digest(),
         input_bytes_len: 16,
         required_caps: vec!["read".into()],
         granted_caps: vec!["read".into()],

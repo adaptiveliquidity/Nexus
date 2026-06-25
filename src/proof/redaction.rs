@@ -45,7 +45,58 @@ impl RedactionPolicy {
     }
 
     pub fn redact_error(&self, err: &str) -> (String, RedactionField) {
-        (err.chars().take(256).collect(), RedactionField::Truncated)
+        let redacted = Self::redact_error_payload(err);
+        (
+            redacted.chars().take(256).collect(),
+            RedactionField::Truncated,
+        )
+    }
+
+    fn redact_error_payload(err: &str) -> String {
+        err.split_whitespace()
+            .map(Self::sanitize_error_token)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn sanitize_error_token(token: &str) -> String {
+        if Self::looks_like_secret_token(token) {
+            "[REDACTED]".to_string()
+        } else {
+            token.to_string()
+        }
+    }
+
+    fn looks_like_secret_token(token: &str) -> bool {
+        const PATH_PREFIXES: &[&str] = &[
+            "/home/", "/users/", "/tmp/", "/var/", "c:\\", "C:\\", "C:/", "c:/",
+        ];
+        const SECRET_PREFIXES: &[&str] = &[
+            "api_key",
+            "apikey",
+            "authorization",
+            "bearer",
+            "password",
+            "secret",
+            "token",
+            "raw_memory",
+            "sk-",
+            "x-api-key",
+        ];
+
+        let normalized = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ';' | ',' | '.'
+            )
+        });
+        if normalized.is_empty() {
+            return false;
+        }
+
+        let lower = normalized.to_ascii_lowercase();
+        PATH_PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
+            || SECRET_PREFIXES.iter().any(|hint| lower.contains(hint))
     }
 
     pub fn build_report(&self, applied: Vec<(String, RedactionField)>) -> RedactionReport {

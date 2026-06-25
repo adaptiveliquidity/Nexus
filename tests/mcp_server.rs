@@ -14,6 +14,7 @@ use tokio::time::timeout;
 
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
 const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
+const NEXUS_MCP_RETURN_FULL_PROOF_ENV: &str = "NEXUS_MCP_RETURN_FULL_PROOF";
 const WASM_PAGE_SIZE: usize = 65_536;
 
 fn cargo_bin() -> std::path::PathBuf {
@@ -55,6 +56,21 @@ impl McpClient {
         capability_allowlist: Option<&str>,
         capability_profile: Option<&std::path::Path>,
     ) -> Self {
+        Self::spawn_with_module_dir_allowlist_profile_with_full_proof(
+            module_dir,
+            capability_allowlist,
+            capability_profile,
+            false,
+        )
+        .await
+    }
+
+    async fn spawn_with_module_dir_allowlist_profile_with_full_proof(
+        module_dir: Option<&std::path::Path>,
+        capability_allowlist: Option<&str>,
+        capability_profile: Option<&std::path::Path>,
+        include_full_proof: bool,
+    ) -> Self {
         let bin = cargo_bin();
         assert!(
             bin.exists(),
@@ -70,6 +86,7 @@ impl McpClient {
             .kill_on_drop(true);
         command.env_remove(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV);
         command.env_remove(NEXUS_MCP_PROFILE_ENV);
+        command.env_remove(NEXUS_MCP_RETURN_FULL_PROOF_ENV);
         if let Some(module_dir) = module_dir {
             command.env("NEXUS_MCP_MODULE_DIR", module_dir);
         }
@@ -78,6 +95,9 @@ impl McpClient {
         }
         if let Some(capability_profile) = capability_profile {
             command.env(NEXUS_MCP_PROFILE_ENV, capability_profile);
+        }
+        if include_full_proof {
+            command.env(NEXUS_MCP_RETURN_FULL_PROOF_ENV, "1");
         }
 
         let mut child = command.spawn().expect("failed to spawn nexus-mcp");
@@ -434,8 +454,8 @@ async fn execute_proof_returns_output_and_capsule() {
     let parsed = tool_json(&resp);
     assert_eq!(parsed["output"]["success"], true);
     assert!(
-        parsed["proof_capsule"]["capsule_id"].is_string(),
-        "proof response should include a capsule_id: {parsed}"
+        parsed["proof_reference"]["capsule_digest"].is_object(),
+        "proof response should include proof_reference: {parsed}"
     );
     assert!(
         parsed.to_string().contains("success"),
@@ -443,9 +463,50 @@ async fn execute_proof_returns_output_and_capsule() {
     );
     #[cfg(feature = "aeon-memory")]
     {
-        assert_eq!(parsed["proof_capsule"]["memory_mode"], "Advisory");
+        assert!(
+            parsed["proof_reference"]["inline_summary"]["has_signature"].is_boolean(),
+            "proof reference scorecard should include signature boolean"
+        );
         assert!(parsed["events"].is_array());
     }
+    assert!(parsed["proof_capsule"].is_null());
+}
+
+#[tokio::test]
+async fn execute_proof_returns_full_capsule_when_env_enabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("proof_noop.wasm");
+    write_noop_wasm(&wasm_path);
+
+    let mut client = McpClient::spawn_with_module_dir_allowlist_profile_with_full_proof(
+        Some(tmp.path()),
+        None,
+        None,
+        true,
+    )
+    .await;
+    initialize_client(&mut client).await;
+    let resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute_proof",
+                "arguments": {
+                    "wasm_path": wasm_path,
+                    "input": { "message": "hello" }
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(resp["id"], 2);
+    let parsed = tool_json(&resp);
+    assert_eq!(parsed["output"]["success"], true);
+    assert!(parsed["proof_reference"].is_object());
+    assert!(parsed["proof_reference"]["capsule_digest"].is_object());
+    assert!(parsed["proof_capsule"]["capsule_id"].is_string());
+    assert!(!parsed["proof_capsule"].is_null());
 }
 
 #[tokio::test]
