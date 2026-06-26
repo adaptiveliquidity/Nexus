@@ -5,12 +5,14 @@
 //! the AEON-IQ management API key is read only from explicit `NEXUS_AEON_*`
 //! environment configuration.
 
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::Once;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -23,10 +25,12 @@ const SESSION_ID_ENV: &str = "NEXUS_AEON_SESSION_ID";
 const TIMEOUT_MS_ENV: &str = "NEXUS_AEON_TIMEOUT_MS";
 const MANAGEMENT_KEY_ENV: &str = "NEXUS_AEON_MANAGEMENT_KEY";
 const HMAC_KEY_ENV: &str = "NEXUS_AEON_HMAC_KEY";
+const TIMELINE_SPOOL_ENV: &str = "NEXUS_AEON_TIMELINE_SPOOL";
+const TIMELINE_MAX_ATTEMPTS: usize = 3;
 static MISSING_MANAGEMENT_KEY_WARN: Once = Once::new();
 
 /// Configuration for routing ai-recovery LLM calls through AEON-IQ.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AeonConfig {
     pub enabled: bool,
     pub base_url: String,
@@ -37,6 +41,29 @@ pub struct AeonConfig {
     /// Hex-encoded HMAC-SHA256 key shared with AEON-IQ for memory evidence binding.
     /// When absent, `build_memory_evidence_ref` returns `Absent` mode with no evidence.
     pub hmac_key: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for AeonConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AeonConfig")
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("agent_id", &self.agent_id)
+            .field("session_id", &self.session_id)
+            .field("timeout_ms", &self.timeout_ms)
+            .field(
+                "management_key",
+                &self.management_key.as_deref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "hmac_key",
+                &self
+                    .hmac_key
+                    .as_ref()
+                    .map(|key| format!("[REDACTED {} bytes]", key.len())),
+            )
+            .finish()
+    }
 }
 
 impl Default for AeonConfig {
@@ -57,15 +84,38 @@ impl AeonConfig {
     /// Load AEON-IQ proxy configuration from `NEXUS_AEON_*` environment vars.
     pub fn from_env() -> Result<Self> {
         let defaults = Self::default();
-        Ok(Self {
+        let base_url = env_string(BASE_URL_ENV, defaults.base_url)?;
+        {
+            let parsed = reqwest::Url::parse(&base_url).map_err(|e| {
+                NexusError::ConfigError(format!("AEON_BASE_URL is not a valid URL: {e}"))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(NexusError::ConfigError(format!(
+                    "AEON_BASE_URL must use http or https scheme, got '{}'",
+                    parsed.scheme()
+                )));
+            }
+        }
+
+        let config = Self {
             enabled: env_bool(ENABLED_ENV, defaults.enabled)?,
-            base_url: env_string(BASE_URL_ENV, defaults.base_url)?,
+            base_url,
             agent_id: env_string(AGENT_ID_ENV, defaults.agent_id)?,
             session_id: env_optional_string(SESSION_ID_ENV)?,
             timeout_ms: env_u64(TIMEOUT_MS_ENV, defaults.timeout_ms)?,
             management_key: env_optional_string(MANAGEMENT_KEY_ENV)?,
             hmac_key: env_optional_hex(HMAC_KEY_ENV)?,
-        })
+        };
+        if let Some(ref key) = config.hmac_key {
+            if key.len() < 32 {
+                return Err(NexusError::ConfigError(format!(
+                    "AEON_HMAC_KEY must be at least 32 bytes (256 bits); got {} bytes",
+                    key.len()
+                )));
+            }
+        }
+
+        Ok(config)
     }
 
     /// AEON-IQ's OpenAI-compatible chat-completions endpoint.
@@ -83,6 +133,119 @@ pub struct MemoryHit {
     pub id: String,
     pub content: String,
     pub score: Option<f64>,
+}
+
+/// Versioned evidence bundle describing the memory recall inputs bound into a
+/// proof capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryEvidenceV1 {
+    pub version: u8,
+    pub query: String,
+    pub hit_count: usize,
+    pub hit_digests: Vec<String>,
+    pub attestation: crate::proof::schema::MemoryAttestationMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_digest: Option<String>,
+}
+
+impl MemoryEvidenceV1 {
+    pub const VERSION: u8 = 1;
+
+    pub fn new(
+        query: impl Into<String>,
+        hits: &[MemoryHit],
+        attestation: crate::proof::schema::MemoryAttestationMode,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            query: query.into(),
+            hit_count: hits.len(),
+            hit_digests: hits
+                .iter()
+                .map(|hit| sha256_hex(hit.content.as_bytes()))
+                .collect(),
+            attestation,
+            capsule_digest: None,
+        }
+    }
+
+    pub fn with_capsule_digest(mut self, capsule_digest: Option<String>) -> Self {
+        self.capsule_digest = capsule_digest;
+        self
+    }
+
+    pub fn evidence_hmac_digest(&self, key: &[u8]) -> String {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(&self.canonical_digest_bytes());
+        format!("{:x}", mac.finalize().into_bytes())
+    }
+
+    #[doc(hidden)]
+    pub fn evidence_sha256_digest(&self) -> Option<String> {
+        serde_json::to_vec(self)
+            .ok()
+            .map(|bytes| sha256_hex(bytes.as_slice()))
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        validate_memory_evidence_v1(self)
+    }
+
+    fn canonical_digest_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(&MemoryEvidenceDigestBody {
+            query: &self.query,
+            hit_count: self.hit_count,
+            hit_digests: &self.hit_digests,
+            attestation: &self.attestation,
+        })
+        .expect("memory evidence digest body is serializable")
+    }
+}
+
+#[derive(Serialize)]
+struct MemoryEvidenceDigestBody<'a> {
+    query: &'a str,
+    hit_count: usize,
+    hit_digests: &'a [String],
+    attestation: &'a crate::proof::schema::MemoryAttestationMode,
+}
+
+pub fn validate_memory_evidence_v1(evidence: &MemoryEvidenceV1) -> std::result::Result<(), String> {
+    if evidence.version != MemoryEvidenceV1::VERSION {
+        return Err(format!(
+            "unsupported version {}; expected {}",
+            evidence.version,
+            MemoryEvidenceV1::VERSION
+        ));
+    }
+    if evidence.hit_count != evidence.hit_digests.len() {
+        return Err(format!(
+            "hit_count {} does not match hit_digests length {}",
+            evidence.hit_count,
+            evidence.hit_digests.len()
+        ));
+    }
+    if evidence
+        .capsule_digest
+        .as_deref()
+        .is_some_and(|digest| digest.trim().is_empty())
+    {
+        return Err("capsule_digest must be non-empty when set".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryRecallEvidence {
+    pub hits: Vec<MemoryHit>,
+    pub evidence: MemoryEvidenceV1,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemorySearchOutcome {
+    pub hits: Vec<MemoryHit>,
+    pub attestation: crate::proof::schema::MemoryAttestationMode,
 }
 
 /// Fail-open HTTP client for the AEON-IQ management memory API.
@@ -142,12 +305,28 @@ impl AeonMemoryClient {
         client
     }
 
+    pub fn timeline_sink(&self) -> AeonTimelineSink {
+        AeonTimelineSink::from_memory_client(self)
+    }
+
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryHit> {
+        self.search_with_status(query, limit).await.hits
+    }
+
+    pub async fn search_with_status(&self, query: &str, limit: usize) -> MemorySearchOutcome {
+        use crate::proof::schema::MemoryAttestationMode;
+
         let Some(management_key) = self.management_key() else {
-            return Vec::new();
+            return MemorySearchOutcome {
+                hits: Vec::new(),
+                attestation: MemoryAttestationMode::Absent,
+            };
         };
         let Some(url) = self.url(&["api", "v1", "memories", "search"]) else {
-            return Vec::new();
+            return MemorySearchOutcome {
+                hits: Vec::new(),
+                attestation: MemoryAttestationMode::Degraded,
+            };
         };
 
         let body = SearchRequest {
@@ -158,7 +337,12 @@ impl AeonMemoryClient {
 
         let response = match self.post_json(url, management_key, &body).await {
             Some(response) => response,
-            None => return Vec::new(),
+            None => {
+                return MemorySearchOutcome {
+                    hits: Vec::new(),
+                    attestation: MemoryAttestationMode::Degraded,
+                };
+            }
         };
 
         if !is_success(response.status) {
@@ -167,26 +351,40 @@ impl AeonMemoryClient {
                 status = response.status,
                 "AEON-IQ memory search returned non-success status; failing open"
             );
-            return Vec::new();
+            return MemorySearchOutcome {
+                hits: Vec::new(),
+                attestation: MemoryAttestationMode::Degraded,
+            };
         }
 
         match serde_json::from_str::<SearchResponse>(&response.body) {
-            Ok(body) => body
-                .results
-                .into_iter()
-                .map(|hit| MemoryHit {
-                    id: hit.id.unwrap_or_default(),
-                    content: hit.content.unwrap_or_default(),
-                    score: hit.score.or(hit.distance).or(hit.similarity),
-                })
-                .collect(),
+            Ok(body) => {
+                let hits = body
+                    .results
+                    .into_iter()
+                    .map(|hit| MemoryHit {
+                        id: hit.id.unwrap_or_default(),
+                        content: hit.content.unwrap_or_default(),
+                        score: hit.score.or(hit.distance).or(hit.similarity),
+                    })
+                    .collect::<Vec<_>>();
+                let attestation = if hits.is_empty() {
+                    MemoryAttestationMode::AttestedNoHit
+                } else {
+                    MemoryAttestationMode::AttestedWithRecall
+                };
+                MemorySearchOutcome { hits, attestation }
+            }
             Err(e) => {
                 debug!(
                     target: "nexus.aeon",
                     error = %e,
                     "AEON-IQ memory search response parse failed; failing open"
                 );
-                Vec::new()
+                MemorySearchOutcome {
+                    hits: Vec::new(),
+                    attestation: MemoryAttestationMode::Degraded,
+                }
             }
         }
     }
@@ -399,6 +597,557 @@ impl AeonMemoryClient {
     }
 }
 
+/// Best-effort AEON-IQ timeline delivery status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineDeliveryStatus {
+    /// Fire-and-forget delivery; success is not guaranteed.
+    FireAndForget,
+    /// All requested events were delivered.
+    Delivered,
+    /// Delivery failed in advisory mode; execution remains unaffected.
+    FailedOpen,
+    /// Delivery failed in attested mode; callers may mark proof evidence degraded.
+    RequiredButFailed,
+}
+
+/// Delivery mode for AEON-IQ timeline events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineDeliveryMode {
+    /// Advisory delivery never blocks execution and maps failures to `FailedOpen`.
+    Advisory,
+    /// Required delivery maps failures to `RequiredButFailed`; callers decide
+    /// whether that degrades proof evidence.
+    Attested,
+    /// Do not contact AEON-IQ now; append events to the local replay spool.
+    Offline,
+}
+
+impl TimelineDeliveryMode {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value
+            .unwrap_or("advisory")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "attested" | "required" => Self::Attested,
+            "offline" | "spool" => Self::Offline,
+            _ => Self::Advisory,
+        }
+    }
+}
+
+/// Summary returned by offline timeline replay.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineReplayReport {
+    pub delivered: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
+/// Fail-open sink for forwarding Nexus execution events to AEON-IQ's timeline.
+#[derive(Clone)]
+pub struct AeonTimelineSink {
+    http: reqwest::Client,
+    base_url: String,
+    management_key: Option<String>,
+    mode: TimelineDeliveryMode,
+    spool_path: PathBuf,
+    last_event_digest: Arc<Mutex<Option<String>>>,
+    #[cfg(test)]
+    test_responder: Option<TestResponder>,
+}
+
+impl AeonTimelineSink {
+    pub fn from_config(config: &AeonConfig) -> Self {
+        AeonMemoryClient::from_config(config).timeline_sink()
+    }
+
+    pub fn from_enabled_config(config: &AeonConfig) -> Option<Self> {
+        AeonMemoryClient::from_enabled_config(config).map(|client| client.timeline_sink())
+    }
+
+    pub fn from_memory_client(client: &AeonMemoryClient) -> Self {
+        Self {
+            http: client.http.clone(),
+            base_url: client.base_url.clone(),
+            management_key: client.management_key.clone(),
+            mode: TimelineDeliveryMode::Advisory,
+            spool_path: default_timeline_spool_path(),
+            last_event_digest: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_responder: client.test_responder.clone(),
+        }
+    }
+
+    pub fn with_mode(mut self, mode: TimelineDeliveryMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_spool_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.spool_path = path.into();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_responder(config: &AeonConfig, responder: TestResponder) -> Self {
+        let mut sink = Self::from_config(config);
+        sink.test_responder = Some(responder);
+        sink
+    }
+
+    pub async fn deliver(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        events: &[crate::daemon::NexusExecutionEvent],
+    ) -> TimelineDeliveryStatus {
+        if events.is_empty() {
+            return TimelineDeliveryStatus::Delivered;
+        }
+
+        if matches!(self.mode, TimelineDeliveryMode::Offline) {
+            return if self.spool_events(agent_id, session_id, events).await {
+                TimelineDeliveryStatus::FireAndForget
+            } else {
+                TimelineDeliveryStatus::FailedOpen
+            };
+        }
+
+        let mut delivered_all = true;
+        for event in events {
+            let mut body = TimelineEventBody::from_event(session_id, event);
+            self.link_timeline_event(&mut body);
+            if self.post_event_with_retry(agent_id, &body).await {
+                self.record_timeline_event_digest(&body);
+            } else {
+                delivered_all = false;
+            }
+        }
+
+        if delivered_all {
+            TimelineDeliveryStatus::Delivered
+        } else {
+            match self.mode {
+                TimelineDeliveryMode::Attested => TimelineDeliveryStatus::RequiredButFailed,
+                TimelineDeliveryMode::Advisory | TimelineDeliveryMode::Offline => {
+                    TimelineDeliveryStatus::FailedOpen
+                }
+            }
+        }
+    }
+
+    pub async fn replay_spooled_events(
+        &self,
+        agent_id: &str,
+        since: Option<DateTime<Utc>>,
+    ) -> TimelineReplayReport {
+        let content = match tokio::fs::read_to_string(&self.spool_path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return TimelineReplayReport::default();
+            }
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool read failed; failing open"
+                );
+                return TimelineReplayReport {
+                    failed: 1,
+                    ..TimelineReplayReport::default()
+                };
+            }
+        };
+
+        let mut report = TimelineReplayReport::default();
+        let mut retained = Vec::new();
+
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            let record = match serde_json::from_str::<TimelineSpoolRecord>(line) {
+                Ok(record) => record,
+                Err(error) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        error = %error,
+                        "AEON-IQ timeline spool record parse failed; retaining record"
+                    );
+                    report.failed += 1;
+                    retained.push(line.to_string());
+                    continue;
+                }
+            };
+
+            if record.agent_id != agent_id || since.is_some_and(|since| record.created_at < since) {
+                report.skipped += 1;
+                retained.push(line.to_string());
+                continue;
+            }
+
+            let mut event = record.event;
+            self.link_timeline_event(&mut event);
+
+            if self.post_event_with_retry(&record.agent_id, &event).await {
+                self.record_timeline_event_digest(&event);
+                report.delivered += 1;
+            } else {
+                report.failed += 1;
+                retained.push(line.to_string());
+            }
+        }
+
+        if let Err(error) = rewrite_spool(&self.spool_path, &retained).await {
+            debug!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON-IQ timeline spool rewrite failed after replay; failing open"
+            );
+        }
+
+        report
+    }
+
+    async fn spool_events(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        events: &[crate::daemon::NexusExecutionEvent],
+    ) -> bool {
+        let records = events.iter().map(|event| TimelineSpoolRecord {
+            created_at: Utc::now(),
+            agent_id: agent_id.to_string(),
+            event: TimelineEventBody::from_event(session_id, event),
+        });
+
+        if let Some(parent) = self.spool_path.parent() {
+            if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool directory create failed; failing open"
+                );
+                return false;
+            }
+        }
+
+        let mut file = match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.spool_path)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool open failed; failing open"
+                );
+                return false;
+            }
+        };
+
+        for record in records {
+            let mut bytes = match serde_json::to_vec(&record) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        error = %error,
+                        "AEON-IQ timeline spool serialization failed; failing open"
+                    );
+                    return false;
+                }
+            };
+            bytes.push(b'\n');
+            if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool write failed; failing open"
+                );
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn link_timeline_event(&self, body: &mut TimelineEventBody) {
+        body.prev_event_digest = match self.last_event_digest.lock() {
+            Ok(last_event_digest) => last_event_digest.clone(),
+            Err(_) => {
+                debug!(
+                    target: "nexus.aeon",
+                    "AEON-IQ timeline chain state is poisoned; omitting previous digest"
+                );
+                None
+            }
+        };
+    }
+
+    fn record_timeline_event_digest(&self, body: &TimelineEventBody) {
+        let digest = match timeline_event_body_digest(body) {
+            Ok(digest) => digest,
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline digest serialization failed; chain state not advanced"
+                );
+                return;
+            }
+        };
+
+        match self.last_event_digest.lock() {
+            Ok(mut last_event_digest) => *last_event_digest = Some(digest),
+            Err(_) => debug!(
+                target: "nexus.aeon",
+                "AEON-IQ timeline chain state is poisoned; chain state not advanced"
+            ),
+        }
+    }
+
+    async fn post_event_with_retry(&self, agent_id: &str, body: &TimelineEventBody) -> bool {
+        let Some(management_key) = self.management_key.as_deref() else {
+            debug!(
+                target: "nexus.aeon",
+                "AEON-IQ management key is not configured; timeline delivery disabled"
+            );
+            return false;
+        };
+        let Some(url) = self.url(&["api", "v1", "agents", agent_id, "timeline"]) else {
+            return false;
+        };
+
+        for attempt in 0..TIMELINE_MAX_ATTEMPTS {
+            match self.post_json(url.clone(), management_key, body).await {
+                Some(response) if is_success(response.status) => return true,
+                Some(response) if response.status >= 500 && attempt + 1 < TIMELINE_MAX_ATTEMPTS => {
+                    tokio::time::sleep(timeline_retry_delay(attempt)).await;
+                }
+                Some(response) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        status = response.status,
+                        "AEON-IQ timeline post returned non-success status; failing open"
+                    );
+                    return false;
+                }
+                None if attempt + 1 < TIMELINE_MAX_ATTEMPTS => {
+                    tokio::time::sleep(timeline_retry_delay(attempt)).await;
+                }
+                None => return false,
+            }
+        }
+
+        false
+    }
+
+    async fn post_json<T>(
+        &self,
+        url: reqwest::Url,
+        management_key: &str,
+        body: &T,
+    ) -> Option<HttpResponse>
+    where
+        T: Serialize + ?Sized,
+    {
+        #[cfg(test)]
+        if let Some(responder) = &self.test_responder {
+            let body = match serde_json::to_string(body) {
+                Ok(body) => body,
+                Err(error) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        error = %error,
+                        "AEON-IQ timeline request serialization failed; failing open"
+                    );
+                    return None;
+                }
+            };
+            let response = responder(TestHttpRequest {
+                method: "POST".to_string(),
+                path: url.path().to_string(),
+                headers: vec![("X-Management-Key".to_string(), management_key.to_string())],
+                body,
+            });
+            return Some(HttpResponse {
+                status: response.status,
+                body: response.body,
+            });
+        }
+
+        match self
+            .http
+            .post(url)
+            .header("X-Management-Key", management_key)
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                match response.text().await {
+                    Ok(body) => Some(HttpResponse { status, body }),
+                    Err(error) => {
+                        debug!(
+                            target: "nexus.aeon",
+                            error = %error,
+                            "AEON-IQ timeline response body read failed; failing open"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline request failed open"
+                );
+                None
+            }
+        }
+    }
+
+    fn url(&self, segments: &[&str]) -> Option<reqwest::Url> {
+        let mut url = match reqwest::Url::parse(&format!("{}/", self.base_url)) {
+            Ok(url) => url,
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "invalid AEON-IQ base URL; timeline delivery failing open"
+                );
+                return None;
+            }
+        };
+
+        {
+            let mut path = match url.path_segments_mut() {
+                Ok(path) => path,
+                Err(()) => {
+                    debug!(
+                        target: "nexus.aeon",
+                        "AEON-IQ base URL cannot be a base URL; timeline delivery failing open"
+                    );
+                    return None;
+                }
+            };
+
+            path.clear();
+            for segment in segments {
+                path.push(segment);
+            }
+        }
+
+        Some(url)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimelineSpoolRecord {
+    created_at: DateTime<Utc>,
+    agent_id: String,
+    event: TimelineEventBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineEventBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nexus_snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capsule_digest: Option<String>,
+    event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_event_digest: Option<String>,
+}
+
+impl TimelineEventBody {
+    fn from_event(session_id: Option<&str>, event: &crate::daemon::NexusExecutionEvent) -> Self {
+        match event {
+            crate::daemon::NexusExecutionEvent::SnapshotCreated { snapshot_id } => Self {
+                session_id: session_id.map(str::to_string),
+                nexus_snapshot_id: Some(snapshot_id.to_string()),
+                capsule_digest: None,
+                event_type: "snapshot_created".to_string(),
+                prev_event_digest: None,
+            },
+            crate::daemon::NexusExecutionEvent::CapabilityDenied { .. } => Self {
+                session_id: session_id.map(str::to_string),
+                nexus_snapshot_id: None,
+                capsule_digest: None,
+                event_type: "capability_denied".to_string(),
+                prev_event_digest: None,
+            },
+            crate::daemon::NexusExecutionEvent::ProofCapsuleEmitted { capsule_id } => Self {
+                session_id: session_id.map(str::to_string),
+                nexus_snapshot_id: None,
+                capsule_digest: Some(capsule_id.to_string()),
+                event_type: "proof_capsule_emitted".to_string(),
+                prev_event_digest: None,
+            },
+        }
+    }
+}
+
+pub fn verify_timeline_chain(events: &[TimelineEventBody]) -> std::result::Result<(), String> {
+    let mut previous_digest = None;
+    for (index, event) in events.iter().enumerate() {
+        if event.prev_event_digest != previous_digest {
+            return Err(format!(
+                "timeline event {index} prev_event_digest mismatch: expected {:?}, got {:?}",
+                previous_digest, event.prev_event_digest
+            ));
+        }
+        previous_digest = Some(timeline_event_body_digest(event)?);
+    }
+    Ok(())
+}
+
+fn timeline_event_body_digest(body: &TimelineEventBody) -> std::result::Result<String, String> {
+    serde_json::to_vec(body)
+        .map(|bytes| sha256_hex(bytes.as_slice()))
+        .map_err(|error| format!("timeline event serialization failed: {error}"))
+}
+
+fn default_timeline_spool_path() -> PathBuf {
+    std::env::var_os(TIMELINE_SPOOL_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("nexus-aeon-timeline-events.jsonl"))
+}
+
+fn timeline_retry_delay(attempt: usize) -> Duration {
+    #[cfg(test)]
+    {
+        let _ = attempt;
+        Duration::from_millis(1)
+    }
+    #[cfg(not(test))]
+    {
+        Duration::from_millis(25 * (1_u64 << attempt.min(5)))
+    }
+}
+
+async fn rewrite_spool(path: &Path, retained: &[String]) -> std::io::Result<()> {
+    if retained.is_empty() {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    } else {
+        let mut content = retained.join("\n");
+        content.push('\n');
+        tokio::fs::write(path, content).await
+    }
+}
+
 /// Builds a `MemoryEvidenceRef` from the resolved memory hits for inclusion in
 /// a `ProofCapsule`. Requires the `aeon-memory` feature.
 ///
@@ -439,7 +1188,14 @@ pub fn build_memory_evidence_ref(
 
     let evidence = mapping.memory_evidence(key, bridge_hits);
     match evidence.to_ref() {
-        Ok(evidence_ref) => (Some(evidence_ref), MemoryAttestationMode::Attested),
+        Ok(evidence_ref) => {
+            let mode = if hits.is_empty() {
+                MemoryAttestationMode::AttestedNoHit
+            } else {
+                MemoryAttestationMode::AttestedWithRecall
+            };
+            (Some(evidence_ref), mode)
+        }
         Err(e) => {
             debug!(
                 target: "nexus.aeon",
@@ -449,6 +1205,34 @@ pub fn build_memory_evidence_ref(
             (None, MemoryAttestationMode::Degraded)
         }
     }
+}
+
+pub async fn recall_memory_evidence_v1(
+    client: Option<&AeonMemoryClient>,
+    query: &str,
+    limit: usize,
+) -> MemoryRecallEvidence {
+    use crate::proof::schema::MemoryAttestationMode;
+
+    let Some(client) = client else {
+        return MemoryRecallEvidence {
+            hits: Vec::new(),
+            evidence: MemoryEvidenceV1::new(query, &[], MemoryAttestationMode::Absent),
+        };
+    };
+
+    let outcome = client.search_with_status(query, limit).await;
+    let evidence = MemoryEvidenceV1::new(query, &outcome.hits, outcome.attestation);
+    MemoryRecallEvidence {
+        hits: outcome.hits,
+        evidence,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 struct HttpResponse {
@@ -632,9 +1416,24 @@ fn hex_nibble(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::NexusExecutionEvent;
     use serde_json::Value;
+    use std::ffi::OsString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
+
+    static AEON_ENV_LOCK: Mutex<()> = Mutex::new(());
+    const AEON_ENV_VARS: [&str; 8] = [
+        ENABLED_ENV,
+        BASE_URL_ENV,
+        AGENT_ID_ENV,
+        SESSION_ID_ENV,
+        TIMEOUT_MS_ENV,
+        MANAGEMENT_KEY_ENV,
+        HMAC_KEY_ENV,
+        TIMELINE_SPOOL_ENV,
+    ];
 
     #[test]
     fn default_config_is_disabled_local_proxy() {
@@ -650,6 +1449,63 @@ mod tests {
             cfg.chat_completions_url(),
             "http://localhost:8080/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn aeon_config_debug_redacts_secrets() {
+        let cfg = AeonConfig {
+            management_key: Some("mgmt-secret".to_string()),
+            hmac_key: Some(vec![0x42; 32]),
+            ..AeonConfig::default()
+        };
+
+        let debug = format!("{cfg:?}");
+
+        assert!(debug.contains("management_key: Some(\"[REDACTED]\")"));
+        assert!(debug.contains("hmac_key: Some(\"[REDACTED 32 bytes]\")"));
+        assert!(!debug.contains("mgmt-secret"));
+        assert!(!debug.contains("66"));
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_base_url() {
+        with_clean_aeon_env(|| {
+            std::env::set_var(BASE_URL_ENV, "not a url");
+
+            let error = AeonConfig::from_env().unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("AEON_BASE_URL is not a valid URL"));
+        });
+    }
+
+    #[test]
+    fn from_env_rejects_non_http_base_url_scheme() {
+        with_clean_aeon_env(|| {
+            std::env::set_var(BASE_URL_ENV, "file:///tmp/aeon.sock");
+
+            let error = AeonConfig::from_env().unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "Configuration error: AEON_BASE_URL must use http or https scheme, got 'file'"
+            );
+        });
+    }
+
+    #[test]
+    fn from_env_rejects_short_hmac_key() {
+        with_clean_aeon_env(|| {
+            std::env::set_var(HMAC_KEY_ENV, "00010203");
+
+            let error = AeonConfig::from_env().unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "Configuration error: AEON_HMAC_KEY must be at least 32 bytes (256 bits); got 4 bytes"
+            );
+        });
     }
 
     #[test]
@@ -835,6 +1691,10 @@ mod tests {
         }
     }
 
+    fn generated_test_management_key() -> String {
+        format!("test-mgmt-{}", uuid::Uuid::new_v4())
+    }
+
     impl TestHttpRequest {
         fn header(&self, name: &str) -> Option<&str> {
             self.headers
@@ -873,6 +1733,247 @@ mod tests {
         requests.remove(0)
     }
 
+    fn with_clean_aeon_env(test: impl FnOnce() + std::panic::UnwindSafe) {
+        let _guard = AEON_ENV_LOCK.lock().unwrap();
+        let saved: [(&str, Option<OsString>); 8] =
+            AEON_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in AEON_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    fn memory_evidence_with_hit(content: &str) -> MemoryEvidenceV1 {
+        use crate::proof::schema::MemoryAttestationMode;
+        let hit = MemoryHit {
+            id: "mem-1".to_string(),
+            content: content.to_string(),
+            score: Some(0.9),
+        };
+        MemoryEvidenceV1::new("context", &[hit], MemoryAttestationMode::AttestedWithRecall)
+    }
+
+    fn timeline_events() -> Vec<NexusExecutionEvent> {
+        vec![
+            NexusExecutionEvent::SnapshotCreated {
+                snapshot_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            },
+            NexusExecutionEvent::CapabilityDenied {
+                denied_category: "read:/secret".to_string(),
+            },
+            NexusExecutionEvent::ProofCapsuleEmitted {
+                capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_posts_expected_event_shape() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let sink = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        );
+
+        let status = sink
+            .deliver("agent-1", Some("session-1"), &timeline_events())
+            .await;
+
+        assert_eq!(status, TimelineDeliveryStatus::Delivered);
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| request.method == "POST"));
+        assert!(requests
+            .iter()
+            .all(|request| request.path == "/api/v1/agents/agent-1/timeline"));
+        assert!(requests
+            .iter()
+            .all(|request| request.header("x-management-key") == Some("mgmt-key")));
+
+        let bodies = requests
+            .iter()
+            .map(|request| serde_json::from_str::<Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies[0]["event_type"], "snapshot_created");
+        assert_eq!(bodies[0]["session_id"], "session-1");
+        assert_eq!(
+            bodies[0]["nexus_snapshot_id"],
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(bodies[1]["event_type"], "capability_denied");
+        assert!(bodies[1].get("denied_category").is_none());
+        assert_eq!(bodies[2]["event_type"], "proof_capsule_emitted");
+        assert_eq!(
+            bodies[2]["capsule_digest"],
+            "550e8400-e29b-41d4-a716-446655440001"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeline_chain_links_consecutive_events() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let sink = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        );
+
+        let status = sink
+            .deliver("agent-1", Some("session-1"), &timeline_events())
+            .await;
+
+        assert_eq!(status, TimelineDeliveryStatus::Delivered);
+        let requests = captured.lock().unwrap();
+        let bodies = requests
+            .iter()
+            .map(|request| serde_json::from_str::<TimelineEventBody>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies[0].prev_event_digest, None);
+        assert_eq!(
+            bodies[1].prev_event_digest.as_deref(),
+            Some(timeline_event_body_digest(&bodies[0]).unwrap().as_str())
+        );
+        assert_eq!(
+            bodies[2].prev_event_digest.as_deref(),
+            Some(timeline_event_body_digest(&bodies[1]).unwrap().as_str())
+        );
+        verify_timeline_chain(&bodies).unwrap();
+    }
+
+    #[test]
+    fn verify_timeline_chain_detects_tampering() {
+        let mut first = TimelineEventBody::from_event(None, &timeline_events()[0]);
+        let mut second = TimelineEventBody::from_event(None, &timeline_events()[1]);
+        second.prev_event_digest = Some(timeline_event_body_digest(&first).unwrap());
+        first.event_type = "tampered".to_string();
+
+        let error = verify_timeline_chain(&[first, second]).unwrap_err();
+
+        assert!(error.contains("prev_event_digest mismatch"));
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_retries_5xx_then_delivers() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_responder = Arc::clone(&attempts);
+        let sink = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |_request| {
+                let attempt = attempts_for_responder.fetch_add(1, Ordering::SeqCst);
+                TestHttpResponse {
+                    status: if attempt == 0 { 500 } else { 200 },
+                    body: "{}".to_string(),
+                }
+            }),
+        );
+        let event = [NexusExecutionEvent::CapabilityDenied {
+            denied_category: "read:/secret".to_string(),
+        }];
+
+        let status = sink.deliver("agent-1", None, &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::Delivered);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_transport_error_fails_open() {
+        let sink =
+            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")));
+        let event = [NexusExecutionEvent::CapabilityDenied {
+            denied_category: "read:/secret".to_string(),
+        }];
+
+        let status = sink.deliver("agent-1", None, &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::FailedOpen);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_sink_attested_mode_reports_required_failure() {
+        let sink =
+            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")))
+                .with_mode(TimelineDeliveryMode::Attested);
+        let event = [NexusExecutionEvent::CapabilityDenied {
+            denied_category: "read:/secret".to_string(),
+        }];
+
+        let status = sink.deliver("agent-1", None, &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::RequiredButFailed);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_replay_removes_delivered_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("timeline.jsonl");
+        let offline =
+            AeonTimelineSink::from_config(&test_config("http://aeon.test", Some("mgmt-key")))
+                .with_mode(TimelineDeliveryMode::Offline)
+                .with_spool_path(&spool);
+        let event = [NexusExecutionEvent::ProofCapsuleEmitted {
+            capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+        }];
+
+        let queued = offline.deliver("agent-1", Some("session-1"), &event).await;
+        assert_eq!(queued, TimelineDeliveryStatus::FireAndForget);
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let online = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        )
+        .with_spool_path(&spool);
+
+        let first = online.replay_spooled_events("agent-1", None).await;
+        let second = online.replay_spooled_events("agent-1", None).await;
+
+        assert_eq!(
+            first,
+            TimelineReplayReport {
+                delivered: 1,
+                failed: 0,
+                skipped: 0,
+            }
+        );
+        assert_eq!(second, TimelineReplayReport::default());
+        assert_eq!(captured.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn build_memory_evidence_ref_absent_when_no_hmac_key() {
         use crate::proof::schema::MemoryAttestationMode;
@@ -899,12 +2000,12 @@ mod tests {
         }];
         let (evidence, mode) = super::build_memory_evidence_ref(&config, &hits, None);
         assert!(evidence.is_some());
-        assert_eq!(mode, MemoryAttestationMode::Attested);
+        assert_eq!(mode, MemoryAttestationMode::AttestedWithRecall);
         assert_eq!(evidence.unwrap().injected_count, 1);
     }
 
     #[test]
-    fn build_memory_evidence_ref_attested_with_no_hits() {
+    fn build_memory_evidence_ref_attested_no_hit_with_no_hits() {
         use crate::proof::schema::MemoryAttestationMode;
         let config = AeonConfig {
             hmac_key: Some(vec![0xde, 0xad, 0xbe, 0xef]),
@@ -912,7 +2013,98 @@ mod tests {
         };
         let (evidence, mode) = super::build_memory_evidence_ref(&config, &[], None);
         assert!(evidence.is_some());
-        assert_eq!(mode, MemoryAttestationMode::Attested);
+        assert_eq!(mode, MemoryAttestationMode::AttestedNoHit);
         assert_eq!(evidence.unwrap().injected_count, 0);
+    }
+
+    #[test]
+    fn evidence_hmac_digest_is_deterministic() {
+        let evidence = memory_evidence_with_hit("some context");
+
+        let first = evidence.evidence_hmac_digest(b"test-key");
+        let second = evidence.evidence_hmac_digest(b"test-key");
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn evidence_hmac_digest_differs_for_different_key() {
+        let evidence = memory_evidence_with_hit("some context");
+
+        let first = evidence.evidence_hmac_digest(b"test-key-1");
+        let second = evidence.evidence_hmac_digest(b"test-key-2");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn evidence_hmac_digest_changes_with_hit_digests_change() {
+        let first = memory_evidence_with_hit("some context");
+        let second = memory_evidence_with_hit("changed context");
+
+        assert_ne!(
+            first.evidence_hmac_digest(b"test-key"),
+            second.evidence_hmac_digest(b"test-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_attested_no_hit_on_zero_hits() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let management_key = generated_test_management_key();
+        let (client, _captured) = mock_client(200, r#"{"results":[]}"#, Some(&management_key));
+
+        let recall = super::recall_memory_evidence_v1(Some(&client), "nothing", 5).await;
+
+        assert!(recall.hits.is_empty());
+        assert_eq!(recall.evidence.hit_count, 0);
+        assert_eq!(
+            recall.evidence.attestation,
+            MemoryAttestationMode::AttestedNoHit
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_attested_with_recall_on_hits() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let management_key = generated_test_management_key();
+        let (client, _captured) = mock_client(
+            200,
+            r#"{"results":[{"id":"mem-1","content":"first","score":0.9},{"id":"mem-2","content":"second","score":0.8}]}"#,
+            Some(&management_key),
+        );
+
+        let recall = super::recall_memory_evidence_v1(Some(&client), "context", 5).await;
+
+        assert_eq!(recall.hits.len(), 2);
+        assert_eq!(recall.evidence.hit_count, 2);
+        assert_eq!(recall.evidence.hit_digests.len(), 2);
+        assert_eq!(
+            recall.evidence.attestation,
+            MemoryAttestationMode::AttestedWithRecall
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_degraded_on_error() {
+        use crate::proof::schema::MemoryAttestationMode;
+        let management_key = generated_test_management_key();
+        let (client, _captured) = mock_client(500, r#"{"error":"boom"}"#, Some(&management_key));
+
+        let recall = super::recall_memory_evidence_v1(Some(&client), "context", 5).await;
+
+        assert!(recall.hits.is_empty());
+        assert_eq!(recall.evidence.attestation, MemoryAttestationMode::Degraded);
+    }
+
+    #[tokio::test]
+    async fn memory_evidence_absent_on_no_config() {
+        use crate::proof::schema::MemoryAttestationMode;
+
+        let recall = super::recall_memory_evidence_v1(None, "context", 5).await;
+
+        assert!(recall.hits.is_empty());
+        assert_eq!(recall.evidence.attestation, MemoryAttestationMode::Absent);
     }
 }

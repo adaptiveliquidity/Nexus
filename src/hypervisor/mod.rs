@@ -26,23 +26,21 @@ use std::time::{Duration, Instant};
 use crate::error::{NexusError, Result};
 use crate::hypervisor::validator::error_log::ErrorLog;
 use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
-use crate::proof::digest::digest_with_key;
-use crate::proof::receipt::ProofHmacKey;
-use crate::proof::receipt::{ExecutionReceipt, FailureModeLite};
-use crate::proof::redaction::RedactionPolicy;
+use crate::proof::receipt::{ExecutionReceipt, FailureModeLite, ProofHmacKey};
+use crate::proof::redaction::{RedactionField, RedactionPolicy};
 use crate::proof::schema::{
-    CapabilityEvidence, FailureEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef,
-    ProofCapsule, ProofSubject, RedactionReport, RollbackEvidence, SnapshotEvidence, SnapshotKind,
-    ToolIdentity, TypedDigest,
+    default_proof_capsule_limitations, CapabilityEvidence, FailureEvidence, InputIdentity,
+    PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofSubject, RollbackEvidence,
+    SnapshotEvidence, SnapshotKind, ToolIdentity, TypedDigest,
 };
-use crate::proof::sign_capsule;
 use crate::proof::signing::verifying_key_id;
 use crate::proof::ProofSigningConfig;
+use crate::proof::{digest_with_key, sign_capsule};
 use crate::sandbox::{
     FuelBudgetPolicy, FuelProfile, PoolConfig, RestoredExecutionState, SandboxConfig, SandboxPool,
     WasiToolConfig, WasmSandbox,
 };
-use crate::security::{Capability, CapabilityManager};
+use crate::security::{Capability, CapabilityManager, CapabilityToken};
 use crate::snapshot::{
     DiffSnapshotResult, ExecutionState, FilesystemDiff, RollbackResult, Snapshot, SnapshotManager,
     SnapshotMetadata,
@@ -72,6 +70,12 @@ pub struct ToolDefinition {
     #[cfg(feature = "aeon-memory")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aeon_session_id: Option<String>,
+    /// Precomputed memory-evidence digest supplied by an AEON-IQ recall path.
+    /// When proof mode is enabled, this is bound into the signed capsule before
+    /// signing so daemon callers cannot pass evidence that is silently ignored.
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_memory_evidence_digest: Option<String>,
 }
 
 impl ToolDefinition {
@@ -86,6 +90,8 @@ impl ToolDefinition {
             aeon_agent_id: None,
             #[cfg(feature = "aeon-memory")]
             aeon_session_id: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: None,
         }
     }
 
@@ -110,6 +116,12 @@ impl ToolDefinition {
     ) -> Self {
         self.aeon_agent_id = agent_id;
         self.aeon_session_id = session_id;
+        self
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    pub fn with_aeon_memory_evidence_digest(mut self, digest: Option<String>) -> Self {
+        self.aeon_memory_evidence_digest = digest;
         self
     }
 }
@@ -179,6 +191,10 @@ pub struct HypervisorConfig {
     /// Dedicated proof-capsule signing key source. Defaults to a fresh
     /// ephemeral key that is independent of the capability-token authority.
     pub proof_signing: ProofSigningConfig,
+    /// HMAC source for low-entropy proof fields such as raw JSON inputs,
+    /// prompt-like values, paths, and tokens. When disabled or unavailable,
+    /// emitted capsules carry redacted non-public placeholders instead.
+    pub proof_hmac_key: ProofHmacKey,
     /// Optional AEON-IQ memory configuration. Compiled only when
     /// `aeon-memory` is enabled; default builds do not carry this field.
     #[cfg(feature = "aeon-memory")]
@@ -199,6 +215,7 @@ impl Default for HypervisorConfig {
             snapshot_strategy: SnapshotStrategy::Full,
             recovery_config: RecoveryConfig::Static,
             proof_signing: ProofSigningConfig::default(),
+            proof_hmac_key: ProofHmacKey::Disabled,
             #[cfg(feature = "aeon-memory")]
             aeon_config: None,
         }
@@ -542,6 +559,16 @@ impl NexusHypervisor {
         Ok(result)
     }
 
+    /// Check whether a capability token has been explicitly revoked.
+    pub fn is_token_revoked(&self, token_id: &uuid::Uuid) -> bool {
+        self.capability_manager.read().unwrap().is_revoked(token_id)
+    }
+
+    /// Return the stored memory checksum for a snapshot, or `None` if not found.
+    pub fn snapshot_content_digest(&self, id: &uuid::Uuid) -> Option<String> {
+        self.snapshot_manager.snapshot_content_digest(id)
+    }
+
     /// Grant a capability to the current session
     pub fn grant_capability(&self, capability: Capability, validity: Duration) -> Result<()> {
         let mut manager = self.capability_manager.write().unwrap();
@@ -666,10 +693,11 @@ impl NexusHypervisor {
             aeon_session_id: tool.aeon_session_id.clone(),
             #[cfg(feature = "aeon-memory")]
             negotiation_rounds: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: tool.aeon_memory_evidence_digest.clone(),
         };
 
-        let capsule = Self::capsule_from_receipt(&receipt, &output);
-        let capsule = sign_capsule(capsule, &self.proof_signing_key);
+        let capsule = self.capsule_from_receipt(&receipt, &output, &input_bytes);
         Ok((output, capsule))
     }
 
@@ -786,16 +814,22 @@ impl NexusHypervisor {
             aeon_agent_id: tool.aeon_agent_id.clone(),
             aeon_session_id: tool.aeon_session_id.clone(),
             negotiation_rounds,
+            aeon_memory_evidence_digest: tool.aeon_memory_evidence_digest.clone(),
         };
 
-        let mut capsule = Self::capsule_from_receipt(&receipt, &output);
-        if negotiation_rounds.is_some() {
+        let capsule = if negotiation_rounds.is_some() {
             let (memory_evidence, memory_mode) =
                 self.memory_evidence_from_hits(&tool, &negotiation_evidence_hits);
-            capsule.memory_evidence = memory_evidence;
-            capsule.memory_mode = Some(memory_mode);
-        }
-        let capsule = sign_capsule(capsule, &self.proof_signing_key);
+            self.capsule_from_receipt_with_memory(
+                &receipt,
+                &output,
+                &input_bytes,
+                memory_evidence,
+                Some(memory_mode),
+            )
+        } else {
+            self.capsule_from_receipt(&receipt, &output, &input_bytes)
+        };
         Ok((output, capsule))
     }
 
@@ -845,7 +879,9 @@ impl NexusHypervisor {
     }
 
     fn input_identity_digest(&self, input_bytes: &[u8]) -> TypedDigest {
-        if self.input_should_use_private_digest(input_bytes) {
+        if self.config.proof_hmac_key != ProofHmacKey::Disabled {
+            digest_with_key(&self.config.proof_hmac_key, input_bytes)
+        } else if self.input_should_use_private_digest(input_bytes) {
             digest_with_key(
                 &ProofHmacKey::FromEnv(PROOF_INPUT_HMAC_KEY_ENV.to_owned()),
                 input_bytes,
@@ -911,17 +947,122 @@ impl NexusHypervisor {
     }
 
     fn build_limitations(_receipt: &ExecutionReceipt) -> Vec<String> {
-        vec![
-            "Execution is confined to the sandbox runtime; host side-effects remain outside this capsule."
-                .to_owned(),
-            "Memory recall/evidence is advisory-memory mode and may be incomplete."
-                .to_owned(),
-            "Verification is intentionally non-exhaustive and does not prove global runtime context."
-                .to_owned(),
-        ]
+        let limitations = default_proof_capsule_limitations();
+        assert!(
+            !limitations.is_empty(),
+            "proof capsule cannot be emitted with empty limitations"
+        );
+        limitations
     }
 
-    fn capsule_from_receipt(receipt: &ExecutionReceipt, output: &ToolOutput) -> ProofCapsule {
+    fn capsule_from_receipt(
+        &self,
+        receipt: &ExecutionReceipt,
+        output: &ToolOutput,
+        input_bytes: &[u8],
+    ) -> ProofCapsule {
+        #[cfg_attr(not(feature = "aeon-memory"), allow(unused_mut))]
+        let mut capsule = Self::unsigned_capsule_from_receipt(
+            receipt,
+            output,
+            input_bytes,
+            &self.config.proof_hmac_key,
+        );
+        #[cfg(feature = "aeon-memory")]
+        self.attach_memory_evidence_from_receipt(&mut capsule, receipt);
+        sign_capsule(capsule, &self.proof_signing_key)
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn capsule_from_receipt_with_memory(
+        &self,
+        receipt: &ExecutionReceipt,
+        output: &ToolOutput,
+        input_bytes: &[u8],
+        memory_evidence: Option<aeon_nexus_bridge::MemoryEvidenceRef>,
+        memory_mode: Option<crate::proof::schema::MemoryAttestationMode>,
+    ) -> ProofCapsule {
+        let mut capsule = Self::unsigned_capsule_from_receipt(
+            receipt,
+            output,
+            input_bytes,
+            &self.config.proof_hmac_key,
+        );
+        let attached_from_receipt = self.attach_memory_evidence_from_receipt(&mut capsule, receipt);
+        if memory_evidence.is_some() {
+            capsule.memory_evidence = memory_evidence;
+            capsule.memory_mode = memory_mode;
+        } else if !attached_from_receipt {
+            capsule.memory_mode = memory_mode;
+        }
+        sign_capsule(capsule, &self.proof_signing_key)
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn attach_memory_evidence_from_receipt(
+        &self,
+        capsule: &mut ProofCapsule,
+        receipt: &ExecutionReceipt,
+    ) -> bool {
+        if receipt.aeon_memory_evidence_digest.is_none() {
+            return false;
+        }
+
+        match self.memory_evidence_ref_from_digest(receipt) {
+            Some(evidence) => {
+                capsule.memory_evidence = Some(evidence);
+                // C2: digest-only path cannot verify hit count or counter-signed receipt;
+                // Advisory correctly reflects that AEON context was present without full attestation.
+                capsule.memory_mode = Some(crate::proof::schema::MemoryAttestationMode::Advisory);
+            }
+            None => {
+                capsule.memory_mode = Some(crate::proof::schema::MemoryAttestationMode::Degraded);
+            }
+        }
+
+        true
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn memory_evidence_ref_from_digest(
+        &self,
+        receipt: &ExecutionReceipt,
+    ) -> Option<aeon_nexus_bridge::MemoryEvidenceRef> {
+        let digest = receipt.aeon_memory_evidence_digest.as_deref()?.trim();
+        if !is_hex_digest(digest) {
+            return None;
+        }
+
+        let config = self.config.aeon_config.as_ref()?;
+        let hmac_key = config.hmac_key.as_deref()?;
+        let agent_id = receipt
+            .aeon_agent_id
+            .as_deref()
+            .unwrap_or(config.agent_id.as_str());
+        let session_id = receipt
+            .aeon_session_id
+            .clone()
+            .or_else(|| config.session_id.clone());
+
+        Some(aeon_nexus_bridge::MemoryEvidenceRef {
+            evidence_version: aeon_nexus_bridge::MEMORY_EVIDENCE_VERSION.to_string(),
+            digest: aeon_nexus_bridge::TypedDigest {
+                algorithm: aeon_nexus_bridge::HMAC_SHA256_ALGORITHM.to_string(),
+                value: digest.to_ascii_lowercase(),
+                public_recomputable: false,
+            },
+            agent_handle: aeon_nexus_bridge::hmac_agent_id(hmac_key, agent_id),
+            session_id,
+            injected_count: 0,
+        })
+    }
+
+    fn unsigned_capsule_from_receipt(
+        receipt: &ExecutionReceipt,
+        output: &ToolOutput,
+        _input_bytes: &[u8],
+        hmac_key: &ProofHmacKey,
+    ) -> ProofCapsule {
         let required = receipt.required_caps.clone();
         let granted = receipt.granted_caps.clone();
         let mismatch = if required.is_empty() || required == granted {
@@ -929,21 +1070,33 @@ impl NexusHypervisor {
         } else {
             Some(required.clone())
         };
-        let hmac_key = ProofHmacKey::FromEnv(PROOF_INPUT_HMAC_KEY_ENV.to_owned());
-        let (error_summary, redaction) = receipt.failure.as_ref().map_or_else(
-            || {
-                (
-                    String::new(),
-                    RedactionPolicy::new(hmac_key.clone()).apply(Vec::new()),
-                )
-            },
-            |failure| Self::redacted_failure_summary(output, failure, hmac_key.clone()),
-        );
-        let limitations = Self::build_limitations(receipt);
-        assert!(
-            !limitations.is_empty(),
-            "proof capsule cannot be emitted with empty limitations"
-        );
+        let redaction_policy = RedactionPolicy::new(hmac_key.clone());
+        let mut redactions = Vec::new();
+        match receipt.input_sha256.algorithm.as_str() {
+            "sha256" => {
+                redactions.push(("input.digest".to_owned(), RedactionField::Removed));
+            }
+            "hmac-sha256" => {
+                redactions.push(("input.digest".to_owned(), RedactionField::HmacOrPlaceholder));
+            }
+            _ => {
+                redactions.push(("input.digest".to_owned(), RedactionField::Removed));
+            }
+        }
+
+        let failure = receipt.failure.as_ref().map(|failure| {
+            let raw_summary = output.error.as_deref().unwrap_or(&failure.category);
+            let (error_summary, error_redactions) =
+                redaction_policy.redact_error_for_field("failure.error_summary", raw_summary);
+            redactions.extend(error_redactions);
+
+            FailureEvidence {
+                failure_category: failure.category.clone(),
+                requires_rollback: failure.requires_rollback,
+                deterministic: failure.is_deterministic,
+                error_summary,
+            }
+        });
 
         ProofCapsule {
             version: "1".to_string(),
@@ -989,12 +1142,7 @@ impl NexusHypervisor {
                 negotiation_rounds: receipt.negotiation_rounds,
             },
             snapshot: receipt.snapshot.clone(),
-            failure: receipt.failure.as_ref().map(|failure| FailureEvidence {
-                failure_category: failure.category.clone(),
-                requires_rollback: failure.requires_rollback,
-                deterministic: failure.is_deterministic,
-                error_summary,
-            }),
+            failure,
             rollback: receipt
                 .rollback
                 .as_ref()
@@ -1004,8 +1152,8 @@ impl NexusHypervisor {
                     reason: Some(reason.clone()),
                 }),
             branches: receipt.branches.clone(),
-            redaction,
-            limitations,
+            redaction: redaction_policy.build_report(redactions),
+            limitations: Self::build_limitations(receipt),
             #[cfg(feature = "aeon-memory")]
             memory_evidence: None,
             #[cfg(feature = "aeon-memory")]
@@ -1015,18 +1163,6 @@ impl NexusHypervisor {
             },
             signature: None,
         }
-    }
-
-    fn redacted_failure_summary(
-        output: &ToolOutput,
-        failure: &FailureModeLite,
-        hmac_key: ProofHmacKey,
-    ) -> (String, RedactionReport) {
-        let raw = output.error.as_deref().unwrap_or(failure.category.as_str());
-        let policy = RedactionPolicy::new(hmac_key);
-        let (redacted, field) = policy.redact_error(raw);
-        let report = policy.apply(vec![("failure.error_summary".to_string(), field)]);
-        (redacted, report)
     }
 
     /// Execute a tool, validating that `caller_tokens` satisfy the tool's
@@ -1471,17 +1607,19 @@ impl NexusHypervisor {
             }
 
             #[cfg(feature = "aeon-memory")]
-            self.capture_aeon_memory(
-                Self::aeon_failure_memory_content(
-                    &error_log,
-                    rollback_performed,
-                    duration_ms,
-                    fuel_consumed,
-                    snapshot_id,
-                ),
-                Some(0.75),
-                "failure",
-            );
+            if self.can_capture_aeon_memory(&tool, caller_tokens) {
+                self.capture_aeon_memory(
+                    Self::aeon_failure_memory_content(
+                        &error_log,
+                        rollback_performed,
+                        duration_ms,
+                        fuel_consumed,
+                        snapshot_id,
+                    ),
+                    Some(0.75),
+                    "failure",
+                );
+            }
 
             let record = ExecutionRecord::failure(
                 tool.name.clone(),
@@ -1536,6 +1674,15 @@ impl NexusHypervisor {
         tool: ToolDefinition,
         input: serde_json::Value,
     ) -> Result<ToolOutput> {
+        self.execute_with_retry_with_tokens(tool, input, &[]).await
+    }
+
+    pub async fn execute_with_retry_with_tokens(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[CapabilityToken],
+    ) -> Result<ToolOutput> {
         #[cfg(feature = "aeon-memory")]
         let mut pending_instincts: Vec<(uuid::Uuid, String)> = Vec::new();
         #[cfg(not(feature = "aeon-memory"))]
@@ -1546,7 +1693,12 @@ impl NexusHypervisor {
                 tokio::time::sleep(self.config.retry_delay).await;
             }
 
-            let result = self.execute_tool(tool.clone(), input.clone()).await;
+            let result = if caller_tokens.is_empty() {
+                self.execute_tool(tool.clone(), input.clone()).await
+            } else {
+                self.execute_tool_with_tokens(tool.clone(), input.clone(), caller_tokens)
+                    .await
+            };
 
             match result {
                 Ok(output) => {
@@ -1573,17 +1725,19 @@ impl NexusHypervisor {
                                     } else {
                                         store.record_failure(id)
                                     };
-                                    self.capture_aeon_memory(
-                                        Self::aeon_recovery_outcome_memory_content(
-                                            &tool.name,
-                                            attempt,
-                                            id,
-                                            description,
-                                            output.success,
-                                        ),
-                                        Some(if output.success { 0.7 } else { 0.55 }),
-                                        "recovery",
-                                    );
+                                    if self.can_capture_aeon_memory(&tool, caller_tokens) {
+                                        self.capture_aeon_memory(
+                                            Self::aeon_recovery_outcome_memory_content(
+                                                &tool.name,
+                                                attempt,
+                                                id,
+                                                description,
+                                                output.success,
+                                            ),
+                                            Some(if output.success { 0.7 } else { 0.55 }),
+                                            "recovery",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1837,6 +1991,39 @@ impl NexusHypervisor {
     }
 
     #[cfg(feature = "aeon-memory")]
+    fn required_aeon_memory_scope(
+        tool: &ToolDefinition,
+    ) -> Option<crate::security::capability::MemoryScope> {
+        match (&tool.aeon_agent_id, &tool.aeon_session_id) {
+            (Some(agent_id), Some(session_id)) => {
+                Some(crate::security::capability::MemoryScope::Session {
+                    agent_id: agent_id.clone(),
+                    session_id: session_id.clone(),
+                })
+            }
+            (Some(agent_id), None) => Some(crate::security::capability::MemoryScope::Agent(
+                agent_id.clone(),
+            )),
+            (None, _) => None,
+        }
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn can_capture_aeon_memory(
+        &self,
+        tool: &ToolDefinition,
+        caller_tokens: &[CapabilityToken],
+    ) -> bool {
+        let Some(scope) = Self::required_aeon_memory_scope(tool) else {
+            return false;
+        };
+        let manager = self.capability_manager.read().unwrap();
+        manager
+            .authorize(caller_tokens, &[Capability::WriteMemory(scope)])
+            .is_ok()
+    }
+
+    #[cfg(feature = "aeon-memory")]
     fn aeon_failure_memory_content(
         error_log: &ErrorLog,
         rollback_performed: bool,
@@ -1925,6 +2112,13 @@ impl NexusHypervisor {
     }
 }
 
+#[cfg(feature = "aeon-memory")]
+fn is_hex_digest(value: &str) -> bool {
+    !value.is_empty()
+        && value.len().is_multiple_of(2)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1956,6 +2150,8 @@ mod tests {
         let now = Utc::now();
         let profile_name = "strict-readonly";
         let profile_sha = "e3b0c44298fc1c149afbf4c8996fb924".to_string();
+        let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+        let input_bytes = b"input";
 
         let receipt = ExecutionReceipt {
             run_id: uuid::Uuid::new_v4(),
@@ -1980,6 +2176,8 @@ mod tests {
             aeon_session_id: None,
             #[cfg(feature = "aeon-memory")]
             negotiation_rounds: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: None,
         };
 
         let output = ToolOutput {
@@ -1993,7 +2191,7 @@ mod tests {
             snapshot_id: None,
         };
 
-        let capsule = NexusHypervisor::capsule_from_receipt(&receipt, &output);
+        let capsule = hypervisor.capsule_from_receipt(&receipt, &output, input_bytes);
         assert_eq!(
             capsule.policy.profile_digest,
             Some(TypedDigest {
@@ -2014,6 +2212,116 @@ mod tests {
         ];
 
         assert!(!suggestions.is_empty());
+    }
+
+    fn proof_redaction_receipt() -> ExecutionReceipt {
+        let now = Utc::now();
+        ExecutionReceipt {
+            run_id: uuid::Uuid::new_v4(),
+            started_at: now,
+            finished_at: now,
+            tool_name: "proof_redaction_test".to_string(),
+            entrypoint: "_start".to_string(),
+            module_sha256: "module-sha256".to_string(),
+            input_sha256: TypedDigest::redacted(),
+            input_bytes_len: 128,
+            required_caps: Vec::new(),
+            granted_caps: Vec::new(),
+            policy_mode: PolicyEnforcementMode::UnprofiledDev,
+            profile: None,
+            snapshot: None,
+            failure: Some(FailureModeLite {
+                category: "UNKNOWN".to_string(),
+                requires_rollback: false,
+                is_deterministic: None,
+            }),
+            rollback: None,
+            branches: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_agent_id: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_session_id: None,
+            #[cfg(feature = "aeon-memory")]
+            negotiation_rounds: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: None,
+        }
+    }
+
+    fn failed_output_with_error(error: &str) -> ToolOutput {
+        ToolOutput {
+            success: false,
+            result: None,
+            error: Some(error.to_string()),
+            rollback_performed: false,
+            execution_time_ms: 1,
+            fuel_consumed: 0,
+            error_log: None,
+            snapshot_id: None,
+        }
+    }
+
+    #[test]
+    fn test_failure_summary_redacts_paths_and_tokens() {
+        let receipt = proof_redaction_receipt();
+        let output = failed_output_with_error(
+            "failed reading /home/x/.ssh/id_ed25519 with token=sk-test-token-123",
+        );
+
+        let capsule = NexusHypervisor::unsigned_capsule_from_receipt(
+            &receipt,
+            &output,
+            br#"{"prompt":"token=sk-test-token-123"}"#,
+            &ProofHmacKey::Disabled,
+        );
+        let summary = &capsule
+            .failure
+            .as_ref()
+            .expect("failure evidence")
+            .error_summary;
+
+        assert!(!summary.contains("/home/x/.ssh"));
+        assert!(!summary.contains("sk-test-token-123"));
+        assert!(summary.contains("[PATH_REDACTED]"));
+        assert!(summary.contains("[TOKEN_REDACTED]"));
+        assert!(capsule
+            .redaction
+            .hmac_fields
+            .contains(&"failure.error_summary".to_string()));
+    }
+
+    #[test]
+    fn test_capsule_has_no_forbidden_substrings() {
+        let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+        let receipt = proof_redaction_receipt();
+        let output = failed_output_with_error(
+            "failed at /home/x/.ssh/id_ed25519 and C:\\Users\\x\\.env with \
+             token=sk-test-token-123 preview_base64=abc BEGIN PRIVATE KEY",
+        );
+        let input = br#"{
+            "token": "sk-test-token-123",
+            "unix_path": "/home/x/.ssh/id_ed25519",
+            "windows_path": "C:\\Users\\x",
+            "marker": "preview_base64"
+        }"#;
+
+        let capsule = hypervisor.capsule_from_receipt(&receipt, &output, input);
+        let json = serde_json::to_string(&capsule).unwrap();
+
+        for forbidden in [
+            "sk-test-token-123",
+            "/home/x/.ssh",
+            r"C:\Users\x",
+            r"C:\\Users\\x",
+            "preview_base64",
+            "BEGIN PRIVATE KEY",
+            ".env",
+        ] {
+            assert!(
+                !json.contains(forbidden),
+                "capsule JSON leaked forbidden substring: {forbidden}"
+            );
+        }
     }
 
     #[cfg(feature = "aeon-memory")]
@@ -2151,9 +2459,21 @@ mod tests {
         let hv = NexusHypervisor::new(HypervisorConfig::default())
             .unwrap()
             .with_aeon_memory_client_for_test(client);
+        let token = hv
+            .issue_token(
+                Capability::WriteMemory(crate::security::capability::MemoryScope::Session {
+                    agent_id: "agent-1".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "test",
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let tool = divzero_tool("aeon_capture_failure")
+            .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string()));
 
         let output = hv
-            .execute_tool(divzero_tool("aeon_capture_failure"), serde_json::json!({}))
+            .execute_tool_with_tokens(tool, serde_json::json!({}), &[token])
             .await
             .unwrap();
 
@@ -2208,9 +2528,24 @@ mod tests {
             .unwrap()
             .with_instinct_store(store)
             .with_aeon_memory_client_for_test(client);
+        let token = hv
+            .issue_token(
+                Capability::WriteMemory(crate::security::capability::MemoryScope::Session {
+                    agent_id: "agent-1".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "test",
+                Duration::from_secs(60),
+            )
+            .unwrap();
 
         let output = hv
-            .execute_with_retry(divzero_tool("aeon_retry_outcome"), serde_json::json!({}))
+            .execute_with_retry_with_tokens(
+                divzero_tool("aeon_retry_outcome")
+                    .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string())),
+                serde_json::json!({}),
+                &[token],
+            )
             .await
             .unwrap();
 
@@ -2244,9 +2579,21 @@ mod tests {
         let hv = NexusHypervisor::new(HypervisorConfig::default())
             .unwrap()
             .with_aeon_memory_client_for_test(client);
+        let token = hv
+            .issue_token(
+                Capability::WriteMemory(crate::security::capability::MemoryScope::Session {
+                    agent_id: "agent-1".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "test",
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let tool = divzero_tool("aeon_disabled_capture")
+            .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string()));
 
         let output = hv
-            .execute_tool(divzero_tool("aeon_disabled_capture"), serde_json::json!({}))
+            .execute_tool_with_tokens(tool, serde_json::json!({}), &[token])
             .await
             .unwrap();
 

@@ -1,0 +1,103 @@
+{
+  "schema": "nexusiq-baseline/v1",
+  "created": "2026-06-20T00:00:00Z",
+  "plan": "docs/NEXUSIQ_COMPLETION_PLAN.md",
+  "repos": {
+    "nexus": {
+      "sha": "b68aef1bbd780c4c75865b6c8470dc969b34e0e5",
+      "version": "0.2.0-batchB",
+      "branch": "feat/nexusiq-batchB",
+      "cargo_lock_sha256": "c24e3a35fa31ee29cfa091e6ddd8f765be47c99ea1a10f3a34de28267729bffe3"
+    },
+    "aeon_iq": {
+      "sha": "ea5ce0074a5b",
+      "note": "partial SHA \u2014 full SHA from gh api repos/adaptiveliquidity/AEON-IQ/commits/main"
+    }
+  },
+  "features": {
+    "default": [],
+    "aeon_memory": [
+      "aeon-memory"
+    ],
+    "ci_required": "--features aeon-memory --locked"
+  },
+  "phases_complete": [
+    "P0",
+    "P1",
+    "P1b",
+    "P2",
+    "P3",
+    "P4"
+  ],
+  "phases_in_progress": [
+    "P5",
+    "P7"
+  ],
+  "phases_pending": [
+    "P6",
+    "P7",
+    "P8",
+    "P9",
+    "P10",
+    "P11",
+    "P12"
+  ],
+  "merged_prs": [
+    {
+      "pr": 121,
+      "title": "Phase 1 proof-capsule honesty hardening + adopt NexusIQ completion plan",
+      "phases": [
+        "P1"
+      ]
+    },
+    {
+      "pr": 122,
+      "title": "Batch A \u2014 AeonTimelineSink (P2), daemon proof path (P3), CI aeon-memory gate (P1b)",
+      "phases": [
+        "P1b",
+        "P2",
+        "P3"
+      ]
+    },
+    {
+      "pr": "pending",
+      "title": "Batch B \u2014 P4 nexus_iq_execute, P5 MemoryEvidence v1 schema, P0 baseline",
+      "phases": [
+        "P4",
+        "P5",
+        "P0"
+      ],
+      "note": "branch feat/nexusiq-batchB \u2014 not yet merged to main"
+    }
+  ],
+  "gaps": [
+    "P5: MemoryEvidenceForMcp omits query from MCP response (H1 done); raw MemoryEvidenceV1 still exposed in proof capsule (by design)",
+    "P6: AEON-IQ timeline schema v2 (branch model, digest chain) \u2014 AEON-IQ repo",
+    "P7: Full-loop integration test suite (stateful mock AEON) \u2014 tests/nexus_iq_mcp.rs started",
+    "P8: no-secret scan CI job + default-off API-shape test",
+    "P9: Performance benchmarks (p50/p95/p99 for recall, execution, proof, forwarding)",
+    "P10: SSRF egress filter, token TOCTOU re-check, preview_base64 permission gate",
+    "P11: nexus iq CLI full suite (run/verify/timeline/incident/replay) \u2014 VerifyCapsule stub added",
+    "P12: Release hardening v1.0 \u2014 honest-language docs, final gate sweep, tag"
+  ],
+  "test_commands": {
+    "default_build": "cargo test --locked",
+    "aeon_memory_build": "cargo test --features aeon-memory --locked",
+    "clippy": "cargo clippy --features aeon-memory --locked -- -D warnings",
+    "integration": "cargo test --features aeon-memory --test nexus_iq_mcp --locked"
+  },
+  "bench_commands": {
+    "placeholder": "cargo bench --features aeon-memory (no bench targets yet \u2014 P9)"
+  },
+  "audit_fixes_batchB": {
+    "C1": "DONE \u2014 match arm in nexus_mcp.rs now covers AttestedNoHit + AttestedWithRecall",
+    "C2": "DONE \u2014 attach_memory_evidence_from_receipt downgrades to Advisory (was Attested)",
+    "M1": "DONE \u2014 MemoryRecall capability variant added; gate before recall_memory_evidence_v1",
+    "H1": "DONE \u2014 NexusIqExecuteResponse uses MemoryEvidenceForMcp (query omitted)",
+    "H3": "DONE \u2014 CHANGELOG [Unreleased] section added; baseline updated",
+    "L2": "DONE \u2014 nexus aeon verify-capsule subcommand added",
+    "H4": "PENDING \u2014 server-side prev_event_digest in AEON-IQ (separate repo)",
+    "M3": "PENDING \u2014 rate limiting on AEON recall calls",
+    "L1": "PENDING \u2014 real AEON integration test (test environment decision needed)"
+  }
+}

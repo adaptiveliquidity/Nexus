@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use nexus::proof::{
+    default_proof_capsule_limitations,
     redaction::{RedactionField, RedactionPolicy},
     CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
     ProofHmacKey, ProofSubject, RedactionReport, ToolIdentity, TypedDigest,
@@ -60,7 +61,7 @@ fn sample_capsule(redaction: RedactionReport) -> ProofCapsule {
         rollback: None,
         branches: None,
         redaction,
-        limitations: vec!["runtime attestation only".to_owned()],
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]
@@ -104,6 +105,31 @@ fn redact_error_sanitizes_secret_paths_and_provider_literals() {
     assert!(!redacted.contains("/home/user/data/api_key=super_secret"));
     assert!(!redacted.contains("OPENAI_API_KEY"));
     assert!(!redacted.contains("abc"));
+}
+
+#[test]
+fn redact_error_removes_paths_tokens_and_forbidden_markers() {
+    let policy = RedactionPolicy::new(ProofHmacKey::Disabled);
+    let err =
+        "open /home/x/.ssh/id_ed25519 C:\\Users\\x\\.env token=sk-test-token preview_base64=abc";
+
+    let (redacted, applied) = policy.redact_error_for_field("failure.error_summary", err);
+
+    for forbidden in [
+        "/home/x/.ssh",
+        r"C:\Users\x",
+        r"C:\\Users\\x",
+        ".env",
+        "sk-test-token",
+        "preview_base64",
+    ] {
+        assert!(!redacted.contains(forbidden));
+    }
+    assert!(applied.contains(&(
+        "failure.error_summary".to_owned(),
+        RedactionField::HmacOrPlaceholder
+    )));
+    assert!(applied.contains(&("failure.error_summary".to_owned(), RedactionField::Removed)));
 }
 
 #[test]

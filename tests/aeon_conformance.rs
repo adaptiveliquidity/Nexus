@@ -1,4 +1,5 @@
 use chrono::Utc;
+use nexus::proof::default_proof_capsule_limitations;
 #[cfg(feature = "aeon-memory")]
 use nexus::proof::schema::MemoryAttestationMode;
 use nexus::proof::schema::{
@@ -14,6 +15,14 @@ fn typed_digest() -> TypedDigest {
         algorithm: "sha256".to_string(),
         value: "abc123".to_string(),
         public_recomputable: true,
+    }
+}
+
+fn private_input_digest() -> TypedDigest {
+    TypedDigest {
+        algorithm: "hmac-sha256".to_string(),
+        value: "input-hmac".to_string(),
+        public_recomputable: false,
     }
 }
 
@@ -36,7 +45,7 @@ fn sample_capsule_without_memory() -> ProofCapsule {
             entrypoint: "_start".to_string(),
         },
         input: InputIdentity {
-            digest: typed_digest(),
+            digest: private_input_digest(),
             media_type: "application/json".to_string(),
             raw_included: false,
         },
@@ -60,9 +69,9 @@ fn sample_capsule_without_memory() -> ProofCapsule {
             hashed_fields: Vec::new(),
             truncated_fields: Vec::new(),
             removed_fields: Vec::new(),
-            hmac_fields: Vec::new(),
+            hmac_fields: vec!["input.digest".to_owned()],
         },
-        limitations: Vec::new(),
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]
@@ -117,9 +126,30 @@ fn feature_capsule_without_memory_omits_aeon_keys() {
     assert!(value["capabilities"].get("negotiation_rounds").is_none());
 }
 
+#[test]
+fn no_raw_secrets_in_proof_capsule() {
+    let json = serde_json::to_string(&sample_capsule_without_memory())
+        .unwrap()
+        .to_ascii_lowercase();
+
+    for forbidden in [
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "private_key",
+        "bearer",
+    ] {
+        assert!(
+            !json.contains(forbidden),
+            "proof capsule JSON leaked forbidden marker: {forbidden}"
+        );
+    }
+}
+
 #[cfg(not(feature = "aeon-memory"))]
 #[test]
-fn default_build_capsule_json_has_no_aeon_keys() {
+fn default_build_omits_aeon_fields() {
     // This is the default-off shape gate: when aeon-memory is not compiled,
     // proof JSON must not expose AEON-IQ memory or negotiation fields at all.
     let value = serde_json::to_value(sample_capsule_without_memory()).unwrap();
@@ -160,12 +190,22 @@ async fn honest_proof_modes_cover_absent_and_advisory() {
     // - Advisory: AEON correlation is present, but no attested evidence ref is
     //   embedded in this capsule.
     // - Degraded: evidence construction or verification fails.
-    // - Attested: an HMAC-bound MemoryEvidenceRef is embedded.
+    // - AttestedNoHit: an HMAC-bound MemoryEvidenceRef is embedded with no hits.
+    // - AttestedWithRecall: an HMAC-bound MemoryEvidenceRef is embedded with hits.
     let config = unreachable_aeon_config();
-    let (evidence, mode) =
+    let (absent_evidence, absent_mode) =
         nexus::aeon::build_memory_evidence_ref(&config, &[], Some("session-1".to_string()));
-    assert!(evidence.is_none());
-    assert_eq!(mode, MemoryAttestationMode::Absent);
+    assert!(absent_evidence.is_none());
+    assert_eq!(absent_mode, MemoryAttestationMode::Absent);
+
+    let configured = nexus::aeon::AeonConfig {
+        hmac_key: Some(vec![0x01, 0x02, 0x03, 0x04]),
+        ..config
+    };
+    let (zero_hit_evidence, zero_hit_mode) =
+        nexus::aeon::build_memory_evidence_ref(&configured, &[], Some("session-1".to_string()));
+    assert!(zero_hit_evidence.is_some());
+    assert_eq!(zero_hit_mode, MemoryAttestationMode::AttestedNoHit);
 
     let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
     let tool = ToolDefinition::new("aeon_advisory_noop".to_string(), trivial_wasm())

@@ -94,6 +94,20 @@ enum Commands {
     /// Validate capability profile manifests.
     #[command(subcommand)]
     Profile(ProfileCmd),
+
+    /// Operator utilities for the `nexus-agentd` daemon.
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
+
+    /// AEON-IQ integration utilities.
+    #[cfg(feature = "aeon-memory")]
+    #[command(subcommand)]
+    Aeon(AeonCmd),
+
+    /// NexusIQ operator utilities.
+    #[cfg(feature = "aeon-memory")]
+    #[command(subcommand)]
+    Iq(IqCmd),
 }
 
 #[derive(Subcommand)]
@@ -117,6 +131,92 @@ enum ProfileCmd {
     Validate {
         /// Path to a capability profile TOML file.
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Probe a running `nexus-agentd`: connect, send Ping, expect Pong.
+    /// Exits 0 and prints the daemon version on success, non-zero on
+    /// any connection/timeout/protocol failure. Suitable as a container
+    /// healthcheck.
+    Ping {
+        /// Custom daemon socket (defaults to NEXUS_AGENTD_SOCKET or the
+        /// platform default).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Subcommand)]
+enum AeonCmd {
+    /// Replay locally spooled AEON-IQ timeline events.
+    ReplayEvents {
+        /// AEON-IQ agent id whose spooled events should be replayed.
+        #[arg(long)]
+        agent_id: String,
+        /// Optional RFC3339 lower bound for spooled event creation time.
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Validate a MemoryEvidenceV1 JSON file.
+    VerifyMemoryEvidence {
+        /// Optional capsule id to match when the evidence JSON includes capsule_id.
+        #[arg(long)]
+        capsule_id: Option<String>,
+        /// Path to a MemoryEvidenceV1 JSON file.
+        evidence_file: PathBuf,
+    },
+    /// Verify that a ProofCapsule JSON has consistent memory_mode and memory_evidence.
+    VerifyProofCapsule {
+        /// Path to a ProofCapsule JSON file, or "-" for stdin.
+        capsule: PathBuf,
+    },
+    /// Verify a MemoryEvidenceV1 bundle: invariant check + optional signature verification.
+    VerifyCapsule {
+        /// Capsule ID to associate with the evidence.
+        #[arg(long)]
+        capsule_id: String,
+        /// Path to a MemoryEvidenceV1 JSON file. Reads from stdin if omitted.
+        #[arg(long)]
+        evidence_file: Option<PathBuf>,
+    },
+}
+
+#[cfg(feature = "aeon-memory")]
+#[derive(Subcommand)]
+enum IqCmd {
+    /// Verify a proof capsule JSON file.
+    Verify {
+        /// Path to a proof capsule JSON file.
+        capsule_file: PathBuf,
+    },
+    /// List recent AEON-IQ timeline events.
+    Timeline {
+        /// AEON-IQ agent id whose timeline events should be listed.
+        #[arg(long)]
+        agent_id: String,
+        /// Maximum number of events to list.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Optional RFC3339 lower bound for events.
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Print an incident report for a proof capsule.
+    Incident {
+        /// Path to a proof capsule JSON file.
+        capsule_file: PathBuf,
+    },
+    /// Replay locally spooled AEON-IQ timeline events.
+    Replay {
+        /// AEON-IQ agent id whose spooled events should be replayed.
+        #[arg(long)]
+        agent_id: String,
+        /// Optional RFC3339 lower bound for spooled event creation time.
+        #[arg(long)]
+        since: Option<String>,
     },
 }
 
@@ -168,9 +268,518 @@ fn main() -> anyhow::Result<()> {
         Commands::Profile(cmd) => {
             run_profile(cmd)?;
         }
+        Commands::Daemon(cmd) => {
+            run_daemon_cmd(cmd)?;
+        }
+        #[cfg(feature = "aeon-memory")]
+        Commands::Aeon(cmd) => {
+            run_aeon(cmd)?;
+        }
+        #[cfg(feature = "aeon-memory")]
+        Commands::Iq(cmd) => {
+            run_iq(cmd)?;
+        }
     }
 
     Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_aeon(cmd: AeonCmd) -> anyhow::Result<()> {
+    match cmd {
+        AeonCmd::ReplayEvents { agent_id, since } => {
+            run_aeon_replay_events(&agent_id, since.as_deref())?;
+        }
+        AeonCmd::VerifyMemoryEvidence {
+            capsule_id,
+            evidence_file,
+        } => {
+            let content = std::fs::read_to_string(&evidence_file)?;
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(value) => {
+                    let capsule_check = match capsule_id.as_deref() {
+                        Some(expected) => match value.get("capsule_id") {
+                            Some(actual) => match actual.as_str() {
+                                Some(actual) if actual == expected => Ok(()),
+                                Some(actual) => Err(format!(
+                                    "capsule_id mismatch: expected {expected}, found {actual}"
+                                )),
+                                None => Err("capsule_id must be a string when set".to_string()),
+                            },
+                            None => Ok(()),
+                        },
+                        None => Ok(()),
+                    };
+
+                    match capsule_check.and_then(|()| {
+                        serde_json::from_value::<nexus::aeon::MemoryEvidenceV1>(value)
+                            .map_err(|error| error.to_string())
+                            .and_then(|evidence| evidence.validate())
+                    }) {
+                        Ok(()) => println!("VALID"),
+                        Err(reason) => println!("INVALID: {reason}"),
+                    }
+                }
+                Err(error) => println!("INVALID: {error}"),
+            }
+        }
+        AeonCmd::VerifyProofCapsule { capsule } => run_iq_verify(&capsule)?,
+        AeonCmd::VerifyCapsule {
+            capsule_id,
+            evidence_file,
+        } => {
+            run_aeon_verify_capsule(&capsule_id, evidence_file.as_deref())?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_aeon_verify_capsule(
+    capsule_id: &str,
+    evidence_file: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    use nexus::aeon::MemoryEvidenceV1;
+    use nexus::proof::schema::MemoryAttestationMode;
+    use std::io::Read as _;
+
+    let json = match evidence_file {
+        Some(path) => std::fs::read_to_string(path)?,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+
+    let evidence: MemoryEvidenceV1 = match serde_json::from_str(&json) {
+        Ok(ev) => ev,
+        Err(e) => {
+            println!("INVALID: failed to parse MemoryEvidenceV1: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(reason) = evidence.validate() {
+        println!("INVALID: {reason}");
+        std::process::exit(1);
+    }
+
+    let invalid_reason: Option<String> = match &evidence.attestation {
+        MemoryAttestationMode::Attested
+        | MemoryAttestationMode::AttestedWithRecall
+        | MemoryAttestationMode::AttestedNoHit => {
+            if evidence.capsule_digest.is_none() {
+                Some(format!(
+                    "attestation is {:?} but evidence digest (capsule_digest) is absent",
+                    evidence.attestation
+                ))
+            } else {
+                None
+            }
+        }
+        MemoryAttestationMode::Advisory | MemoryAttestationMode::Absent => {
+            if evidence.capsule_digest.is_some() {
+                eprintln!(
+                    "WARN: attestation is {:?} but capsule_digest is present for capsule {capsule_id}",
+                    evidence.attestation
+                );
+            }
+            None
+        }
+        MemoryAttestationMode::Degraded => {
+            eprintln!("WARN: attestation is Degraded for capsule {capsule_id}");
+            None
+        }
+    };
+
+    if let Some(reason) = invalid_reason {
+        println!("INVALID: {reason}");
+        std::process::exit(1);
+    }
+
+    println!("VALID");
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_iq(cmd: IqCmd) -> anyhow::Result<()> {
+    match cmd {
+        IqCmd::Verify { capsule_file } => run_iq_verify(&capsule_file),
+        IqCmd::Timeline {
+            agent_id,
+            limit,
+            since,
+        } => run_iq_timeline(&agent_id, limit, since.as_deref()),
+        IqCmd::Incident { capsule_file } => run_iq_incident(&capsule_file),
+        IqCmd::Replay { agent_id, since } => run_aeon_replay_events(&agent_id, since.as_deref()),
+    }
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_aeon_replay_events(agent_id: &str, since: Option<&str>) -> anyhow::Result<()> {
+    let since = match since {
+        Some(value) => Some(parse_rfc3339_utc(value)?),
+        None => None,
+    };
+    let Some(sink) = nexus::aeon::AeonConfig::from_env()
+        .ok()
+        .and_then(|config| nexus::aeon::AeonTimelineSink::from_enabled_config(&config))
+    else {
+        println!("timeline replay skipped: AEON-IQ sink is not configured");
+        return Ok(());
+    };
+    let rt = tokio::runtime::Runtime::new()?;
+    let report = rt.block_on(sink.replay_spooled_events(agent_id, since));
+    println!(
+        "timeline replay: delivered={}, failed={}, skipped={}",
+        report.delivered, report.failed, report.skipped
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_iq_verify(capsule_file: &std::path::Path) -> anyhow::Result<()> {
+    let capsule = read_proof_capsule(capsule_file)?;
+    let mut warnings = Vec::new();
+    let mut failure = None;
+
+    if capsule.limitations.is_empty() {
+        warnings.push("limitations is empty".to_string());
+    }
+
+    // L2: validate memory_mode vs memory_evidence consistency
+    #[cfg(feature = "aeon-memory")]
+    {
+        use nexus::proof::schema::MemoryAttestationMode;
+        let mode = capsule.memory_mode.as_ref();
+        let evidence = capsule.memory_evidence.as_ref();
+        match (mode, evidence) {
+            (Some(MemoryAttestationMode::Attested), None)
+            | (Some(MemoryAttestationMode::AttestedNoHit), None)
+            | (Some(MemoryAttestationMode::AttestedWithRecall), None) => {
+                failure = Some(format!(
+                    "memory_mode is {:?} but memory_evidence is absent - capsule is inconsistent",
+                    mode.unwrap()
+                ));
+            }
+            (Some(MemoryAttestationMode::Absent), Some(_)) => {
+                failure = Some(
+                    "memory_mode is Absent but memory_evidence is present - capsule is inconsistent"
+                    .to_string()
+                );
+            }
+            (None, Some(_)) => {
+                failure = Some(
+                    "memory_mode is absent but memory_evidence is present - capsule is inconsistent"
+                    .to_string()
+                );
+            }
+            _ => {}
+        }
+    }
+
+    match load_proof_verify_key_from_env() {
+        Ok(Some(vk)) => {
+            if let Err(error) = nexus::proof::signing::verify_capsule(&capsule, &vk) {
+                failure = Some(format!("signature verification failed: {error}"));
+            }
+        }
+        Ok(None) => {
+            warnings.push("signature check skipped: NEXUS_PROOF_VERIFY_KEY is not set".to_string());
+        }
+        Err(error) => {
+            failure = Some(format!("verification key load failed: {error}"));
+        }
+    }
+
+    let status = if failure.is_some() {
+        "FAIL"
+    } else if warnings.is_empty() {
+        "PASS"
+    } else {
+        "WARN"
+    };
+
+    print_iq_verify_summary(&capsule, status);
+    for warning in warnings {
+        eprintln!("WARN: {warning}");
+    }
+    if let Some(failure) = failure {
+        eprintln!("FAIL: {failure}");
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_iq_timeline(agent_id: &str, limit: usize, since: Option<&str>) -> anyhow::Result<()> {
+    let config = nexus::aeon::AeonConfig::from_env()?;
+    if !config.enabled || config.base_url.trim().is_empty() {
+        println!("timeline list skipped: AEON-IQ is not configured");
+        return Ok(());
+    }
+
+    let since = match since {
+        Some(value) => Some(parse_rfc3339_utc(value)?),
+        None => None,
+    };
+    let url = iq_timeline_events_url(&config, agent_id, limit, since)?;
+    let client = reqwest::ClientBuilder::new()
+        .timeout(std::time::Duration::from_millis(config.timeout_ms))
+        .build()?;
+    let mut request = client.get(url);
+    if let Some(management_key) = config.management_key.as_deref() {
+        request = request.header("X-Management-Key", management_key);
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let (status, body) = rt.block_on(async move {
+        let response = request.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        Ok::<_, reqwest::Error>((status, body))
+    })?;
+
+    if !status.is_success() {
+        eprintln!("AEON-IQ timeline request failed: {status}");
+        eprintln!("{body}");
+        std::process::exit(1);
+    }
+
+    let value: serde_json::Value = serde_json::from_str(&body)?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn run_iq_incident(capsule_file: &std::path::Path) -> anyhow::Result<()> {
+    let capsule = read_proof_capsule(capsule_file)?;
+    let redacted_fields = redacted_field_names(&capsule.redaction);
+
+    println!("NexusIQ Incident Report");
+    println!("=======================");
+    println!("Capsule ID: {}", capsule.capsule_id);
+    println!("Tool name: {}", capsule.subject.tool_name);
+    println!("Module: {}", capsule.tool.module_name);
+    println!("Entrypoint: {}", capsule.tool.entrypoint);
+    println!("Run ID: {}", capsule.subject.run_id);
+    println!(
+        "Session ID: {}",
+        capsule
+            .memory_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.session_id.as_deref())
+            .unwrap_or("none")
+    );
+    println!("MemoryAttestationMode: {}", memory_mode_label(&capsule));
+    println!();
+
+    println!("Failure");
+    match &capsule.failure {
+        Some(failure) => {
+            println!("  type: {}", failure.failure_category);
+            println!("  exit_code: not recorded");
+            println!("  signal: not recorded");
+            println!("  requires_rollback: {}", failure.requires_rollback);
+            println!(
+                "  deterministic: {}",
+                failure
+                    .deterministic
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            println!("  summary: {}", failure.error_summary);
+        }
+        None => println!("  none"),
+    }
+    println!();
+
+    println!("Rollback");
+    match &capsule.rollback {
+        Some(rollback) => {
+            println!("  occurred: {}", rollback.occurred);
+            println!(
+                "  from_snapshot_id: {}",
+                rollback
+                    .from_snapshot_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            );
+            println!("  reason: {}", rollback.reason.as_deref().unwrap_or("none"));
+        }
+        None => println!("  none"),
+    }
+    println!();
+
+    println!("Limitations");
+    if capsule.limitations.is_empty() {
+        println!("  none");
+    } else {
+        for (index, limitation) in capsule.limitations.iter().enumerate() {
+            println!("  {}. {}", index + 1, limitation);
+        }
+    }
+    println!();
+
+    println!("Redaction");
+    println!("  count: {}", redacted_fields.len());
+    if redacted_fields.is_empty() {
+        println!("  fields: none");
+    } else {
+        println!("  fields:");
+        for field in redacted_fields {
+            println!("    - {field}");
+        }
+    }
+    println!();
+
+    match &capsule.signature {
+        Some(signature) => println!("Signature: present (key_id: {})", signature.key_id),
+        None => println!("Signature: absent"),
+    }
+    println!();
+    println!("Recommendation: {}", triage_recommendation(&capsule));
+
+    Ok(())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn read_proof_capsule(
+    path: &std::path::Path,
+) -> anyhow::Result<nexus::proof::schema::ProofCapsule> {
+    use anyhow::Context as _;
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read proof capsule {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse proof capsule {}", path.display()))
+}
+
+#[cfg(feature = "aeon-memory")]
+fn parse_rfc3339_utc(value: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+    Ok(chrono::DateTime::parse_from_rfc3339(value)?.with_timezone(&chrono::Utc))
+}
+
+#[cfg(feature = "aeon-memory")]
+fn iq_timeline_events_url(
+    config: &nexus::aeon::AeonConfig,
+    agent_id: &str,
+    limit: usize,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(&format!("{}/", config.base_url.trim_end_matches('/')))?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("AEON-IQ base URL cannot be a base URL"))?;
+        path.clear();
+        path.push("agent");
+        path.push(agent_id);
+        path.push("events");
+    }
+    {
+        let mut query = url.query_pairs_mut();
+        let limit = limit.to_string();
+        query.append_pair("limit", &limit);
+        if let Some(since) = since {
+            let since = since.to_rfc3339();
+            query.append_pair("since", &since);
+        }
+    }
+
+    Ok(url)
+}
+
+#[cfg(feature = "aeon-memory")]
+fn load_proof_verify_key_from_env() -> anyhow::Result<Option<ed25519_dalek::VerifyingKey>> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let raw = match std::env::var("NEXUS_PROOF_VERIFY_KEY") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("NEXUS_PROOF_VERIFY_KEY must be valid Unicode")
+        }
+    };
+    let seed = STANDARD
+        .decode(raw.trim())
+        .map_err(|_| anyhow::anyhow!("NEXUS_PROOF_VERIFY_KEY is not valid base64"))?;
+    let seed = <[u8; 32]>::try_from(seed.as_slice())
+        .map_err(|_| anyhow::anyhow!("NEXUS_PROOF_VERIFY_KEY must decode to 32 bytes"))?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+
+    Ok(Some(ed25519_dalek::VerifyingKey::from(&signing_key)))
+}
+
+#[cfg(feature = "aeon-memory")]
+fn redaction_count(redaction: &nexus::proof::schema::RedactionReport) -> usize {
+    redaction.hashed_fields.len()
+        + redaction.hmac_fields.len()
+        + redaction.truncated_fields.len()
+        + redaction.removed_fields.len()
+}
+
+#[cfg(feature = "aeon-memory")]
+fn redacted_field_names(redaction: &nexus::proof::schema::RedactionReport) -> Vec<&str> {
+    let mut fields = Vec::with_capacity(redaction_count(redaction));
+    fields.extend(redaction.hashed_fields.iter().map(String::as_str));
+    fields.extend(redaction.hmac_fields.iter().map(String::as_str));
+    fields.extend(redaction.truncated_fields.iter().map(String::as_str));
+    fields.extend(redaction.removed_fields.iter().map(String::as_str));
+    fields
+}
+
+#[cfg(feature = "aeon-memory")]
+fn memory_mode_label(capsule: &nexus::proof::schema::ProofCapsule) -> String {
+    capsule
+        .memory_mode
+        .as_ref()
+        .map(|mode| format!("{mode:?}"))
+        .unwrap_or_else(|| "None".to_string())
+}
+
+#[cfg(feature = "aeon-memory")]
+fn print_iq_verify_summary(capsule: &nexus::proof::schema::ProofCapsule, status: &str) {
+    println!("NexusIQ Proof Capsule Verification");
+    println!("==================================");
+    println!("{:<20} {}", "capsule_id", capsule.capsule_id);
+    println!("{:<20} {}", "version", capsule.version);
+    println!("{:<20} {}", "has_signature", capsule.signature.is_some());
+    println!("{:<20} {}", "memory_mode", memory_mode_label(capsule));
+    println!("{:<20} {}", "limitations_count", capsule.limitations.len());
+    println!(
+        "{:<20} {}",
+        "redaction_count",
+        redaction_count(&capsule.redaction)
+    );
+    println!("{:<20} {}", "status", status);
+}
+
+#[cfg(feature = "aeon-memory")]
+fn triage_recommendation(capsule: &nexus::proof::schema::ProofCapsule) -> &'static str {
+    let rollback_occurred = capsule
+        .rollback
+        .as_ref()
+        .map(|rollback| rollback.occurred)
+        .unwrap_or(false);
+
+    if capsule.failure.is_some() {
+        "Execution failed. Investigate the tool + input."
+    } else if rollback_occurred {
+        "Rollback triggered. Check snapshot integrity."
+    } else if matches!(
+        capsule.memory_mode.as_ref(),
+        Some(nexus::proof::schema::MemoryAttestationMode::Degraded)
+    ) {
+        "Memory attestation degraded. AEON-IQ may be unreachable."
+    } else {
+        "No incident detected; capsule records a successful execution."
+    }
 }
 
 fn run_profile(cmd: ProfileCmd) -> anyhow::Result<()> {
@@ -295,11 +904,7 @@ fn run_via_daemon(
             input: serde_json::json!({}),
             auth_token: std::env::var("NEXUS_AGENTD_AUTH_TOKEN").ok(),
             #[cfg(feature = "aeon-memory")]
-            aeon_agent_id: None,
-            #[cfg(feature = "aeon-memory")]
-            aeon_session_id: None,
-            #[cfg(feature = "aeon-memory")]
-            aeon_memory_evidence_digest: None,
+            aeon: Box::default(),
         };
         write_frame(&mut wr, &req).await?;
         let resp: DaemonResponse = read_frame(&mut rd).await?;
@@ -354,6 +959,64 @@ fn spawn_daemon_in_background(socket: &std::path::Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn run_via_daemon(_wasm: PathBuf, _entry: String, _socket: Option<PathBuf>) -> anyhow::Result<()> {
     anyhow::bail!("`nexus run` requires a Unix-socket daemon; run on Linux or WSL2")
+}
+
+fn run_daemon_cmd(cmd: DaemonCmd) -> anyhow::Result<()> {
+    match cmd {
+        DaemonCmd::Ping { socket } => daemon_ping(socket),
+    }
+}
+
+/// Connect to `nexus-agentd`, send `Ping`, and expect `Pong`. On success
+/// prints `nexus-agentd OK (version <v>)` to stdout and returns `Ok(())`
+/// (exit 0). On any failure prints `nexus-agentd unreachable: <err>` to
+/// stderr and exits the process with code 1. This never spawns a daemon —
+/// it is a pure healthcheck probe.
+#[cfg(unix)]
+fn daemon_ping(socket: Option<PathBuf>) -> anyhow::Result<()> {
+    use nexus::daemon::protocol::{read_frame, write_frame};
+    use nexus::daemon::{default_socket_path, DaemonRequest, DaemonResponse};
+    use std::time::Duration;
+    use tokio::io::{BufReader, BufWriter};
+    use tokio::net::UnixStream;
+
+    let socket = socket.unwrap_or_else(default_socket_path);
+    let rt = tokio::runtime::Runtime::new()?;
+    let result: anyhow::Result<String> = rt.block_on(async move {
+        let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&socket))
+            .await
+            .map_err(|_| anyhow::anyhow!("connect timed out for {}", socket.display()))?
+            .map_err(|e| anyhow::anyhow!("could not connect to {}: {e}", socket.display()))?;
+        let (rd, wr) = stream.into_split();
+        let mut rd = BufReader::new(rd);
+        let mut wr = BufWriter::new(wr);
+        write_frame(&mut wr, &DaemonRequest::Ping).await?;
+        let resp: DaemonResponse =
+            tokio::time::timeout(Duration::from_secs(5), read_frame(&mut rd))
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out waiting for Pong"))??;
+        match resp {
+            DaemonResponse::Pong { version } => Ok(version),
+            other => Err(anyhow::anyhow!("unexpected reply to Ping: {other:?}")),
+        }
+    });
+
+    match result {
+        Ok(version) => {
+            println!("nexus-agentd OK (version {version})");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("nexus-agentd unreachable: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn daemon_ping(_socket: Option<PathBuf>) -> anyhow::Result<()> {
+    eprintln!("nexus-agentd unreachable: `nexus daemon ping` requires a Unix-socket daemon; run on Linux or WSL2");
+    std::process::exit(1);
 }
 
 fn execute_wasm(wasm_path: PathBuf, entry: String, _snapshot: bool) -> anyhow::Result<()> {

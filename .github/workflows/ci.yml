@@ -95,3 +95,43 @@ jobs:
         run: |
           cargo install --locked cargo-audit
           cargo audit
+
+  aeon-memory-tests:
+    name: aeon-memory-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo test --features aeon-memory
+        run: cargo test --features aeon-memory --all-targets --locked
+      - name: aeon_nexus_bridge tests
+        run: cargo test -p aeon_nexus_bridge --locked
+      - name: no-leak artifact scan
+        run: |
+          cargo build --features aeon-memory --locked --quiet 2>/dev/null || true
+          bin=target/debug/nexus
+          if [ -f "$bin" ]; then
+            if strings "$bin" | grep -qE '(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN (RSA |EC )?PRIVATE KEY)'; then
+              echo "::error::Potential secret pattern found in compiled binary"
+              exit 1
+            fi
+            echo "Artifact scan: no known secret patterns found"
+          else
+            echo "::warning::Binary $bin not found after build, skipping artifact scan"
+          fi
+
+  aeon-memory-clippy:
+    name: aeon-memory-clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo clippy --features aeon-memory
+        run: cargo clippy --features aeon-memory --locked -- -D warnings

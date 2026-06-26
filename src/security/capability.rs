@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{NexusError, Result};
+use crate::security::denial::DenialReason;
 
 /// Represents a specific capability that can be granted
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29,10 +30,130 @@ pub enum Capability {
     ExecuteBinary(PathBuf),
     /// Mount tmpfs at a path
     MountTmpfs(PathBuf),
+    /// Read a raw restored WASM memory preview from MCP rollback responses
+    MemoryPreview,
+    /// Access AEON memory recall
+    MemoryRecall,
+    /// Read AEON memory by scope
+    ReadMemory(MemoryScope),
+    /// Write AEON memory by scope
+    WriteMemory(MemoryScope),
     /// All capabilities (admin)
     All,
     /// No capability (deny all)
     None,
+}
+
+/// Agent-scoped AEON memory selector.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryScope {
+    /// Match all AEON operations for the given agent id.
+    Agent(String),
+    /// Match AEON operations for a specific agent/session pair.
+    Session {
+        agent_id: String,
+        session_id: String,
+    },
+    /// Match operations under a broad namespace selector.
+    Namespace(String),
+}
+
+impl std::fmt::Display for MemoryScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryScope::Agent(agent_id) => write!(f, "agent:{agent_id}"),
+            MemoryScope::Session {
+                agent_id,
+                session_id,
+            } => write!(f, "session:{agent_id}:{session_id}"),
+            MemoryScope::Namespace(namespace) => write!(f, "namespace:{namespace}"),
+        }
+    }
+}
+
+impl MemoryScope {
+    pub fn parse(input: &str) -> Option<Self> {
+        let mut parts = input.split(':');
+        let kind = parts.next()?.trim();
+
+        match kind {
+            "agent" => parts
+                .next()
+                .map(|agent_id| Self::Agent(agent_id.to_string())),
+            "session" => {
+                let agent_id = parts.next()?.trim();
+                let session_id = parts.next()?.trim();
+                if parts.next().is_some() || agent_id.is_empty() || session_id.is_empty() {
+                    return None;
+                }
+
+                Some(Self::Session {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                })
+            }
+            "namespace" => parts
+                .next()
+                .filter(|namespace| !namespace.trim().is_empty())
+                .map(|namespace| Self::Namespace(namespace.trim().to_string())),
+            _ => None,
+        }
+    }
+
+    pub fn is_subset_of(&self, parent: &Self) -> bool {
+        match (self, parent) {
+            (Self::Agent(agent_id), Self::Agent(parent_agent_id)) => agent_id == parent_agent_id,
+            (Self::Agent(agent_id), Self::Namespace(parent_namespace)) => {
+                agent_id == parent_namespace
+            }
+            (
+                Self::Session {
+                    agent_id,
+                    session_id,
+                },
+                Self::Session {
+                    agent_id: parent_agent_id,
+                    session_id: parent_session_id,
+                },
+            ) => agent_id == parent_agent_id && session_id == parent_session_id,
+            (Self::Session { agent_id, .. }, Self::Agent(parent_agent_id)) => {
+                agent_id == parent_agent_id
+            }
+            (Self::Session { agent_id, .. }, Self::Namespace(parent_namespace)) => {
+                agent_id == parent_namespace
+            }
+            (Self::Namespace(namespace), Self::Namespace(parent_namespace)) => {
+                namespace == parent_namespace
+            }
+            (Self::Namespace(namespace), Self::Agent(parent_agent_id)) => {
+                namespace == parent_agent_id
+            }
+            (
+                Self::Namespace(namespace),
+                Self::Session {
+                    agent_id: parent_agent_id,
+                    ..
+                },
+            ) => namespace == parent_agent_id,
+            _ => false,
+        }
+    }
+
+    pub fn matches(&self, agent_id: &str, session_id: Option<&str>) -> bool {
+        match self {
+            Self::Agent(scope_agent_id) => scope_agent_id == agent_id,
+            Self::Session {
+                agent_id: scope_agent_id,
+                session_id: scope_session_id,
+            } => {
+                scope_agent_id == agent_id
+                    && session_id
+                        .map(|session_id| session_id == scope_session_id)
+                        .unwrap_or(false)
+            }
+            Self::Namespace(namespace) => namespace == agent_id,
+        }
+    }
 }
 
 impl Capability {
@@ -61,8 +182,20 @@ impl Capability {
             // Write implies read
             (Capability::WriteFile(p1), Capability::ReadFile(p2)) => Self::path_contains(p1, p2),
 
+            (Capability::WriteMemory(scope), Capability::ReadMemory(requested)) => {
+                requested.is_subset_of(scope)
+            }
+
             // Exact match for WriteFile
             (Capability::WriteFile(p1), Capability::WriteFile(p2)) => Self::path_eq(p1, p2),
+
+            (Capability::ReadMemory(scope), Capability::ReadMemory(requested)) => {
+                requested.is_subset_of(scope)
+            }
+
+            (Capability::WriteMemory(scope), Capability::WriteMemory(requested)) => {
+                requested.is_subset_of(scope)
+            }
 
             // Exact match for ListDirectory with subdir support
             (Capability::ListDirectory(p1), Capability::ListDirectory(p2)) => {
@@ -76,6 +209,8 @@ impl Capability {
             // Execute and MountTmpfs - exact match only
             (Capability::ExecuteBinary(p1), Capability::ExecuteBinary(p2)) => p1 == p2,
             (Capability::MountTmpfs(p1), Capability::MountTmpfs(p2)) => p1 == p2,
+            (Capability::MemoryPreview, Capability::MemoryPreview) => true,
+            (Capability::MemoryRecall, Capability::MemoryRecall) => true,
 
             // Default deny
             _ => false,
@@ -105,6 +240,10 @@ impl Capability {
             Capability::HttpPost(pattern) => format!("http_post:{}", pattern),
             Capability::ExecuteBinary(p) => format!("exec:{}", p.display()),
             Capability::MountTmpfs(p) => format!("tmpfs:{}", p.display()),
+            Capability::MemoryPreview => "nexus:memory_preview".to_string(),
+            Capability::MemoryRecall => "nexus:memory_recall".to_string(),
+            Capability::ReadMemory(scope) => format!("nexus:read_memory:{scope}"),
+            Capability::WriteMemory(scope) => format!("nexus:write_memory:{scope}"),
             Capability::All => "all".to_string(),
             Capability::None => "none".to_string(),
         }
@@ -196,6 +335,9 @@ impl CapabilityToken {
         validity_duration: std::time::Duration,
         signing_key: &SigningKey,
     ) -> Result<Self> {
+        if let Capability::HttpGet(ref p) | Capability::HttpPost(ref p) = capability {
+            crate::security::url_guard::validate_http_capability_pattern(p)?;
+        }
         let now = Utc::now();
         let mut token = CapabilityToken {
             id: Uuid::new_v4(),
@@ -280,6 +422,9 @@ impl CapabilityToken {
             return Err(NexusError::InvalidCapability(format!(
                 "attenuation chain depth {child_depth} exceeds max {max_depth}"
             )));
+        }
+        if let Capability::HttpGet(ref p) | Capability::HttpPost(ref p) = narrower {
+            crate::security::url_guard::validate_http_capability_pattern(p)?;
         }
         let now = Utc::now();
         let expires_at = (now + validity_duration).min(self.expires_at);
@@ -376,7 +521,8 @@ impl CapabilityManager {
         validity_duration: std::time::Duration,
     ) -> Result<CapabilityToken> {
         let parent = self.active_tokens.get(&parent_id).ok_or_else(|| {
-            NexusError::InvalidCapability(format!("parent token {parent_id} not found"))
+            tracing::warn!(parent_id = %parent_id, "attenuate: parent token not found");
+            NexusError::InvalidCapability("capability chain validation failed".to_string())
         })?;
         let child = parent.attenuate(
             narrower,
@@ -393,26 +539,28 @@ impl CapabilityManager {
     pub fn validate(&self, token: &CapabilityToken, requested: &Capability) -> Result<()> {
         // Check if revoked
         if let Some(revoked_at) = self.revoked_tokens.get(&token.id) {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} was revoked at {}",
-                token.id, revoked_at
-            )));
+            tracing::warn!(token_id = %token.id, revoked_at = %revoked_at, "token is revoked");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::TokenRevoked.safe_message().to_string(),
+            ));
         }
 
         // Check expiration
         if !token.is_valid() {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} expired at {}",
-                token.id, token.expires_at
-            )));
+            tracing::warn!(token_id = %token.id, expires_at = %token.expires_at, "token is expired");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::TokenExpired.safe_message().to_string(),
+            ));
         }
 
         // Verify signature
         if !token.verify_signature(&self.verifying_key) {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} has invalid signature",
-                token.id
-            )));
+            tracing::warn!(token_id = %token.id, "token has invalid signature");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::CapabilityNotPermitted
+                    .safe_message()
+                    .to_string(),
+            ));
         }
 
         // Walk and verify the attenuation chain (no-op for root tokens).
@@ -422,10 +570,12 @@ impl CapabilityManager {
 
         // Check capability
         if !token.allows(requested) {
-            return Err(NexusError::InvalidCapability(format!(
-                "Token {} does not grant {:?}",
-                token.id, requested
-            )));
+            tracing::warn!(token_id = %token.id, requested = ?requested, "token does not grant capability");
+            return Err(NexusError::InvalidCapability(
+                DenialReason::CapabilityNotPermitted
+                    .safe_message()
+                    .to_string(),
+            ));
         }
 
         Ok(())
@@ -447,14 +597,14 @@ impl CapabilityManager {
             // Check revocation before the active_tokens lookup: revoke() removes
             // the token from active_tokens but records it in revoked_tokens.
             if let Some(at) = self.revoked_tokens.get(&pid) {
-                return Err(NexusError::InvalidCapability(format!(
-                    "ancestor {pid} was revoked at {at}"
-                )));
+                tracing::warn!(ancestor_id = %pid, invalidated_at = %at, "ancestor token is no longer valid");
+                return Err(NexusError::InvalidCapability(
+                    DenialReason::TokenRevoked.safe_message().to_string(),
+                ));
             }
             let parent = self.active_tokens.get(&pid).ok_or_else(|| {
-                NexusError::InvalidCapability(format!(
-                    "broken attenuation chain: parent {pid} not found"
-                ))
+                tracing::warn!(parent_id = %pid, "broken attenuation chain: parent not found");
+                NexusError::InvalidCapability("capability chain validation failed".to_string())
             })?;
             if !parent.verify_signature(&self.verifying_key) {
                 return Err(NexusError::InvalidCapability(format!(
@@ -503,6 +653,11 @@ impl CapabilityManager {
     pub fn revoke(&mut self, token_id: Uuid) {
         self.revoked_tokens.insert(token_id, Utc::now());
         self.active_tokens.remove(&token_id);
+    }
+
+    /// Check whether a token has been explicitly revoked.
+    pub fn is_revoked(&self, token_id: &Uuid) -> bool {
+        self.revoked_tokens.contains_key(token_id)
     }
 
     /// Get the public key for external verification
@@ -573,6 +728,72 @@ mod tests {
         let child = Capability::ReadFile(PathBuf::from("/safe/../outside"));
         assert!(!child.is_subset_of(&parent));
         assert!(!parent.allows(&child));
+    }
+
+    #[test]
+    fn memory_read_denied_for_wrong_agent() {
+        let mut manager = CapabilityManager::new();
+        let token = manager
+            .issue(
+                Capability::ReadMemory(MemoryScope::Agent("agent-a".to_string())),
+                "root",
+                hour(),
+            )
+            .unwrap();
+        assert!(manager
+            .validate(
+                &token,
+                &Capability::ReadMemory(MemoryScope::Agent("agent-b".to_string()))
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn memory_write_denied_for_wrong_session() {
+        let mut manager = CapabilityManager::new();
+        let token = manager
+            .issue(
+                Capability::WriteMemory(MemoryScope::Session {
+                    agent_id: "agent-a".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "root",
+                hour(),
+            )
+            .unwrap();
+        assert!(manager
+            .validate(
+                &token,
+                &Capability::WriteMemory(MemoryScope::Session {
+                    agent_id: "agent-a".to_string(),
+                    session_id: "session-2".to_string(),
+                }),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn memory_access_is_agent_isolated() {
+        let mut manager = CapabilityManager::new();
+        let token = manager
+            .issue(
+                Capability::WriteMemory(MemoryScope::Session {
+                    agent_id: "agent-a".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "root",
+                hour(),
+            )
+            .unwrap();
+        assert!(manager
+            .validate(
+                &token,
+                &Capability::ReadMemory(MemoryScope::Session {
+                    agent_id: "agent-b".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+            )
+            .is_err());
     }
 
     #[test]

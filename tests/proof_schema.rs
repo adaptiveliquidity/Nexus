@@ -1,9 +1,11 @@
 use chrono::Utc;
 use nexus::proof::{
+    default_proof_capsule_limitations,
     receipt::ExecutionReceipt,
     schema::{
         CapabilityEvidence, InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule,
-        ProofScorecard, ProofSubject, RedactionReport, ToolIdentity, TypedDigest,
+        ProofCapsuleBuilder, ProofScorecard, ProofSubject, RedactionReport, ToolIdentity,
+        TypedDigest,
     },
 };
 use uuid::Uuid;
@@ -14,6 +16,35 @@ fn sample_typed_digest() -> TypedDigest {
         value: "abc123".into(),
         public_recomputable: true,
     }
+}
+
+fn sample_private_digest() -> TypedDigest {
+    TypedDigest {
+        algorithm: "hmac-sha256".into(),
+        value: "input-hmac".into(),
+        public_recomputable: false,
+    }
+}
+
+#[test]
+fn proof_capsule_builder_builds_minimal_capsule() {
+    let capsule =
+        ProofCapsuleBuilder::new("bench_tool", sample_typed_digest(), sample_private_digest())
+            .build();
+
+    assert_eq!(capsule.version, "1");
+    assert_eq!(capsule.subject.tool_name, "bench_tool");
+    assert_eq!(capsule.tool.module_name, "bench_tool");
+    assert_eq!(capsule.tool.entrypoint, "_start");
+    assert_eq!(capsule.input.media_type, "application/json");
+    assert!(!capsule.input.raw_included);
+    assert_eq!(capsule.policy.mode, PolicyEnforcementMode::UnprofiledDev);
+    assert!(capsule.capabilities.required.is_empty());
+    assert!(capsule.capabilities.granted.is_empty());
+    assert!(capsule
+        .limitations
+        .contains(&"runtime_attestation_only".to_owned()));
+    assert!(capsule.signature.is_none());
 }
 
 fn sample_capsule() -> ProofCapsule {
@@ -34,7 +65,7 @@ fn sample_capsule() -> ProofCapsule {
             entrypoint: "_start".into(),
         },
         input: InputIdentity {
-            digest: sample_typed_digest(),
+            digest: sample_private_digest(),
             media_type: "application/json".into(),
             raw_included: false,
         },
@@ -58,9 +89,9 @@ fn sample_capsule() -> ProofCapsule {
             hashed_fields: vec![],
             truncated_fields: vec![],
             removed_fields: vec![],
-            hmac_fields: vec![],
+            hmac_fields: vec!["input.digest".into()],
         },
-        limitations: vec!["does_not_prove_external_side_effects_absent".into()],
+        limitations: default_proof_capsule_limitations(),
         #[cfg(feature = "aeon-memory")]
         memory_evidence: None,
         #[cfg(feature = "aeon-memory")]
@@ -94,6 +125,8 @@ fn sample_receipt() -> ExecutionReceipt {
         aeon_session_id: None,
         #[cfg(feature = "aeon-memory")]
         negotiation_rounds: None,
+        #[cfg(feature = "aeon-memory")]
+        aeon_memory_evidence_digest: None,
     }
 }
 

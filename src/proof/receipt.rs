@@ -75,4 +75,9 @@ pub struct ExecutionReceipt {
     #[cfg(feature = "aeon-memory")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negotiation_rounds: Option<u32>,
+    /// Optional precomputed AEON-IQ memory-evidence digest that must be bound
+    /// into the signed proof capsule when supplied by a daemon caller.
+    #[cfg(feature = "aeon-memory")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aeon_memory_evidence_digest: Option<String>,
 }

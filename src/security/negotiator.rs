@@ -44,13 +44,13 @@ pub(crate) async fn negotiate_capability_denial_with_authorizer(
         let candidates = candidates_from_hits(original_required, &hits);
         let narrowed = strict_intersection(original_required, &candidates);
 
-        debug_assert!(
+        assert!(
             narrowed
                 .iter()
                 .all(|capability| original_required.contains(capability)),
             "negotiated capabilities must be drawn only from the original requirement set"
         );
-        debug_assert!(
+        assert!(
             narrowed.len() < original_required.len(),
             "negotiated capabilities must strictly narrow the original requirement set"
         );
@@ -158,6 +158,14 @@ fn capability_aliases(capability: &Capability) -> Vec<String> {
             "mounttmpfs".to_string(),
             format!("mount tmpfs {}", path.display()).to_ascii_lowercase(),
         ],
+        Capability::MemoryPreview => vec!["nexus:memory_preview".to_string()],
+        Capability::MemoryRecall => vec!["memoryrecall".to_string(), "memory_recall".to_string()],
+        Capability::ReadMemory(scope) => {
+            vec![format!("read_memory:{}", scope), "readmemory".to_string()]
+        }
+        Capability::WriteMemory(scope) => {
+            vec![format!("write_memory:{}", scope), "writememory".to_string()]
+        }
         Capability::All => vec!["all".to_string()],
         Capability::None => vec!["none".to_string()],
     }

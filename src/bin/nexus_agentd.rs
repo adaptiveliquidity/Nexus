@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::io::{BufReader, BufWriter};
+#[cfg(feature = "aeon-memory")]
+use tracing::debug;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -31,6 +33,11 @@ const AUTH_TOKEN_ENV: &str = "NEXUS_AGENTD_AUTH_TOKEN";
 const MODULE_DIR_ENV: &str = "NEXUS_AGENTD_MODULE_DIR";
 /// Profile env var for the daemon (Slice 3 — daemon_auth_required enforcement).
 const AGENTD_PROFILE_ENV: &str = "NEXUS_AGENTD_PROFILE";
+/// Set to any non-empty value to activate the release/production execution
+/// profile.  When active the daemon refuses to start without
+/// `NEXUS_AGENTD_AUTH_TOKEN` configured, regardless of any profile file.
+/// This is the fail-closed gate for production deployments.
+const AGENTD_RELEASE_ENV: &str = "NEXUS_AGENTD_RELEASE";
 const UNAUTHORIZED_MESSAGE: &str = "Unauthorized: daemon request authentication failed";
 const WASM_PATH_REJECTED_MESSAGE: &str =
     "wasm_path rejected: configure an allowed module directory";
@@ -79,9 +86,27 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = HypervisorConfig::default();
     cfg.sandbox_config.max_fuel = cli.fuel;
     cfg.sandbox_config.time_limit = std::time::Duration::from_millis(cli.timeout_ms);
+    #[cfg(feature = "aeon-memory")]
+    match nexus::aeon::AeonConfig::from_env() {
+        Ok(config) => {
+            cfg.aeon_config = Some(config);
+        }
+        Err(error) => {
+            debug!(
+                target: "nexus.agentd",
+                error = %error,
+                "AEON-IQ config failed to load; daemon proof memory/timeline integration disabled"
+            );
+        }
+    }
     let pool = HypervisorPool::new(pool_size, cfg)?;
     let module_cache = Arc::new(ModuleCache::new());
     let auth_token = configured_auth_token()?;
+
+    // Release builds fail closed: a release daemon refuses to start without an
+    // auth token, regardless of profile. Debug/test builds keep the permissive
+    // behavior so local dev and the existing test suite are unaffected.
+    enforce_release_auth_requirement(&auth_token)?;
 
     // Slice 3: if a profile is configured and it requires daemon authentication,
     // refuse to start without an auth token — fail loudly rather than silently
@@ -101,7 +126,42 @@ fn configured_auth_token() -> anyhow::Result<AuthToken> {
     }
 }
 
+/// Release builds must fail closed: refuse to start an unauthenticated daemon
+/// regardless of profile configuration. This closes the "advisory" gap where a
+/// release daemon with no profile and no token would serve Execute/Shutdown
+/// with zero authentication.
+#[cfg(not(debug_assertions))]
+fn enforce_release_auth_requirement(auth_token: &AuthToken) -> anyhow::Result<()> {
+    if auth_token.is_none() {
+        anyhow::bail!(
+            "release builds refuse to start without daemon authentication ({AUTH_TOKEN_ENV} must be set)"
+        );
+    }
+    Ok(())
+}
+
+/// Debug/test builds retain the permissive behavior so local development and the
+/// existing test suite run without a configured auth token.
+#[cfg(debug_assertions)]
+fn enforce_release_auth_requirement(_auth_token: &AuthToken) -> anyhow::Result<()> {
+    Ok(())
+}
+
 fn enforce_profile_auth_requirement(auth_token: &AuthToken) -> anyhow::Result<()> {
+    // Release/production gate: if NEXUS_AGENTD_RELEASE is set to any non-empty
+    // value, require an auth token unconditionally before consulting any profile
+    // file.  This is the fail-closed production posture — a misconfigured
+    // deployment cannot silently run unauthenticated.
+    let release_active = std::env::var_os(AGENTD_RELEASE_ENV)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if release_active && auth_token.is_none() {
+        anyhow::bail!(
+            "release profile is active ({AGENTD_RELEASE_ENV} is set) but \
+             {AUTH_TOKEN_ENV} is not configured — refusing to start unauthenticated"
+        );
+    }
+
     let Some(profile_path) = std::env::var_os(AGENTD_PROFILE_ENV) else {
         return Ok(());
     };
@@ -431,9 +491,7 @@ async fn serve(
             entry,
             input,
             #[cfg(feature = "aeon-memory")]
-            aeon_agent_id,
-            #[cfg(feature = "aeon-memory")]
-            aeon_session_id,
+            aeon,
             ..
         } => {
             let bytes = match (wasm_bytes, wasm_path) {
@@ -446,6 +504,8 @@ async fn serve(
                                 .into(),
                         #[cfg(feature = "aeon-memory")]
                         events: vec![],
+                        #[cfg(feature = "aeon-memory")]
+                        nexusiq: None,
                     };
                 }
                 (Some(b), _) => b,
@@ -456,6 +516,8 @@ async fn serve(
                             message: e.to_string(),
                             #[cfg(feature = "aeon-memory")]
                             events: vec![],
+                            #[cfg(feature = "aeon-memory")]
+                            nexusiq: None,
                         }
                     }
                 },
@@ -464,33 +526,103 @@ async fn serve(
                         message: "request missing wasm_bytes and wasm_path".into(),
                         #[cfg(feature = "aeon-memory")]
                         events: vec![],
+                        #[cfg(feature = "aeon-memory")]
+                        nexusiq: None,
                     }
                 }
             };
             let guard = match pool.acquire().await {
                 Ok(g) => g,
                 Err(e) => {
+                    tracing::error!(error = %e, "pool acquire failed");
                     return DaemonResponse::Error {
-                        message: format!("pool acquire failed: {e}"),
+                        message: "service temporarily unavailable".to_string(),
                         #[cfg(feature = "aeon-memory")]
                         events: vec![],
-                    }
+                        #[cfg(feature = "aeon-memory")]
+                        nexusiq: None,
+                    };
                 }
             };
             let engine = guard.hv().sandbox_engine();
             let module = match module_cache.get_or_compile(&engine, &bytes) {
                 Ok(m) => m,
                 Err(e) => {
+                    tracing::error!(error = %e, "module compile failed");
                     return DaemonResponse::Error {
-                        message: format!("module compile failed: {e}"),
+                        message: "module load failed".to_string(),
                         #[cfg(feature = "aeon-memory")]
                         events: vec![],
-                    }
+                        #[cfg(feature = "aeon-memory")]
+                        nexusiq: None,
+                    };
                 }
             };
-            let tool = ToolDefinition::new(name, bytes).with_entry(&entry);
+            #[cfg_attr(not(feature = "aeon-memory"), allow(unused_mut))]
+            let mut tool = ToolDefinition::new(name, bytes).with_entry(&entry);
             #[cfg(feature = "aeon-memory")]
-            let tool = tool.with_aeon_context(aeon_agent_id, aeon_session_id);
+            {
+                tool = tool
+                    .with_aeon_context(aeon.aeon_agent_id.clone(), aeon.aeon_session_id.clone())
+                    .with_aeon_memory_evidence_digest(aeon.aeon_memory_evidence_digest.clone());
+                if let Some(capabilities) = aeon.required_capabilities.clone() {
+                    tool = tool.with_capabilities(capabilities);
+                }
+            }
+            #[cfg(feature = "aeon-memory")]
+            if aeon.emit_proof {
+                let proof_result = match aeon.caller_capabilities.as_deref() {
+                    Some(tokens) => {
+                        guard
+                            .hv()
+                            .execute_tool_proof_with_tokens(tool, input, tokens)
+                            .await
+                    }
+                    None => guard.hv().execute_tool_proof(tool, input).await,
+                };
+
+                return match proof_result {
+                    Ok((output, proof_capsule)) => {
+                        let negotiation_rounds = proof_capsule.capabilities.negotiation_rounds;
+                        let events = daemon_proof_events(
+                            &output,
+                            proof_capsule.capsule_id,
+                            negotiation_rounds,
+                        );
+                        let timeline_delivery_status = queue_timeline_delivery(
+                            aeon.aeon_agent_id.as_deref(),
+                            aeon.aeon_session_id.as_deref(),
+                            aeon.attestation_mode.as_deref(),
+                            &events,
+                        );
+                        let nexusiq = nexus::daemon::DaemonNexusIqEvidence {
+                            proof_capsule_ref: Some(proof_capsule.capsule_id.to_string()),
+                            memory_evidence_ref: proof_capsule.memory_evidence.clone(),
+                            timeline_delivery_status,
+                            denial_negotiation: negotiation_rounds.map(|rounds| {
+                                nexus::daemon::DaemonDenialNegotiation {
+                                    negotiated: true,
+                                    rounds: Some(rounds),
+                                }
+                            }),
+                            proof_capsule: Some(Box::new(proof_capsule)),
+                        };
+                        DaemonResponse::Executed {
+                            output: Box::new(output),
+                            events,
+                            nexusiq: Some(nexusiq),
+                        }
+                    }
+                    Err(ref e) => {
+                        let events = capability_denied_events(e);
+                        DaemonResponse::Error {
+                            message: e.to_string(),
+                            events,
+                            nexusiq: None,
+                        }
+                    }
+                };
+            }
             match guard
                 .hv()
                 .execute_tool_precompiled(tool, input, module)
@@ -511,25 +643,19 @@ async fn serve(
                         output: Box::new(output),
                         #[cfg(feature = "aeon-memory")]
                         events,
+                        #[cfg(feature = "aeon-memory")]
+                        nexusiq: None,
                     }
                 }
                 Err(ref e) => {
                     #[cfg(feature = "aeon-memory")]
-                    let events = {
-                        use nexus::error::NexusError;
-                        match e {
-                            NexusError::CapabilityDenied(msg) => {
-                                vec![nexus::daemon::NexusExecutionEvent::CapabilityDenied {
-                                    denied_category: msg.clone(),
-                                }]
-                            }
-                            _ => vec![],
-                        }
-                    };
+                    let events = capability_denied_events(e);
                     DaemonResponse::Error {
                         message: e.to_string(),
                         #[cfg(feature = "aeon-memory")]
                         events,
+                        #[cfg(feature = "aeon-memory")]
+                        nexusiq: None,
                     }
                 }
             }
@@ -556,8 +682,71 @@ fn unauthorized_response(req: &DaemonRequest, auth_token: Option<&str>) -> Optio
             message: UNAUTHORIZED_MESSAGE.into(),
             #[cfg(feature = "aeon-memory")]
             events: vec![],
+            #[cfg(feature = "aeon-memory")]
+            nexusiq: None,
         })
     }
+}
+
+#[cfg(feature = "aeon-memory")]
+fn capability_denied_events(error: &nexus::NexusError) -> Vec<nexus::daemon::NexusExecutionEvent> {
+    match error {
+        nexus::NexusError::CapabilityDenied(message) => {
+            vec![nexus::daemon::NexusExecutionEvent::CapabilityDenied {
+                denied_category: message.clone(),
+            }]
+        }
+        _ => vec![],
+    }
+}
+
+#[cfg(feature = "aeon-memory")]
+fn daemon_proof_events(
+    output: &nexus::ToolOutput,
+    capsule_id: uuid::Uuid,
+    negotiation_rounds: Option<u32>,
+) -> Vec<nexus::daemon::NexusExecutionEvent> {
+    let mut events = Vec::new();
+    if negotiation_rounds.is_some() {
+        events.push(nexus::daemon::NexusExecutionEvent::CapabilityDenied {
+            denied_category: "capability_denial_negotiated".to_string(),
+        });
+    }
+    if let Some(snapshot_id) = output.snapshot_id {
+        events.push(nexus::daemon::NexusExecutionEvent::SnapshotCreated { snapshot_id });
+    }
+    events.push(nexus::daemon::NexusExecutionEvent::ProofCapsuleEmitted { capsule_id });
+    events
+}
+
+#[cfg(feature = "aeon-memory")]
+fn queue_timeline_delivery(
+    agent_id: Option<&str>,
+    session_id: Option<&str>,
+    mode: Option<&str>,
+    events: &[nexus::daemon::NexusExecutionEvent],
+) -> Option<nexus::aeon::TimelineDeliveryStatus> {
+    let agent_id = agent_id?.to_string();
+    let session_id = session_id.map(str::to_string);
+    let mode = nexus::aeon::TimelineDeliveryMode::parse(mode);
+    let config = nexus::aeon::AeonConfig::from_env().unwrap_or_default();
+    let sink = if matches!(mode, nexus::aeon::TimelineDeliveryMode::Offline) {
+        Some(nexus::aeon::AeonTimelineSink::from_config(&config).with_mode(mode))
+    } else {
+        nexus::aeon::AeonTimelineSink::from_enabled_config(&config).map(|sink| sink.with_mode(mode))
+    };
+
+    let Some(sink) = sink else {
+        return Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen);
+    };
+    let events = events.to_vec();
+    tokio::spawn(async move {
+        let _ = sink
+            .deliver(&agent_id, session_id.as_deref(), &events)
+            .await;
+    });
+
+    Some(nexus::aeon::TimelineDeliveryStatus::FireAndForget)
 }
 
 fn read_allowlisted_wasm_path(wasm_path: &Path) -> anyhow::Result<Vec<u8>> {
@@ -831,5 +1020,341 @@ mod auth_tests {
         let err = open_agentd_wasm_path_with_dirs(&traversal, &allowed_dirs).unwrap_err();
 
         assert_eq!(err.to_string(), WASM_PATH_REJECTED_MESSAGE);
+    }
+}
+
+#[cfg(test)]
+mod profile_auth_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_PROFILE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn write_profile(contents: &str) -> std::path::PathBuf {
+        let id = NEXT_PROFILE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "nexus-agentd-profile-test-{}-{id}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).expect("write profile");
+        path
+    }
+
+    /// Run `test` with the given env vars set, restoring originals afterward.
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], test: F) {
+        // Serialize env-mutating tests: enforce_profile_auth_requirement reads
+        // process-global NEXUS_AGENTD_* vars, so running these concurrently races
+        // (a sibling test's NEXUS_AGENTD_PROFILE leaks in and fails the file read).
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+
+        for (k, v) in vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+
+        for (k, v) in &saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    // ── release-profile (NEXUS_AGENTD_RELEASE) tests ──────────────────────────
+
+    #[test]
+    fn release_profile_without_token_fails_startup() {
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, Some("1")),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, None),
+            ],
+            || {
+                let token: AuthToken = None;
+                let err = enforce_profile_auth_requirement(&token)
+                    .expect_err("should fail without token in release mode");
+                assert!(
+                    err.to_string().contains(AGENTD_RELEASE_ENV),
+                    "error should mention the release env var, got: {err}"
+                );
+                assert!(
+                    err.to_string().contains(AUTH_TOKEN_ENV),
+                    "error should mention the auth token env var, got: {err}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn release_profile_with_token_succeeds() {
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, Some("1")),
+                (AUTH_TOKEN_ENV, Some("supersecret")),
+                (AGENTD_PROFILE_ENV, None),
+            ],
+            || {
+                let token: AuthToken = Some(Arc::from("supersecret"));
+                enforce_profile_auth_requirement(&token)
+                    .expect("should succeed when release mode has token configured");
+            },
+        );
+    }
+
+    #[test]
+    fn no_release_no_profile_is_permissive() {
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, None),
+            ],
+            || {
+                let token: AuthToken = None;
+                enforce_profile_auth_requirement(&token)
+                    .expect("dev/default (no profile, no release flag) should be permissive");
+            },
+        );
+    }
+
+    // ── profile-file daemon_auth_required tests (existing behaviour) ──────────
+
+    #[test]
+    fn profile_file_with_daemon_auth_required_and_no_token_fails() {
+        let path = write_profile(
+            r#"
+name = "production"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[execution]
+daemon_auth_required = true
+"#,
+        );
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, Some(path.to_str().unwrap())),
+            ],
+            || {
+                let token: AuthToken = None;
+                let err = enforce_profile_auth_requirement(&token)
+                    .expect_err("profile with daemon_auth_required=true should fail without token");
+                assert!(
+                    err.to_string().contains("production"),
+                    "error should mention profile name, got: {err}"
+                );
+            },
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn profile_file_with_daemon_auth_required_and_token_succeeds() {
+        let path = write_profile(
+            r#"
+name = "production"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+
+[execution]
+daemon_auth_required = true
+"#,
+        );
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, Some("tok")),
+                (AGENTD_PROFILE_ENV, Some(path.to_str().unwrap())),
+            ],
+            || {
+                let token: AuthToken = Some(Arc::from("tok"));
+                enforce_profile_auth_requirement(&token)
+                    .expect("profile with daemon_auth_required=true + token should succeed");
+            },
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn dev_profile_file_without_daemon_auth_required_is_permissive() {
+        let path = write_profile(
+            r#"
+name = "dev"
+
+[[capabilities]]
+type = "read_file"
+path = "/tmp"
+"#,
+        );
+        with_env(
+            &[
+                (AGENTD_RELEASE_ENV, None),
+                (AUTH_TOKEN_ENV, None),
+                (AGENTD_PROFILE_ENV, Some(path.to_str().unwrap())),
+            ],
+            || {
+                let token: AuthToken = None;
+                enforce_profile_auth_requirement(&token)
+                    .expect("dev profile without daemon_auth_required should be permissive");
+            },
+        );
+        std::fs::remove_file(path).ok();
+    }
+}
+
+#[cfg(all(test, feature = "aeon-memory"))]
+mod proof_tests {
+    use super::*;
+    use nexus::daemon::NexusExecutionEvent;
+
+    fn trivial_wasm() -> Vec<u8> {
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#).unwrap()
+    }
+
+    fn execute_request() -> DaemonRequest {
+        DaemonRequest::Execute {
+            name: "proof_daemon".to_string(),
+            wasm_bytes: Some(trivial_wasm()),
+            wasm_path: None,
+            entry: "_start".to_string(),
+            input: serde_json::json!({}),
+            auth_token: Some("secret".to_string()),
+            aeon: Box::new(nexus::daemon::DaemonAeonExecuteOptions {
+                emit_proof: true,
+                ..nexus::daemon::DaemonAeonExecuteOptions::default()
+            }),
+        }
+    }
+
+    async fn serve_request(req: DaemonRequest, pool: Arc<HypervisorPool>) -> DaemonResponse {
+        let module_cache = Arc::new(ModuleCache::new());
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        serve(req, &pool, &module_cache, &shutdown_tx, Some("secret")).await
+    }
+
+    #[tokio::test]
+    async fn proof_mode_returns_signed_capsule_and_events() {
+        let pool = HypervisorPool::new(1, HypervisorConfig::default()).unwrap();
+
+        let response = serve_request(execute_request(), pool).await;
+
+        match response {
+            DaemonResponse::Executed {
+                output,
+                events,
+                nexusiq: Some(nexusiq),
+            } => {
+                assert!(output.success);
+                assert!(events
+                    .iter()
+                    .any(|event| matches!(event, NexusExecutionEvent::ProofCapsuleEmitted { .. })));
+                let capsule = nexusiq.proof_capsule.expect("proof capsule");
+                assert!(capsule.signature.is_some());
+                assert_eq!(
+                    nexusiq.proof_capsule_ref.as_deref(),
+                    Some(capsule.capsule_id.to_string().as_str())
+                );
+            }
+            other => panic!("expected proof execution response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_execute_path_omits_proof_section() {
+        let pool = HypervisorPool::new(1, HypervisorConfig::default()).unwrap();
+        let mut req = execute_request();
+        let DaemonRequest::Execute { aeon, .. } = &mut req else {
+            unreachable!();
+        };
+        aeon.emit_proof = false;
+
+        let response = serve_request(req, pool).await;
+
+        match response {
+            DaemonResponse::Executed {
+                output,
+                events,
+                nexusiq,
+            } => {
+                assert!(output.success);
+                assert!(nexusiq.is_none());
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, NexusExecutionEvent::ProofCapsuleEmitted { .. })));
+            }
+            other => panic!("expected legacy execution response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn proof_mode_consumes_aeon_memory_evidence_digest() {
+        let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cfg = HypervisorConfig {
+            aeon_config: Some(nexus::aeon::AeonConfig {
+                enabled: true,
+                base_url: "http://127.0.0.1:1".to_string(),
+                agent_id: "agent-1".to_string(),
+                session_id: Some("session-1".to_string()),
+                timeout_ms: 1,
+                management_key: Some("mgmt-key".to_string()),
+                hmac_key: Some(vec![0x11, 0x22, 0x33]),
+            }),
+            ..HypervisorConfig::default()
+        };
+        let pool = HypervisorPool::new(1, cfg).unwrap();
+        let mut req = execute_request();
+        let DaemonRequest::Execute { aeon, .. } = &mut req else {
+            unreachable!();
+        };
+        aeon.aeon_agent_id = Some("agent-1".to_string());
+        aeon.aeon_session_id = Some("session-1".to_string());
+        aeon.aeon_memory_evidence_digest = Some(digest.to_string());
+
+        let response = serve_request(req, pool).await;
+
+        match response {
+            DaemonResponse::Executed {
+                nexusiq: Some(nexusiq),
+                ..
+            } => {
+                let capsule = nexusiq.proof_capsule.expect("proof capsule");
+                let evidence = capsule.memory_evidence.expect("memory evidence");
+                assert_eq!(evidence.digest.value, digest);
+                assert_eq!(
+                    capsule.memory_mode,
+                    Some(nexus::proof::schema::MemoryAttestationMode::Advisory)
+                );
+                assert_eq!(
+                    nexusiq
+                        .memory_evidence_ref
+                        .expect("memory ref")
+                        .digest
+                        .value,
+                    digest
+                );
+            }
+            other => panic!("expected proof execution response, got {other:?}"),
+        }
     }
 }

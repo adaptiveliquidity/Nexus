@@ -41,6 +41,12 @@ This threat model covers the service-boundary integration between the Nexus hype
 | AEON-IQ timeline persistence blocks Nexus execution. | Nexus emits events such as `capability_denied`, `snapshot_created`, and `proof_capsule_emitted` through `src/daemon/mod.rs` and the MCP `nexus_aeon_execute_timeline` tool, but persistence to AEON-IQ's `POST /agents/:id/timeline` endpoint is best-effort outside the Nexus hot path. | If the caller never forwards or retries events, AEON-IQ's timeline can be incomplete. The Nexus proof capsule still exists independently. |
 | Time-travel lookup selects the wrong snapshot for a timestamp. | AEON-IQ's `GET /agents/:id/timeline/at` endpoint should resolve timestamp to timeline rows that include Nexus snapshot/proof identifiers from migration `0023`; Nexus snapshots remain id-addressed. | Clock skew and incomplete timeline ingestion can make timestamp lookups stale or ambiguous. Consumers should prefer exact snapshot/proof ids when available. |
 
+## Timeline Chain Integrity Boundary (v1.0.0)
+
+The timeline event chain (`TimelineEventBody.prev_event_digest`) uses unkeyed SHA-256 to link consecutive events. This provides tamper-evidence against accidental corruption and passive observers who cannot recompute hashes. It does NOT provide tamper-proof integrity against an active adversary with write access to the timeline spool: such an attacker can recompute all SHA-256 digests and re-link a fully valid forged chain undetectably. Additionally, the genesis event carries `prev_event_digest = None`, providing no external anchor for the chain head.
+
+This limitation is acceptable for v1.0.0 because the timeline is fire-and-forget advisory (non-blocking, non-authoritative). Operators who require stronger guarantees should treat the spool as an untrusted append-only log and anchor the chain head to an external commitment. HMAC-signing the chain head using `NEXUS_AEON_HMAC_KEY` is planned for v1.1.0.
+
 ## Proof Honesty
 
 | Threat | Mitigation | Residual risk |

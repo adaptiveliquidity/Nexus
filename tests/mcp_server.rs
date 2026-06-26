@@ -98,6 +98,8 @@ impl McpClient {
         }
         if include_full_proof {
             command.env(NEXUS_MCP_RETURN_FULL_PROOF_ENV, "1");
+        } else {
+            command.env(NEXUS_MCP_RETURN_FULL_PROOF_ENV, "0");
         }
 
         let mut child = command.spawn().expect("failed to spawn nexus-mcp");
@@ -155,6 +157,15 @@ fn write_file_allowlist(path: &Path) -> String {
         {
             "type": "write_file",
             "path": path.display().to_string()
+        }
+    ])
+    .to_string()
+}
+
+fn memory_preview_allowlist() -> String {
+    json!([
+        {
+            "type": "nexus:memory_preview"
         }
     ])
     .to_string()
@@ -612,14 +623,8 @@ async fn snapshot_create_latest_runtime_rolls_back_restored_state() {
     assert_eq!(memory["byte_len"], WASM_PAGE_SIZE);
     assert_eq!(memory["sha256"], base_checksum);
     assert_ne!(memory["sha256"], diff_checksum);
-
-    let preview = memory["preview_base64"]
-        .as_str()
-        .expect("restored memory preview should be present");
-    let preview = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, preview)
-        .expect("memory preview should be valid base64");
-    assert_eq!(&preview[..4], b"base");
-    assert_ne!(&preview[..4], b"diff");
+    assert_eq!(memory["preview_len"], 0);
+    assert_eq!(memory["preview_base64"], "");
 
     assert!(
         restored["execution_state"]["captured_globals"]
@@ -628,6 +633,80 @@ async fn snapshot_create_latest_runtime_rolls_back_restored_state() {
             > 0,
         "restored execution state summary should report captured globals: {rollback}"
     );
+}
+
+#[tokio::test]
+async fn preview_base64_requires_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm_path = tmp.path().join("preview_capability_snapshot.wasm");
+    fs::write(&wasm_path, module_with_data("base", 7)).unwrap();
+
+    let mut client = McpClient::spawn_with_module_dir_and_allowlist(
+        Some(tmp.path()),
+        Some(&memory_preview_allowlist()),
+    )
+    .await;
+    initialize_client(&mut client).await;
+
+    let exec_resp = client
+        .request(
+            2,
+            "tools/call",
+            json!({
+                "name": "nexus_execute",
+                "arguments": { "wasm_path": wasm_path }
+            }),
+        )
+        .await;
+    let exec = tool_json(&exec_resp);
+    assert_eq!(exec["success"], true, "execute failed: {exec}");
+    let snapshot_id = exec["snapshot_id"]
+        .as_str()
+        .expect("execute response should expose the runtime snapshot id");
+
+    let without_cap_resp = client
+        .request(
+            3,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_rollback",
+                "arguments": {
+                    "snapshot_id": snapshot_id,
+                    "include_restored_state": true
+                }
+            }),
+        )
+        .await;
+    let without_cap = tool_json(&without_cap_resp);
+    let memory = &without_cap["restored_state"]["memory"];
+    assert_eq!(memory["preview_len"], 0);
+    assert_eq!(memory["preview_base64"], "");
+
+    let with_cap_resp = client
+        .request(
+            4,
+            "tools/call",
+            json!({
+                "name": "nexus_snapshot_rollback",
+                "arguments": {
+                    "snapshot_id": snapshot_id,
+                    "include_restored_state": true,
+                    "caller_capabilities": [
+                        { "type": "nexus:memory_preview" }
+                    ]
+                }
+            }),
+        )
+        .await;
+    let with_cap = tool_json(&with_cap_resp);
+    let memory = &with_cap["restored_state"]["memory"];
+    assert_eq!(memory["preview_len"], 64);
+    let preview = memory["preview_base64"]
+        .as_str()
+        .expect("restored memory preview should be present");
+    let preview = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, preview)
+        .expect("memory preview should be valid base64");
+    assert_eq!(&preview[..4], b"base");
 }
 
 #[tokio::test]
@@ -1025,8 +1104,7 @@ async fn issue_token_rejects_capability_without_operator_allowlist() {
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("requires operator allowlist")
-            && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        error.contains("capability not permitted by active profile"),
         "expected non-allowlisted token issuance rejection, got: {parsed}"
     );
 }
@@ -1131,7 +1209,7 @@ async fn profile_enforcement_blocks_disallowed_capability() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("capability not permitted by active profile: write:"),
+        error.contains("capability not permitted by active profile"),
         "expected active profile rejection, got: {parsed}"
     );
 }
@@ -1217,7 +1295,7 @@ async fn mcp_tool_allowlist_blocks_disallowed_tool() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("tool nexus_snapshot_create is not in the MCP tool allowlist"),
+        error.contains("capability not permitted by active profile"),
         "expected tool-allowlist rejection, got: {parsed}"
     );
 }
@@ -1280,7 +1358,7 @@ async fn mcp_snapshot_disabled_blocks_snapshot_create() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("snapshot tools are disabled by the active profile"),
+        error.contains("capability not permitted by active profile"),
         "expected snapshot-disabled rejection, got: {parsed}"
     );
 }
@@ -1316,7 +1394,7 @@ async fn mcp_fork_disabled_blocks_fork_and_race() {
     );
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("fork_and_race is disabled by the active profile"),
+        error.contains("capability not permitted by active profile"),
         "expected fork-disabled rejection, got: {parsed}"
     );
 }
@@ -1408,8 +1486,7 @@ async fn execute_wasi_rejects_caller_chosen_capability_without_parent_token_or_a
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("parent_token_id")
-            && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        error.contains("capability not permitted by active profile"),
         "execute_wasi must reject self-granted caller-chosen capabilities without a parent token or allowlist; got: {parsed}"
     );
 }
@@ -1475,7 +1552,7 @@ async fn execute_wasi_rejects_capability_not_in_operator_allowlist() {
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("not allowed") && error.contains(NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV),
+        error.contains("capability not permitted by active profile"),
         "expected non-allowlisted capability rejection, got: {parsed}"
     );
 }
@@ -1635,7 +1712,7 @@ async fn execute_wasi_rejects_capability_outside_parent_token_scope() {
     let parsed = tool_json(&resp);
     let error = parsed["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("parent_token_id") && error.contains("not a subset"),
+        error.contains("capability not permitted by active profile"),
         "expected parent token scope rejection, got: {parsed}"
     );
 }

@@ -92,10 +92,20 @@ runtime snapshot captured from sandbox memory/state.
 `include_restored_state`. When requested, the response includes restored memory
 length, SHA-256, base64 preview, and execution-state counts.
 
-`nexus_issue_token`
+: `nexus_issue_token`
 : Issue an operator-allowlisted capability token for `nexus_execute_wasi`.
 Parameters: `capability`, optional `path`, optional `validity_secs`. The server
 rejects `all` and clamps validity to one hour.
+
+`read_memory` and `write_memory` are capability types with the same `path` field used
+as a scope selector:
+
+- `agent:<agent_id>` grants memory access for one AEON agent.
+- `session:<agent_id>:<session_id>` grants scoped memory access for that exact session.
+- `namespace:<namespace>` grants memory access for a namespace selector.
+
+For `read_memory`, scope is required for recall and read-path memory evidence retrieval.
+For `write_memory`, scope is required for AEON memory capture writes.
 
 `nexus_fork_and_race`
 : Race multiple WASM branches. Parameters: `wasm_path`, optional
@@ -136,7 +146,7 @@ Minimal MCP config with both module-directory and read-file allowlists:
 ```
 
 Supported capability types are `read_file`, `write_file`, `list_dir`,
-`http_get`, `http_post`, `execute`, and `mount_tmpfs`.
+`http_get`, `http_post`, `execute`, `mount_tmpfs`, `read_memory`, and `write_memory`.
 
 ## Smoke Demo
 
