@@ -160,6 +160,12 @@ fn capability_aliases(capability: &Capability) -> Vec<String> {
         ],
         Capability::MemoryPreview => vec!["nexus:memory_preview".to_string()],
         Capability::MemoryRecall => vec!["memoryrecall".to_string(), "memory_recall".to_string()],
+        Capability::ReadMemory(scope) => {
+            vec![format!("read_memory:{}", scope), "readmemory".to_string()]
+        }
+        Capability::WriteMemory(scope) => {
+            vec![format!("write_memory:{}", scope), "writememory".to_string()]
+        }
         Capability::All => vec!["all".to_string()],
         Capability::None => vec!["none".to_string()],
     }

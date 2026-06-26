@@ -517,7 +517,11 @@ impl SnapshotManager {
 
     /// Return the stored memory checksum for a snapshot, or `None` if not found.
     pub fn snapshot_content_digest(&self, id: &Uuid) -> Option<String> {
-        self.buffer.read().unwrap().get(id).map(|s| s.memory_checksum.clone())
+        self.buffer
+            .read()
+            .unwrap()
+            .get(id)
+            .map(|s| s.memory_checksum.clone())
     }
 
     /// Create a differential snapshot against a base full snapshot.

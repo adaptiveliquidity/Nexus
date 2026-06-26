@@ -53,7 +53,10 @@ async fn main() -> Result<()> {
 
     assert!(output.success);
     assert_eq!(capsule.capabilities.negotiation_rounds, Some(1));
-    assert_eq!(capsule.memory_mode, Some(MemoryAttestationMode::AttestedWithRecall));
+    assert_eq!(
+        capsule.memory_mode,
+        Some(MemoryAttestationMode::AttestedWithRecall)
+    );
     assert!(capsule.memory_evidence.is_some());
 
     let events = timeline_events(

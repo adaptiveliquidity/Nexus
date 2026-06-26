@@ -323,9 +323,7 @@ fn run_aeon(cmd: AeonCmd) -> anyhow::Result<()> {
                 Err(error) => println!("INVALID: {error}"),
             }
         }
-        AeonCmd::VerifyProofCapsule { capsule } => {
-            run_iq_verify(&capsule)?
-        }
+        AeonCmd::VerifyProofCapsule { capsule } => run_iq_verify(&capsule)?,
         AeonCmd::VerifyCapsule {
             capsule_id,
             evidence_file,
@@ -338,10 +336,13 @@ fn run_aeon(cmd: AeonCmd) -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "aeon-memory")]
-fn run_aeon_verify_capsule(capsule_id: &str, evidence_file: Option<&std::path::Path>) -> anyhow::Result<()> {
-    use std::io::Read as _;
+fn run_aeon_verify_capsule(
+    capsule_id: &str,
+    evidence_file: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     use nexus::aeon::MemoryEvidenceV1;
     use nexus::proof::schema::MemoryAttestationMode;
+    use std::io::Read as _;
 
     let json = match evidence_file {
         Some(path) => std::fs::read_to_string(path)?,

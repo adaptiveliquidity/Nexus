@@ -34,10 +34,126 @@ pub enum Capability {
     MemoryPreview,
     /// Access AEON memory recall
     MemoryRecall,
+    /// Read AEON memory by scope
+    ReadMemory(MemoryScope),
+    /// Write AEON memory by scope
+    WriteMemory(MemoryScope),
     /// All capabilities (admin)
     All,
     /// No capability (deny all)
     None,
+}
+
+/// Agent-scoped AEON memory selector.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryScope {
+    /// Match all AEON operations for the given agent id.
+    Agent(String),
+    /// Match AEON operations for a specific agent/session pair.
+    Session {
+        agent_id: String,
+        session_id: String,
+    },
+    /// Match operations under a broad namespace selector.
+    Namespace(String),
+}
+
+impl std::fmt::Display for MemoryScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryScope::Agent(agent_id) => write!(f, "agent:{agent_id}"),
+            MemoryScope::Session {
+                agent_id,
+                session_id,
+            } => write!(f, "session:{agent_id}:{session_id}"),
+            MemoryScope::Namespace(namespace) => write!(f, "namespace:{namespace}"),
+        }
+    }
+}
+
+impl MemoryScope {
+    pub fn parse(input: &str) -> Option<Self> {
+        let mut parts = input.split(':');
+        let kind = parts.next()?.trim();
+
+        match kind {
+            "agent" => parts
+                .next()
+                .map(|agent_id| Self::Agent(agent_id.to_string())),
+            "session" => {
+                let agent_id = parts.next()?.trim();
+                let session_id = parts.next()?.trim();
+                if parts.next().is_some() || agent_id.is_empty() || session_id.is_empty() {
+                    return None;
+                }
+
+                Some(Self::Session {
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                })
+            }
+            "namespace" => parts
+                .next()
+                .filter(|namespace| !namespace.trim().is_empty())
+                .map(|namespace| Self::Namespace(namespace.trim().to_string())),
+            _ => None,
+        }
+    }
+
+    pub fn is_subset_of(&self, parent: &Self) -> bool {
+        match (self, parent) {
+            (Self::Agent(agent_id), Self::Agent(parent_agent_id)) => agent_id == parent_agent_id,
+            (Self::Agent(agent_id), Self::Namespace(parent_namespace)) => {
+                agent_id == parent_namespace
+            }
+            (
+                Self::Session {
+                    agent_id,
+                    session_id,
+                },
+                Self::Session {
+                    agent_id: parent_agent_id,
+                    session_id: parent_session_id,
+                },
+            ) => agent_id == parent_agent_id && session_id == parent_session_id,
+            (Self::Session { agent_id, .. }, Self::Agent(parent_agent_id)) => {
+                agent_id == parent_agent_id
+            }
+            (Self::Session { agent_id, .. }, Self::Namespace(parent_namespace)) => {
+                agent_id == parent_namespace
+            }
+            (Self::Namespace(namespace), Self::Namespace(parent_namespace)) => {
+                namespace == parent_namespace
+            }
+            (Self::Namespace(namespace), Self::Agent(parent_agent_id)) => {
+                namespace == parent_agent_id
+            }
+            (
+                Self::Namespace(namespace),
+                Self::Session {
+                    agent_id: parent_agent_id,
+                    ..
+                },
+            ) => namespace == parent_agent_id,
+            _ => false,
+        }
+    }
+
+    pub fn matches(&self, agent_id: &str, session_id: Option<&str>) -> bool {
+        match self {
+            Self::Agent(scope_agent_id) => scope_agent_id == agent_id,
+            Self::Session {
+                agent_id: scope_agent_id,
+                session_id: scope_session_id,
+            } => {
+                scope_agent_id == agent_id
+                    && session_id
+                        .map(|session_id| session_id == scope_session_id)
+                        .unwrap_or(false)
+            }
+            Self::Namespace(namespace) => namespace == agent_id,
+        }
+    }
 }
 
 impl Capability {
@@ -66,8 +182,20 @@ impl Capability {
             // Write implies read
             (Capability::WriteFile(p1), Capability::ReadFile(p2)) => Self::path_contains(p1, p2),
 
+            (Capability::WriteMemory(scope), Capability::ReadMemory(requested)) => {
+                requested.is_subset_of(scope)
+            }
+
             // Exact match for WriteFile
             (Capability::WriteFile(p1), Capability::WriteFile(p2)) => Self::path_eq(p1, p2),
+
+            (Capability::ReadMemory(scope), Capability::ReadMemory(requested)) => {
+                requested.is_subset_of(scope)
+            }
+
+            (Capability::WriteMemory(scope), Capability::WriteMemory(requested)) => {
+                requested.is_subset_of(scope)
+            }
 
             // Exact match for ListDirectory with subdir support
             (Capability::ListDirectory(p1), Capability::ListDirectory(p2)) => {
@@ -114,6 +242,8 @@ impl Capability {
             Capability::MountTmpfs(p) => format!("tmpfs:{}", p.display()),
             Capability::MemoryPreview => "nexus:memory_preview".to_string(),
             Capability::MemoryRecall => "nexus:memory_recall".to_string(),
+            Capability::ReadMemory(scope) => format!("nexus:read_memory:{scope}"),
+            Capability::WriteMemory(scope) => format!("nexus:write_memory:{scope}"),
             Capability::All => "all".to_string(),
             Capability::None => "none".to_string(),
         }
@@ -427,7 +557,9 @@ impl CapabilityManager {
         if !token.verify_signature(&self.verifying_key) {
             tracing::warn!(token_id = %token.id, "token has invalid signature");
             return Err(NexusError::InvalidCapability(
-                DenialReason::CapabilityNotPermitted.safe_message().to_string(),
+                DenialReason::CapabilityNotPermitted
+                    .safe_message()
+                    .to_string(),
             ));
         }
 
@@ -440,7 +572,9 @@ impl CapabilityManager {
         if !token.allows(requested) {
             tracing::warn!(token_id = %token.id, requested = ?requested, "token does not grant capability");
             return Err(NexusError::InvalidCapability(
-                DenialReason::CapabilityNotPermitted.safe_message().to_string(),
+                DenialReason::CapabilityNotPermitted
+                    .safe_message()
+                    .to_string(),
             ));
         }
 
@@ -594,6 +728,72 @@ mod tests {
         let child = Capability::ReadFile(PathBuf::from("/safe/../outside"));
         assert!(!child.is_subset_of(&parent));
         assert!(!parent.allows(&child));
+    }
+
+    #[test]
+    fn memory_read_denied_for_wrong_agent() {
+        let mut manager = CapabilityManager::new();
+        let token = manager
+            .issue(
+                Capability::ReadMemory(MemoryScope::Agent("agent-a".to_string())),
+                "root",
+                hour(),
+            )
+            .unwrap();
+        assert!(manager
+            .validate(
+                &token,
+                &Capability::ReadMemory(MemoryScope::Agent("agent-b".to_string()))
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn memory_write_denied_for_wrong_session() {
+        let mut manager = CapabilityManager::new();
+        let token = manager
+            .issue(
+                Capability::WriteMemory(MemoryScope::Session {
+                    agent_id: "agent-a".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "root",
+                hour(),
+            )
+            .unwrap();
+        assert!(manager
+            .validate(
+                &token,
+                &Capability::WriteMemory(MemoryScope::Session {
+                    agent_id: "agent-a".to_string(),
+                    session_id: "session-2".to_string(),
+                }),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn memory_access_is_agent_isolated() {
+        let mut manager = CapabilityManager::new();
+        let token = manager
+            .issue(
+                Capability::WriteMemory(MemoryScope::Session {
+                    agent_id: "agent-a".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "root",
+                hour(),
+            )
+            .unwrap();
+        assert!(manager
+            .validate(
+                &token,
+                &Capability::ReadMemory(MemoryScope::Session {
+                    agent_id: "agent-b".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+            )
+            .is_err());
     }
 
     #[test]
