@@ -29,9 +29,9 @@ use crate::hypervisor::validator::health::{HealthConfig, HealthValidator};
 use crate::proof::receipt::{ExecutionReceipt, FailureModeLite, ProofHmacKey};
 use crate::proof::redaction::{RedactionField, RedactionPolicy};
 use crate::proof::schema::{
-    default_proof_capsule_limitations, CapabilityEvidence, DigestMode, FailureEvidence,
-    InputIdentity, PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofSubject,
-    RollbackEvidence, SnapshotEvidence, SnapshotKind, ToolIdentity, TypedDigest,
+    default_proof_capsule_limitations, CapabilityEvidence, FailureEvidence, InputIdentity,
+    PolicyEnforcementMode, PolicyProfileRef, ProofCapsule, ProofSubject, RollbackEvidence,
+    SnapshotEvidence, SnapshotKind, ToolIdentity, TypedDigest,
 };
 use crate::proof::signing::verifying_key_id;
 use crate::proof::ProofSigningConfig;
@@ -46,6 +46,9 @@ use crate::snapshot::{
     SnapshotMetadata,
 };
 use crate::telemetry::{ExecutionRecord, TelemetrySink};
+
+const PROOF_INPUT_HMAC_KEY_ENV: &str = "NEXUS_AEON_HMAC_KEY";
+const PROOF_INPUT_HMAC_SHORT_BYTES: usize = 1024;
 // Re-exports at the top of this module bring `FailureMode`, `RecoveryAction`,
 // `RecoveryPolicy`, and `StaticPolicy` into scope; no `use crate::...` here
 // to avoid duplicate-import errors with the `pub use` declarations.
@@ -644,7 +647,7 @@ impl NexusHypervisor {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
         })?;
         let module_digest = TypedDigest::sha256_public(&tool.wasm_bytes);
-        let input_sha256 = TypedDigest::sha256_public(&input_bytes);
+        let input_digest = self.input_identity_digest(&input_bytes);
         let required_caps: Vec<String> = tool
             .required_capabilities
             .iter()
@@ -674,7 +677,7 @@ impl NexusHypervisor {
             tool_name: tool.name.clone(),
             entrypoint: tool.entry_point.clone(),
             module_sha256: module_digest.value.clone(),
-            input_sha256: input_sha256.value.clone(),
+            input_sha256: input_digest.clone(),
             input_bytes_len: input_bytes.len(),
             required_caps,
             granted_caps: Vec::new(),
@@ -713,7 +716,7 @@ impl NexusHypervisor {
             NexusError::SerializationError(format!("failed to serialize tool input: {e}"))
         })?;
         let module_digest = TypedDigest::sha256_public(&tool.wasm_bytes);
-        let input_sha256 = TypedDigest::sha256_public(&input_bytes);
+        let input_digest = self.input_identity_digest(&input_bytes);
         let mut effective_capabilities = tool.required_capabilities.clone();
         let mut negotiation_rounds = None;
         let mut negotiation_evidence_hits = Vec::new();
@@ -798,7 +801,7 @@ impl NexusHypervisor {
             tool_name: tool.name.clone(),
             entrypoint: tool.entry_point.clone(),
             module_sha256: module_digest.value.clone(),
-            input_sha256: input_sha256.value.clone(),
+            input_sha256: input_digest.clone(),
             input_bytes_len: input_bytes.len(),
             required_caps: required_caps.clone(),
             granted_caps: required_caps,
@@ -875,6 +878,52 @@ impl NexusHypervisor {
         }
     }
 
+    fn input_identity_digest(&self, input_bytes: &[u8]) -> TypedDigest {
+        if self.config.proof_hmac_key != ProofHmacKey::Disabled {
+            digest_with_key(&self.config.proof_hmac_key, input_bytes)
+        } else if self.input_should_use_private_digest(input_bytes) {
+            digest_with_key(
+                &ProofHmacKey::FromEnv(PROOF_INPUT_HMAC_KEY_ENV.to_owned()),
+                input_bytes,
+            )
+        } else {
+            TypedDigest::sha256_public(input_bytes)
+        }
+    }
+
+    fn input_should_use_private_digest(&self, input_bytes: &[u8]) -> bool {
+        if input_bytes.len() <= PROOF_INPUT_HMAC_SHORT_BYTES {
+            return true;
+        }
+
+        let lowered = String::from_utf8_lossy(input_bytes).to_lowercase();
+        self.input_contains_sensitive_value(&lowered)
+            || self.input_contains_path_like_value(&lowered)
+    }
+
+    fn input_contains_sensitive_value(&self, lowered: &str) -> bool {
+        const SENSITIVE_PATTERNS: &[&str] = &[
+            "api_key",
+            "apikey",
+            "authorization",
+            "bearer ",
+            "password",
+            "secret",
+            "token",
+            "raw_memory",
+        ];
+
+        SENSITIVE_PATTERNS
+            .iter()
+            .any(|pattern| lowered.contains(pattern))
+    }
+
+    fn input_contains_path_like_value(&self, lowered: &str) -> bool {
+        const PATH_MARKERS: &[&str] = &["/home/", "/users/", "c:/", "c:\\", "\\\\", "/tmp/"];
+
+        PATH_MARKERS.iter().any(|marker| lowered.contains(marker))
+    }
+
     fn failure_lite(output: &ToolOutput) -> Option<FailureModeLite> {
         output
             .error_log
@@ -895,6 +944,15 @@ impl NexusHypervisor {
                     })
                 }
             })
+    }
+
+    fn build_limitations(_receipt: &ExecutionReceipt) -> Vec<String> {
+        let limitations = default_proof_capsule_limitations();
+        assert!(
+            !limitations.is_empty(),
+            "proof capsule cannot be emitted with empty limitations"
+        );
+        limitations
     }
 
     fn capsule_from_receipt(
@@ -1002,7 +1060,7 @@ impl NexusHypervisor {
     fn unsigned_capsule_from_receipt(
         receipt: &ExecutionReceipt,
         output: &ToolOutput,
-        input_bytes: &[u8],
+        _input_bytes: &[u8],
         hmac_key: &ProofHmacKey,
     ) -> ProofCapsule {
         let required = receipt.required_caps.clone();
@@ -1013,16 +1071,15 @@ impl NexusHypervisor {
             Some(required.clone())
         };
         let redaction_policy = RedactionPolicy::new(hmac_key.clone());
-        let (input_digest, input_digest_mode) = Self::sensitive_input_digest(input_bytes, hmac_key);
         let mut redactions = Vec::new();
-        match input_digest_mode {
-            DigestMode::Sha256Public => {
+        match receipt.input_sha256.algorithm.as_str() {
+            "sha256" => {
                 redactions.push(("input.digest".to_owned(), RedactionField::Removed));
             }
-            DigestMode::HmacSha256Private => {
+            "hmac-sha256" => {
                 redactions.push(("input.digest".to_owned(), RedactionField::HmacOrPlaceholder));
             }
-            DigestMode::RedactedNoDigest => {
+            _ => {
                 redactions.push(("input.digest".to_owned(), RedactionField::Removed));
             }
         }
@@ -1061,12 +1118,19 @@ impl NexusHypervisor {
                 entrypoint: receipt.entrypoint.clone(),
             },
             input: InputIdentity {
-                digest: input_digest,
+                digest: receipt.input_sha256.clone(),
                 media_type: "application/json".to_string(),
                 raw_included: false,
             },
             policy: PolicyProfileRef {
-                profile_digest: None,
+                profile_digest: receipt
+                    .profile
+                    .as_ref()
+                    .map(|(_, toml_sha256)| TypedDigest {
+                        algorithm: "sha256".to_string(),
+                        value: toml_sha256.clone(),
+                        public_recomputable: true,
+                    }),
                 profile_name: receipt.profile.as_ref().map(|(name, _)| name.clone()),
                 mode: receipt.policy_mode.clone(),
             },
@@ -1089,7 +1153,7 @@ impl NexusHypervisor {
                 }),
             branches: receipt.branches.clone(),
             redaction: redaction_policy.build_report(redactions),
-            limitations: default_proof_capsule_limitations(),
+            limitations: Self::build_limitations(receipt),
             #[cfg(feature = "aeon-memory")]
             memory_evidence: None,
             #[cfg(feature = "aeon-memory")]
@@ -1099,20 +1163,6 @@ impl NexusHypervisor {
             },
             signature: None,
         }
-    }
-
-    fn sensitive_input_digest(
-        input_bytes: &[u8],
-        hmac_key: &ProofHmacKey,
-    ) -> (TypedDigest, DigestMode) {
-        let digest = digest_with_key(hmac_key, input_bytes);
-        let mode = match digest.algorithm.as_str() {
-            "hmac-sha256" => DigestMode::HmacSha256Private,
-            _ => DigestMode::RedactedNoDigest,
-        };
-
-        debug_assert!(!digest.public_recomputable);
-        (digest, mode)
     }
 
     /// Execute a tool, validating that `caller_tokens` satisfy the tool's
@@ -2096,6 +2146,64 @@ mod tests {
     }
 
     #[test]
+    fn capsule_from_receipt_populates_profile_digest() {
+        let now = Utc::now();
+        let profile_name = "strict-readonly";
+        let profile_sha = "e3b0c44298fc1c149afbf4c8996fb924".to_string();
+        let hypervisor = NexusHypervisor::new(HypervisorConfig::default()).unwrap();
+        let input_bytes = b"input";
+
+        let receipt = ExecutionReceipt {
+            run_id: uuid::Uuid::new_v4(),
+            started_at: now,
+            finished_at: now,
+            tool_name: "test_tool".to_string(),
+            entrypoint: "_start".to_string(),
+            module_sha256: "deadbeef".to_string(),
+            input_sha256: TypedDigest::sha256_public(b"input"),
+            input_bytes_len: 5,
+            required_caps: vec!["read".to_string()],
+            granted_caps: vec!["read".to_string()],
+            policy_mode: PolicyEnforcementMode::UnprofiledDev,
+            profile: Some((profile_name.to_string(), profile_sha.clone())),
+            snapshot: None,
+            failure: None,
+            rollback: None,
+            branches: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_agent_id: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_session_id: None,
+            #[cfg(feature = "aeon-memory")]
+            negotiation_rounds: None,
+            #[cfg(feature = "aeon-memory")]
+            aeon_memory_evidence_digest: None,
+        };
+
+        let output = ToolOutput {
+            success: true,
+            result: None,
+            error: None,
+            rollback_performed: false,
+            execution_time_ms: 0,
+            fuel_consumed: 0,
+            error_log: None,
+            snapshot_id: None,
+        };
+
+        let capsule = hypervisor.capsule_from_receipt(&receipt, &output, input_bytes);
+        assert_eq!(
+            capsule.policy.profile_digest,
+            Some(TypedDigest {
+                algorithm: "sha256".to_string(),
+                value: profile_sha,
+                public_recomputable: true,
+            })
+        );
+        assert_eq!(capsule.policy.profile_name, Some(profile_name.to_string()));
+    }
+
+    #[test]
     fn test_recovery_suggestions() {
         // Test suggestion generation
         let suggestions = [
@@ -2115,7 +2223,7 @@ mod tests {
             tool_name: "proof_redaction_test".to_string(),
             entrypoint: "_start".to_string(),
             module_sha256: "module-sha256".to_string(),
-            input_sha256: "legacy-input-sha256".to_string(),
+            input_sha256: TypedDigest::redacted(),
             input_bytes_len: 128,
             required_caps: Vec::new(),
             granted_caps: Vec::new(),

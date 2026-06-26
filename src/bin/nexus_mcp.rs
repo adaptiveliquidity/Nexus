@@ -415,7 +415,9 @@ impl NexusMcpServer {
         }
     }
 
-    #[tool(description = "Execute a WASM module and return a proof capsule alongside the output")]
+    #[tool(
+        description = "Execute a WASM module and return a proof reference (digest + scorecard) alongside output. Full proof capsules are included by default in debug/dev builds, and can be enabled in release with NEXUS_MCP_RETURN_FULL_PROOF=1."
+    )]
     async fn nexus_execute_proof(
         &self,
         Parameters(params): Parameters<ExecuteProofParams>,
@@ -656,7 +658,9 @@ struct ToolOutputResponse {
 #[derive(Serialize)]
 struct ExecuteProofResponse {
     output: ToolOutputResponse,
-    proof_capsule: nexus::proof::ProofCapsule,
+    proof_reference: nexus::proof::McpProofReference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof_capsule: Option<nexus::proof::ProofCapsule>,
     #[cfg(feature = "aeon-memory")]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     events: Vec<nexus::daemon::NexusExecutionEvent>,
@@ -964,10 +968,16 @@ impl NexusMcpServer {
         let (output, proof_capsule) = self.hypervisor.execute_tool_proof(tool, input).await?;
         #[cfg(feature = "aeon-memory")]
         let events = proof_events(&output, proof_capsule.capsule_id, None);
+        let proof_reference = proof_reference(&proof_capsule)?;
 
         Ok(ExecuteProofResponse {
             output: ToolOutputResponse::from(output),
-            proof_capsule,
+            proof_reference,
+            proof_capsule: if should_include_full_proof_capsule() {
+                Some(proof_capsule)
+            } else {
+                None
+            },
             #[cfg(feature = "aeon-memory")]
             events,
         })
@@ -2027,6 +2037,7 @@ const NEXUS_MCP_MODULE_DIR_ENV: &str = "NEXUS_MCP_MODULE_DIR";
 const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST";
 const NEXUS_IQ_ALLOWLIST_ENV: &str = "NEXUS_IQ_ALLOWLIST";
 const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
+const NEXUS_MCP_RETURN_FULL_PROOF_ENV: &str = "NEXUS_MCP_RETURN_FULL_PROOF";
 pub const NEXUS_MEMORY_PREVIEW_CAPABILITY: &str = "nexus:memory_preview";
 const RESTORED_MEMORY_PREVIEW_BYTES: usize = 64;
 
@@ -2070,6 +2081,28 @@ fn memory_preview_capability() -> Capability {
 fn caller_has_memory_preview(tokens: &[CapabilityToken]) -> bool {
     let required = memory_preview_capability();
     tokens.iter().any(|token| token.allows(&required))
+}
+
+fn proof_reference(
+    capsule: &nexus::proof::ProofCapsule,
+) -> Result<nexus::proof::McpProofReference> {
+    Ok(nexus::proof::McpProofReference {
+        capsule_digest: nexus::proof::capsule_digest(capsule)
+            .map_err(|e| anyhow::anyhow!("unable to compute proof capsule digest: {e}"))?,
+        artifact_id: None,
+        inline_summary: nexus::proof::ProofScorecard::from_capsule(capsule),
+    })
+}
+
+fn should_include_full_proof_capsule() -> bool {
+    if let Ok(value) = std::env::var(NEXUS_MCP_RETURN_FULL_PROOF_ENV) {
+        return matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "debug" | "enabled"
+        );
+    }
+
+    !cfg!(test) && cfg!(debug_assertions)
 }
 
 #[cfg(feature = "aeon-memory")]

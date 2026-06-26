@@ -51,6 +51,18 @@ impl RedactionPolicy {
         let field = applied
             .iter()
             .find_map(|(_, field)| (*field == RedactionField::Truncated).then_some(*field))
+            .or_else(|| {
+                applied
+                    .iter()
+                    .find_map(|(_, field)| {
+                        (*field == RedactionField::HmacOrPlaceholder).then_some(*field)
+                    })
+                    .or_else(|| {
+                        applied.iter().find_map(|(_, field)| {
+                            (*field == RedactionField::Removed).then_some(*field)
+                        })
+                    })
+            })
             .unwrap_or(RedactionField::Truncated);
 
         (redacted, field)

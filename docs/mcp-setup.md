@@ -76,6 +76,12 @@ base64, execution time, fuel consumed, rollback flag, and a runtime
 and optional `parent_token_id`. Capabilities use objects like
 `{"type":"read_file","path":"/tmp/data"}`.
 
+`nexus_execute_proof`
+: Execute a WASM module through the proof path and return `proof_reference`
+  (digest + scorecard) with output by default. Set
+  `NEXUS_MCP_RETURN_FULL_PROOF=1` only for debug/development when the full
+  capsule body is required.
+
 `nexus_snapshot_create`
 : Create an MCP snapshot handle. Omit `source` for an empty/stateless baseline,
 or pass `{"source":"latest_runtime"}` after `nexus_execute` to return the real
@@ -111,6 +117,12 @@ For `write_memory`, scope is required for AEON memory capture writes.
 WASI capability requests need either a parent token or an operator allowlist.
 Configure `NEXUS_MCP_CAPABILITY_ALLOWLIST` as a JSON array using the same shape
 as `nexus_execute_wasi` capabilities:
+
+For local debugging, you can enable full proof capsule payloads:
+
+```bash
+export NEXUS_MCP_RETURN_FULL_PROOF=1
+```
 
 ```bash
 export NEXUS_MCP_CAPABILITY_ALLOWLIST='[{"type":"read_file","path":"/tmp/nexus-demo"}]'

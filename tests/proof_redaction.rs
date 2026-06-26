@@ -95,6 +95,19 @@ fn redact_error_truncates_to_at_most_256_chars() {
 }
 
 #[test]
+fn redact_error_sanitizes_secret_paths_and_provider_literals() {
+    let policy = RedactionPolicy::new(ProofHmacKey::Disabled);
+    let err =
+        "operation failed at /home/user/data/api_key=super_secret token=abc123 with OPENAI_API_KEY=abc";
+
+    let (redacted, _field) = policy.redact_error(err);
+
+    assert!(!redacted.contains("/home/user/data/api_key=super_secret"));
+    assert!(!redacted.contains("OPENAI_API_KEY"));
+    assert!(!redacted.contains("abc"));
+}
+
+#[test]
 fn redact_error_removes_paths_tokens_and_forbidden_markers() {
     let policy = RedactionPolicy::new(ProofHmacKey::Disabled);
     let err =

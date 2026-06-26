@@ -49,7 +49,7 @@ pub struct ExecutionReceipt {
     pub tool_name: String,
     pub entrypoint: String,
     pub module_sha256: String,
-    pub input_sha256: String,
+    pub input_sha256: TypedDigest,
     pub input_bytes_len: usize,
     pub required_caps: Vec<String>,
     pub granted_caps: Vec<String>,
