@@ -232,7 +232,6 @@ async fn revoked_token_denied() {
     assert!(result.is_err(), "revoked token should fail authorize");
 }
 
-
 // ── SSRF: hostile URL in HttpGet capability token (pending fix) ────────────
 
 /// Attempts to issue a capability token for the AWS IMDSv1 metadata endpoint.
@@ -272,11 +271,11 @@ fn invalid_uuid_in_snapshot_rollback_params() {
     let hostile_inputs: &[&str] = &[
         "",
         "not-a-uuid",
-        "00000000-0000-0000-0000-00000000000Z",   // invalid hex char
-        "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",   // all non-hex
-        &"a".repeat(512),                          // oversized
-        "\x00\x01\x02",                           // control bytes
-        "' OR 1=1 --",                             // SQL-injection-style
+        "00000000-0000-0000-0000-00000000000Z", // invalid hex char
+        "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", // all non-hex
+        &"a".repeat(512),                       // oversized
+        "\x00\x01\x02",                         // control bytes
+        "' OR 1=1 --",                          // SQL-injection-style
     ];
 
     for input in hostile_inputs {

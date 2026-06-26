@@ -40,7 +40,7 @@ use crate::sandbox::{
     FuelBudgetPolicy, FuelProfile, PoolConfig, RestoredExecutionState, SandboxConfig, SandboxPool,
     WasiToolConfig, WasmSandbox,
 };
-use crate::security::{Capability, CapabilityManager};
+use crate::security::{Capability, CapabilityManager, CapabilityToken};
 use crate::snapshot::{
     DiffSnapshotResult, ExecutionState, FilesystemDiff, RollbackResult, Snapshot, SnapshotManager,
     SnapshotMetadata,
@@ -1557,17 +1557,19 @@ impl NexusHypervisor {
             }
 
             #[cfg(feature = "aeon-memory")]
-            self.capture_aeon_memory(
-                Self::aeon_failure_memory_content(
-                    &error_log,
-                    rollback_performed,
-                    duration_ms,
-                    fuel_consumed,
-                    snapshot_id,
-                ),
-                Some(0.75),
-                "failure",
-            );
+            if self.can_capture_aeon_memory(&tool, caller_tokens) {
+                self.capture_aeon_memory(
+                    Self::aeon_failure_memory_content(
+                        &error_log,
+                        rollback_performed,
+                        duration_ms,
+                        fuel_consumed,
+                        snapshot_id,
+                    ),
+                    Some(0.75),
+                    "failure",
+                );
+            }
 
             let record = ExecutionRecord::failure(
                 tool.name.clone(),
@@ -1622,6 +1624,15 @@ impl NexusHypervisor {
         tool: ToolDefinition,
         input: serde_json::Value,
     ) -> Result<ToolOutput> {
+        self.execute_with_retry_with_tokens(tool, input, &[]).await
+    }
+
+    pub async fn execute_with_retry_with_tokens(
+        &self,
+        tool: ToolDefinition,
+        input: serde_json::Value,
+        caller_tokens: &[CapabilityToken],
+    ) -> Result<ToolOutput> {
         #[cfg(feature = "aeon-memory")]
         let mut pending_instincts: Vec<(uuid::Uuid, String)> = Vec::new();
         #[cfg(not(feature = "aeon-memory"))]
@@ -1632,7 +1643,12 @@ impl NexusHypervisor {
                 tokio::time::sleep(self.config.retry_delay).await;
             }
 
-            let result = self.execute_tool(tool.clone(), input.clone()).await;
+            let result = if caller_tokens.is_empty() {
+                self.execute_tool(tool.clone(), input.clone()).await
+            } else {
+                self.execute_tool_with_tokens(tool.clone(), input.clone(), caller_tokens)
+                    .await
+            };
 
             match result {
                 Ok(output) => {
@@ -1659,17 +1675,19 @@ impl NexusHypervisor {
                                     } else {
                                         store.record_failure(id)
                                     };
-                                    self.capture_aeon_memory(
-                                        Self::aeon_recovery_outcome_memory_content(
-                                            &tool.name,
-                                            attempt,
-                                            id,
-                                            description,
-                                            output.success,
-                                        ),
-                                        Some(if output.success { 0.7 } else { 0.55 }),
-                                        "recovery",
-                                    );
+                                    if self.can_capture_aeon_memory(&tool, caller_tokens) {
+                                        self.capture_aeon_memory(
+                                            Self::aeon_recovery_outcome_memory_content(
+                                                &tool.name,
+                                                attempt,
+                                                id,
+                                                description,
+                                                output.success,
+                                            ),
+                                            Some(if output.success { 0.7 } else { 0.55 }),
+                                            "recovery",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1920,6 +1938,39 @@ impl NexusHypervisor {
         tokio::spawn(async move {
             let _ = client.store(&content, importance, Some(memory_type)).await;
         });
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn required_aeon_memory_scope(
+        tool: &ToolDefinition,
+    ) -> Option<crate::security::capability::MemoryScope> {
+        match (&tool.aeon_agent_id, &tool.aeon_session_id) {
+            (Some(agent_id), Some(session_id)) => {
+                Some(crate::security::capability::MemoryScope::Session {
+                    agent_id: agent_id.clone(),
+                    session_id: session_id.clone(),
+                })
+            }
+            (Some(agent_id), None) => Some(crate::security::capability::MemoryScope::Agent(
+                agent_id.clone(),
+            )),
+            (None, _) => None,
+        }
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    fn can_capture_aeon_memory(
+        &self,
+        tool: &ToolDefinition,
+        caller_tokens: &[CapabilityToken],
+    ) -> bool {
+        let Some(scope) = Self::required_aeon_memory_scope(tool) else {
+            return false;
+        };
+        let manager = self.capability_manager.read().unwrap();
+        manager
+            .authorize(caller_tokens, &[Capability::WriteMemory(scope)])
+            .is_ok()
     }
 
     #[cfg(feature = "aeon-memory")]
@@ -2300,9 +2351,21 @@ mod tests {
         let hv = NexusHypervisor::new(HypervisorConfig::default())
             .unwrap()
             .with_aeon_memory_client_for_test(client);
+        let token = hv
+            .issue_token(
+                Capability::WriteMemory(crate::security::capability::MemoryScope::Session {
+                    agent_id: "agent-1".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "test",
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let tool = divzero_tool("aeon_capture_failure")
+            .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string()));
 
         let output = hv
-            .execute_tool(divzero_tool("aeon_capture_failure"), serde_json::json!({}))
+            .execute_tool_with_tokens(tool, serde_json::json!({}), &[token])
             .await
             .unwrap();
 
@@ -2357,9 +2420,24 @@ mod tests {
             .unwrap()
             .with_instinct_store(store)
             .with_aeon_memory_client_for_test(client);
+        let token = hv
+            .issue_token(
+                Capability::WriteMemory(crate::security::capability::MemoryScope::Session {
+                    agent_id: "agent-1".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "test",
+                Duration::from_secs(60),
+            )
+            .unwrap();
 
         let output = hv
-            .execute_with_retry(divzero_tool("aeon_retry_outcome"), serde_json::json!({}))
+            .execute_with_retry_with_tokens(
+                divzero_tool("aeon_retry_outcome")
+                    .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string())),
+                serde_json::json!({}),
+                &[token],
+            )
             .await
             .unwrap();
 
@@ -2393,9 +2471,21 @@ mod tests {
         let hv = NexusHypervisor::new(HypervisorConfig::default())
             .unwrap()
             .with_aeon_memory_client_for_test(client);
+        let token = hv
+            .issue_token(
+                Capability::WriteMemory(crate::security::capability::MemoryScope::Session {
+                    agent_id: "agent-1".to_string(),
+                    session_id: "session-1".to_string(),
+                }),
+                "test",
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let tool = divzero_tool("aeon_disabled_capture")
+            .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string()));
 
         let output = hv
-            .execute_tool(divzero_tool("aeon_disabled_capture"), serde_json::json!({}))
+            .execute_tool_with_tokens(tool, serde_json::json!({}), &[token])
             .await
             .unwrap();
 

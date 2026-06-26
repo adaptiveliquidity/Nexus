@@ -560,7 +560,6 @@ async fn timeline_events_have_correct_agent_id() {
     );
 }
 
-
 #[tokio::test]
 async fn timeline_503_is_non_fatal() {
     let Some(server) = MockAeonServer::try_new(

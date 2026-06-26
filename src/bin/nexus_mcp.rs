@@ -24,7 +24,7 @@ use nexus::hypervisor::{
     SelectionStrategy, SpeculativeBranch, SpeculativeConfig, ToolDefinition, ToolOutput,
 };
 use nexus::profile::{load_and_validate, CapabilityProfileManifest};
-use nexus::security::{Capability, CapabilityToken, DenialReason};
+use nexus::security::{capability::MemoryScope, Capability, CapabilityToken, DenialReason};
 use nexus::snapshot::{ExecutionState, FilesystemDiff, SnapshotMetadata};
 use nexus::telemetry::{ExecutionRecord, TelemetryStats};
 use nexus::NexusError;
@@ -79,7 +79,7 @@ pub struct ExecuteWasiParams {
     #[schemars(description = "JSON input to pass to the WASM module")]
     pub input: Option<serde_json::Value>,
     #[schemars(
-        description = "Capabilities to grant: array of {type, path?} objects. Types: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+        description = "Capabilities to grant: array of {type, path?} objects. Types: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, read_memory, write_memory, all"
     )]
     pub capabilities: Option<Vec<CapabilitySpec>>,
     #[schemars(
@@ -91,10 +91,12 @@ pub struct ExecuteWasiParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CapabilitySpec {
     #[schemars(
-        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, read_memory, write_memory, all"
     )]
     pub r#type: String,
-    #[schemars(description = "Path or URL pattern for the capability (not needed for 'all')")]
+    #[schemars(
+        description = "Path or URL pattern for file/http/capability. For memory capabilities, use 'agent:<agent-id>', 'session:<agent-id>:<session-id>', or 'namespace:<namespace>'."
+    )]
     pub path: Option<String>,
 }
 
@@ -133,10 +135,12 @@ pub struct SnapshotRollbackParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IssueTokenParams {
     #[schemars(
-        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, read_memory, write_memory, all"
     )]
     pub capability: String,
-    #[schemars(description = "Path or URL pattern for the capability")]
+    #[schemars(
+        description = "Path or URL pattern for file/http/capability. For memory capabilities, use 'agent:<agent-id>', 'session:<agent-id>:<session-id>', or 'namespace:<namespace>'."
+    )]
     pub path: Option<String>,
     #[schemars(description = "Token validity in seconds (default: 3600)")]
     pub validity_secs: Option<u64>,
@@ -147,10 +151,12 @@ pub struct AttenuateTokenParams {
     #[schemars(description = "UUID of the parent token")]
     pub parent_token_id: String,
     #[schemars(
-        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, all"
+        description = "Capability type: read_file, write_file, list_dir, http_get, http_post, execute, mount_tmpfs, read_memory, write_memory, all"
     )]
     pub capability: String,
-    #[schemars(description = "Path or URL pattern for the capability")]
+    #[schemars(
+        description = "Path or URL pattern for file/http/capability. For memory capabilities, use 'agent:<agent-id>', 'session:<agent-id>:<session-id>', or 'namespace:<namespace>'."
+    )]
     pub path: Option<String>,
     #[schemars(description = "Token validity in seconds (default: 3600)")]
     pub validity_secs: Option<u64>,
@@ -755,60 +761,62 @@ fn tool_error_response(error: impl std::fmt::Display) -> String {
 }
 
 fn tool_anyhow_error_response(error: anyhow::Error) -> String {
-    let (safe_msg, code): (std::borrow::Cow<str>, Option<i64>) =
-        if let Some(e) = error.downcast_ref::<NexusError>() {
-            match e {
-                NexusError::InvalidCapability(detail) => {
-                    // Decide between TokenExpired / TokenRevoked based on internal detail,
-                    // but never surface the raw detail (token ids, timestamps) to the client.
-                    let denial = if detail.contains("expired") {
-                        DenialReason::TokenExpired
-                    } else if detail.contains("revoked") {
-                        DenialReason::TokenRevoked
-                    } else {
-                        DenialReason::CapabilityNotPermitted
-                    };
-                    (denial.safe_message().into(), None)
-                }
-                NexusError::CapabilityDenied(detail) => {
-                    // Profile-level denials get -32602 (Invalid Params) for MCP callers.
-                    let safe = DenialReason::CapabilityNotPermitted.safe_message();
-                    let code = if detail.starts_with("capability not permitted by active profile:") {
-                        Some(-32602_i64)
-                    } else {
-                        None
-                    };
-                    (safe.into(), code)
-                }
-                NexusError::FilesystemError(_) => {
-                    (DenialReason::WasmPathInaccessible.safe_message().into(), None)
-                }
-                NexusError::ResourceExhausted(_)
-                | NexusError::MemoryLimitExceeded(_)
-                | NexusError::FuelExhausted(_)
-                | NexusError::Timeout(_) => {
-                    // Resource limits are safe to report generically.
-                    (e.to_string().into(), None)
-                }
-                _ => {
-                    let id = uuid::Uuid::new_v4();
-                    tracing::error!(
-                        correlation_id = %id,
-                        error = ?error,
-                        "internal nexus error"
-                    );
-                    (format!("internal error [{}]", id).into(), None)
-                }
+    let (safe_msg, code): (std::borrow::Cow<str>, Option<i64>) = if let Some(e) =
+        error.downcast_ref::<NexusError>()
+    {
+        match e {
+            NexusError::InvalidCapability(detail) => {
+                // Decide between TokenExpired / TokenRevoked based on internal detail,
+                // but never surface the raw detail (token ids, timestamps) to the client.
+                let denial = if detail.contains("expired") {
+                    DenialReason::TokenExpired
+                } else if detail.contains("revoked") {
+                    DenialReason::TokenRevoked
+                } else {
+                    DenialReason::CapabilityNotPermitted
+                };
+                (denial.safe_message().into(), None)
             }
-        } else {
-            let id = uuid::Uuid::new_v4();
-            tracing::error!(
-                correlation_id = %id,
-                error = ?error,
-                "unhandled internal error"
-            );
-            (format!("internal error [{}]", id).into(), None)
-        };
+            NexusError::CapabilityDenied(detail) => {
+                // Profile-level denials get -32602 (Invalid Params) for MCP callers.
+                let safe = DenialReason::CapabilityNotPermitted.safe_message();
+                let code = if detail.starts_with("capability not permitted by active profile:") {
+                    Some(-32602_i64)
+                } else {
+                    None
+                };
+                (safe.into(), code)
+            }
+            NexusError::FilesystemError(_) => (
+                DenialReason::WasmPathInaccessible.safe_message().into(),
+                None,
+            ),
+            NexusError::ResourceExhausted(_)
+            | NexusError::MemoryLimitExceeded(_)
+            | NexusError::FuelExhausted(_)
+            | NexusError::Timeout(_) => {
+                // Resource limits are safe to report generically.
+                (e.to_string().into(), None)
+            }
+            _ => {
+                let id = uuid::Uuid::new_v4();
+                tracing::error!(
+                    correlation_id = %id,
+                    error = ?error,
+                    "internal nexus error"
+                );
+                (format!("internal error [{}]", id).into(), None)
+            }
+        }
+    } else {
+        let id = uuid::Uuid::new_v4();
+        tracing::error!(
+            correlation_id = %id,
+            error = ?error,
+            "unhandled internal error"
+        );
+        (format!("internal error [{}]", id).into(), None)
+    };
 
     let json = match code {
         Some(c) => serde_json::json!({ "code": c, "error": safe_msg.as_ref() }),
@@ -1007,12 +1015,15 @@ impl NexusMcpServer {
             None
         };
 
-        // M1: gate memory recall behind Capability::MemoryRecall before issuing the call
+        // Gate memory recall against the requesting AEON context before issuing the call.
         if params.memory_query.is_some() {
-            let mem_cap = vec![Capability::MemoryRecall];
-            if let Err(e) = self.iq_caller_tokens_for_required(&mem_cap) {
+            let mem_cap = required_read_memory_scope(
+                &params.aeon_agent_id,
+                params.aeon_session_id.as_deref(),
+            );
+            if let Err(e) = self.iq_caller_tokens_for_required(std::slice::from_ref(&mem_cap)) {
                 return Err(anyhow::anyhow!(
-                    "memory recall requires nexus:memory_recall capability: {e}"
+                    "memory recall requires matching read_memory capability for scope: {e}"
                 ));
             }
         }
@@ -1112,7 +1123,9 @@ impl NexusMcpServer {
                             attestation_mode,
                             memory_evidence_ref: MemoryEvidenceForMcp::from(recall.evidence),
                             memory_hits_count,
-                            reason: DenialReason::CapabilityNotPermitted.safe_message().to_string(),
+                            reason: DenialReason::CapabilityNotPermitted
+                                .safe_message()
+                                .to_string(),
                         })
                         .await;
                 }
@@ -1167,7 +1180,9 @@ impl NexusMcpServer {
                     attestation_mode,
                     memory_evidence_ref: MemoryEvidenceForMcp::from(recall.evidence),
                     memory_hits_count,
-                    reason: DenialReason::CapabilityNotPermitted.safe_message().to_string(),
+                    reason: DenialReason::CapabilityNotPermitted
+                        .safe_message()
+                        .to_string(),
                 })
                 .await
             }
@@ -1797,7 +1812,8 @@ impl NexusMcpServer {
 
         let Some(allowlist) = self.capability_allowlist.as_ref() else {
             return Err(NexusError::CapabilityDenied(
-                "capability not permitted by active profile: no operator allowlist configured".to_string(),
+                "capability not permitted by active profile: no operator allowlist configured"
+                    .to_string(),
             )
             .into());
         };
@@ -1822,14 +1838,16 @@ impl NexusMcpServer {
     fn ensure_operator_allowlisted(&self, capability: &Capability) -> Result<()> {
         let Some(allowlist) = self.capability_allowlist.as_ref() else {
             return Err(NexusError::CapabilityDenied(
-                "capability not permitted by active profile: no operator allowlist configured".to_string(),
+                "capability not permitted by active profile: no operator allowlist configured"
+                    .to_string(),
             )
             .into());
         };
 
         if !capability_allowed_by(allowlist, capability) {
             return Err(NexusError::CapabilityDenied(
-                "capability not permitted by active profile: requested capability not in allowlist".to_string(),
+                "capability not permitted by active profile: requested capability not in allowlist"
+                    .to_string(),
             )
             .into());
         }
@@ -2180,10 +2198,18 @@ fn parse_iq_capability(spec: &str) -> Result<Capability> {
                 None
             }
         }
+        "read_memory" => parse_capability_from_str("read_memory", value),
+        "write_memory" => parse_capability_from_str("write_memory", value),
         "exec" | "execute" => parse_capability_from_str("execute", value),
         "tmpfs" | "mount_tmpfs" => parse_capability_from_str("mount_tmpfs", value),
         "nexus" => match value {
             Some("memory_recall") => Some(Capability::MemoryRecall),
+            Some(rest) if rest.starts_with("read_memory:") => {
+                parse_capability_from_str("read_memory", rest.strip_prefix("read_memory:"))
+            }
+            Some(rest) if rest.starts_with("write_memory:") => {
+                parse_capability_from_str("write_memory", rest.strip_prefix("write_memory:"))
+            }
             _ => None,
         },
         _ => None,
@@ -2545,7 +2571,13 @@ fn sanitize_token_request(
 fn parse_capability(spec: &CapabilitySpec) -> Result<Capability> {
     let path_required = matches!(
         spec.r#type.as_str(),
-        "read_file" | "write_file" | "list_dir" | "execute" | "mount_tmpfs"
+        "read_file"
+            | "write_file"
+            | "list_dir"
+            | "execute"
+            | "mount_tmpfs"
+            | "read_memory"
+            | "write_memory"
     );
     if path_required && spec.path.is_none() {
         anyhow::bail!("capability type '{}' requires a 'path' field", spec.r#type);
@@ -2570,9 +2602,22 @@ fn parse_capability_from_str(cap_type: &str, path: Option<&str>) -> Option<Capab
         "http_post" => Some(Capability::HttpPost(path?.to_string())),
         "execute" => Some(Capability::ExecuteBinary(PathBuf::from(path?))),
         "mount_tmpfs" => Some(Capability::MountTmpfs(PathBuf::from(path?))),
+        "read_memory" => Some(Capability::ReadMemory(MemoryScope::parse(path?)?)),
+        "write_memory" => Some(Capability::WriteMemory(MemoryScope::parse(path?)?)),
         "memory_preview" | NEXUS_MEMORY_PREVIEW_CAPABILITY => Some(Capability::MemoryPreview),
         "all" => Some(Capability::All),
         _ => None,
+    }
+}
+
+#[cfg(feature = "aeon-memory")]
+fn required_read_memory_scope(aeon_agent_id: &str, aeon_session_id: Option<&str>) -> Capability {
+    match aeon_session_id {
+        Some(session_id) => Capability::ReadMemory(MemoryScope::Session {
+            agent_id: aeon_agent_id.to_string(),
+            session_id: session_id.to_string(),
+        }),
+        None => Capability::ReadMemory(MemoryScope::Agent(aeon_agent_id.to_string())),
     }
 }
 

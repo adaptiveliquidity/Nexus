@@ -167,9 +167,9 @@ impl SandboxPool {
             .cache
             .get_or_compile(&self.engine, wasm_bytes)
             .map_err(|e| {
-            tracing::error!(error = %e, "module compile failed");
-            NexusError::WasmError("module load failed".to_string())
-        })?;
+                tracing::error!(error = %e, "module compile failed");
+                NexusError::WasmError("module load failed".to_string())
+            })?;
 
         Ok(PooledModulePermit {
             _permit: permit,
