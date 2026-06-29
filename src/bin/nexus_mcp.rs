@@ -1039,10 +1039,10 @@ impl NexusMcpServer {
 
         let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
         let memory_client = if params.memory_query.is_some() {
-            aeon_config
-                .as_ref()
-                .filter(|c| c.hmac_key.is_some())
-                .and_then(nexus::aeon::AeonMemoryClient::from_enabled_config)
+            match aeon_config.as_ref().filter(|c| c.hmac_key.is_some()) {
+                Some(config) => nexus::aeon::AeonMemoryClient::from_enabled_config(config)?,
+                None => None,
+            }
         } else {
             None
         };
@@ -1272,10 +1272,14 @@ impl NexusMcpServer {
             .as_ref()
             .map(|agent_id| format!("/agents/{agent_id}/timeline"));
         let timeline_delivery_status = if let Some(agent_id) = params.aeon_agent_id.clone() {
-            match nexus::aeon::AeonConfig::from_env()
-                .ok()
-                .and_then(|config| nexus::aeon::AeonTimelineSink::from_enabled_config(&config))
-            {
+            let sink = match nexus::aeon::AeonConfig::from_env() {
+                Ok(config) => match nexus::aeon::AeonTimelineSink::from_enabled_config(&config) {
+                    Ok(Some(sink)) => Some(sink),
+                    Ok(None) | Err(_) => None,
+                },
+                Err(_) => None,
+            };
+            match sink {
                 Some(sink) => {
                     let events = events.clone();
                     let session_id = params.aeon_session_id.clone();
@@ -2178,7 +2182,14 @@ fn parse_mcp_http_token() -> Result<Option<String>> {
 #[cfg(feature = "mcp-http")]
 fn parse_mcp_http_tenants_path() -> Result<Option<String>> {
     match std::env::var(NEXUS_MCP_HTTP_TENANTS_ENV) {
-        Ok(path) => Ok(Some(path)),
+        Ok(path) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("{NEXUS_MCP_HTTP_TENANTS_ENV} must be valid UTF-8 path")
@@ -2464,10 +2475,12 @@ async fn deliver_nexus_iq_timeline(
     mode: nexus::aeon::TimelineDeliveryMode,
     events: Vec<nexus::daemon::NexusExecutionEvent>,
 ) -> nexus::aeon::TimelineDeliveryStatus {
-    let Some(sink) = config
-        .and_then(nexus::aeon::AeonTimelineSink::from_enabled_config)
-        .map(|sink| sink.with_mode(mode))
-    else {
+    let Some(sink) = config.and_then(|config| {
+        match nexus::aeon::AeonTimelineSink::from_enabled_config(config) {
+            Ok(Some(sink)) => Some(sink.with_mode(mode)),
+            Ok(None) | Err(_) => None,
+        }
+    }) else {
         return match mode {
             nexus::aeon::TimelineDeliveryMode::Attested => {
                 nexus::aeon::TimelineDeliveryStatus::RequiredButFailed
@@ -3015,7 +3028,7 @@ async fn require_bearer_token(
             tenant_id = %tenant.tenant_id,
             method = %method,
             path = %path,
-            status_class = StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            status_class = format!("{}xx", StatusCode::TOO_MANY_REQUESTS.as_u16() / 100),
             "authenticated MCP HTTP request"
         );
         return StatusCode::TOO_MANY_REQUESTS.into_response();
@@ -3675,6 +3688,33 @@ mod tests {
         with_clean_mcp_http_env(|| {
             std::env::set_var(NEXUS_MCP_HTTP_TOKEN_ENV, "   ");
             assert!(parse_mcp_http_token().unwrap().is_none());
+        });
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn parse_mcp_http_tenants_path_empty_string_is_none() {
+        with_clean_mcp_http_env(|| {
+            std::env::set_var(NEXUS_MCP_HTTP_TENANTS_ENV, "   ");
+            assert!(parse_mcp_http_tenants_path().unwrap().is_none());
+        });
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn load_tenant_auth_state_falls_back_to_token_when_tenants_unset_or_empty() {
+        with_clean_mcp_http_env(|| {
+            std::env::set_var(NEXUS_MCP_HTTP_TENANTS_ENV, "   ");
+            std::env::set_var(NEXUS_MCP_HTTP_TOKEN_ENV, "shared-secret");
+            let state = load_tenant_auth_state()
+                .unwrap()
+                .expect("token auth should be configured");
+
+            assert_eq!(state.tenants.len(), 1);
+            assert_eq!(
+                state.tenants[0].tenant_id,
+                NEXUS_MCP_HTTP_TENANT_ID_FALLBACK
+            );
         });
     }
 

@@ -328,10 +328,10 @@ impl NexusHypervisor {
         let capability_manager = CapabilityManager::new();
         let proof_signing_key = config.proof_signing.signing_key()?;
         #[cfg(feature = "aeon-memory")]
-        let aeon_memory = config
-            .aeon_config
-            .as_ref()
-            .and_then(crate::aeon::AeonMemoryClient::from_enabled_config);
+        let aeon_memory = match config.aeon_config.as_ref() {
+            Some(aeon_config) => crate::aeon::AeonMemoryClient::from_enabled_config(aeon_config)?,
+            None => None,
+        };
 
         let fuel_policy = FuelBudgetPolicy::new(sandbox_config.max_fuel);
 

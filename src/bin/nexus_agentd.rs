@@ -736,7 +736,11 @@ fn queue_timeline_delivery(
             Err(_) => return Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen),
         }
     } else {
-        nexus::aeon::AeonTimelineSink::from_enabled_config(&config).map(|sink| sink.with_mode(mode))
+        match nexus::aeon::AeonTimelineSink::from_enabled_config(&config) {
+            Ok(Some(sink)) => Some(sink.with_mode(mode)),
+            Ok(None) => None,
+            Err(_) => return Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen),
+        }
     };
 
     let Some(sink) = sink else {

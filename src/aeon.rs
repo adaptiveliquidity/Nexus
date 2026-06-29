@@ -266,13 +266,6 @@ pub struct AeonMemoryClient {
 
 impl AeonMemoryClient {
     pub fn from_config(config: &AeonConfig) -> Result<Self> {
-        let mut policy = EgressPolicy::from_env()?;
-        if let Ok(base_url) = reqwest::Url::parse(&config.base_url) {
-            if let Some(host) = base_url.host_str() {
-                policy.allow_host(host);
-            }
-        }
-
         let http = reqwest::ClientBuilder::new()
             .timeout(Duration::from_millis(config.timeout_ms))
             .redirect(reqwest::redirect::Policy::none())
@@ -284,7 +277,7 @@ impl AeonMemoryClient {
         Ok(Self {
             http,
             base_url: config.base_url.trim_end_matches('/').to_string(),
-            policy,
+            policy: Self::egress_policy(config)?,
             agent_id: config.agent_id.clone(),
             management_key: config.management_key.clone(),
             #[cfg(test)]
@@ -292,7 +285,7 @@ impl AeonMemoryClient {
         })
     }
 
-    pub fn from_enabled_config(config: &AeonConfig) -> Option<Self> {
+    pub fn from_enabled_config(config: &AeonConfig) -> Result<Option<Self>> {
         let has_required_config = config.enabled
             && !config.base_url.trim().is_empty()
             && !config.agent_id.trim().is_empty()
@@ -301,9 +294,11 @@ impl AeonMemoryClient {
                 .as_deref()
                 .is_some_and(|key| !key.trim().is_empty());
 
-        has_required_config
-            .then(|| Self::from_config(config).ok())
-            .flatten()
+        if !has_required_config {
+            return Ok(None);
+        }
+
+        Ok(Some(Self::from_config(config)?))
     }
 
     #[cfg(test)]
@@ -315,6 +310,17 @@ impl AeonMemoryClient {
 
     pub fn timeline_sink(&self) -> Result<AeonTimelineSink> {
         Ok(AeonTimelineSink::from_memory_client(self))
+    }
+
+    fn egress_policy(config: &AeonConfig) -> Result<EgressPolicy> {
+        let mut policy = EgressPolicy::from_env()?;
+        if let Ok(base_url) = reqwest::Url::parse(&config.base_url) {
+            if let Some(host) = base_url.host_str() {
+                policy.allow_host(host);
+            }
+        }
+
+        Ok(policy)
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryHit> {
@@ -677,7 +683,7 @@ pub struct TimelineReplayReport {
 pub struct AeonTimelineSink {
     http: reqwest::Client,
     base_url: String,
-    policy: EgressPolicy,
+    policy: Result<EgressPolicy>,
     management_key: Option<String>,
     mode: TimelineDeliveryMode,
     spool_path: PathBuf,
@@ -688,19 +694,39 @@ pub struct AeonTimelineSink {
 
 impl AeonTimelineSink {
     pub fn from_config(config: &AeonConfig) -> Result<Self> {
-        let client = AeonMemoryClient::from_config(config)?;
-        client.timeline_sink()
+        let http = reqwest::ClientBuilder::new()
+            .timeout(Duration::from_millis(config.timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                NexusError::ConfigError(format!("failed to build AEON-IQ timeline client: {error}"))
+            })?;
+
+        Ok(Self {
+            http,
+            base_url: config.base_url.trim_end_matches('/').to_string(),
+            policy: AeonMemoryClient::egress_policy(config),
+            management_key: config.management_key.clone(),
+            mode: TimelineDeliveryMode::Advisory,
+            spool_path: default_timeline_spool_path(),
+            last_event_digest: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_responder: None,
+        })
     }
 
-    pub fn from_enabled_config(config: &AeonConfig) -> Option<Self> {
-        AeonMemoryClient::from_enabled_config(config).and_then(|client| client.timeline_sink().ok())
+    pub fn from_enabled_config(config: &AeonConfig) -> Result<Option<Self>> {
+        match AeonMemoryClient::from_enabled_config(config)? {
+            Some(client) => Ok(Some(client.timeline_sink()?)),
+            None => Ok(None),
+        }
     }
 
     pub fn from_memory_client(client: &AeonMemoryClient) -> Self {
         Self {
             http: client.http.clone(),
             base_url: client.base_url.clone(),
-            policy: client.policy.clone(),
+            policy: Ok(client.policy.clone()),
             management_key: client.management_key.clone(),
             mode: TimelineDeliveryMode::Advisory,
             spool_path: default_timeline_spool_path(),
@@ -901,6 +927,15 @@ impl AeonTimelineSink {
             }
         }
 
+        if let Err(error) = tokio::io::AsyncWriteExt::flush(&mut file).await {
+            debug!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON-IQ timeline spool flush failed; failing open"
+            );
+            return false;
+        }
+
         true
     }
 
@@ -1008,7 +1043,19 @@ impl AeonTimelineSink {
                 body: response.body,
             });
         }
-        if let Err(error) = self.policy.check_url(&url) {
+        let policy = match &self.policy {
+            Ok(policy) => policy,
+            Err(error) => {
+                warn!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    url = %url,
+                    "AEON-IQ timeline egress policy is misconfigured; failing open"
+                );
+                return None;
+            }
+        };
+        if let Err(error) = policy.check_url(&url) {
             warn!(
                 target: "nexus.aeon",
                 error = %error,
@@ -1777,10 +1824,16 @@ mod tests {
         };
         let configured = test_config("http://aeon.test", Some("mgmt-key"));
 
-        assert!(AeonMemoryClient::from_enabled_config(&disabled).is_none());
-        assert!(AeonMemoryClient::from_enabled_config(&missing_key).is_none());
+        assert!(AeonMemoryClient::from_enabled_config(&disabled)
+            .unwrap()
+            .is_none());
+        assert!(AeonMemoryClient::from_enabled_config(&missing_key)
+            .unwrap()
+            .is_none());
         with_clean_aeon_env(|| {
-            assert!(AeonMemoryClient::from_enabled_config(&configured).is_some());
+            assert!(AeonMemoryClient::from_enabled_config(&configured)
+                .unwrap()
+                .is_some());
         });
     }
 
@@ -1790,6 +1843,19 @@ mod tests {
             std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
 
             assert!(AeonMemoryClient::from_config(&test_config(
+                "http://127.0.0.1:1",
+                Some("mgmt-key")
+            ))
+            .is_err());
+        });
+    }
+
+    #[test]
+    fn aeon_memory_client_from_enabled_config_reports_invalid_egress() {
+        with_clean_egress_env(|| {
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            assert!(AeonMemoryClient::from_enabled_config(&test_config(
                 "http://127.0.0.1:1",
                 Some("mgmt-key")
             ))
@@ -2069,6 +2135,34 @@ mod tests {
             .await;
 
         assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_offline_mode_ignores_invalid_egress_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("timeline.jsonl");
+        let sink = with_clean_egress_env(|| {
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")))
+                .unwrap()
+                .with_mode(TimelineDeliveryMode::Offline)
+                .with_spool_path(&spool)
+        });
+        let event = [NexusExecutionEvent::ProofCapsuleEmitted {
+            capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+        }];
+
+        let status = sink.deliver("agent-1", Some("session-1"), &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::FireAndForget);
+        let contents = std::fs::read_to_string(&spool).unwrap();
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -136,11 +136,15 @@ impl LLMPolicy {
     }
 
     #[cfg(feature = "aeon-memory")]
-    pub fn new_with_aeon(provider: LlmProvider, budget: LlmBudget, aeon: AeonConfig) -> Self {
+    pub fn new_with_aeon(
+        provider: LlmProvider,
+        budget: LlmBudget,
+        aeon: AeonConfig,
+    ) -> std::result::Result<Self, crate::NexusError> {
         let mut policy = Self::new(provider, budget);
-        policy.aeon_memory = AeonMemoryClient::from_enabled_config(&aeon);
+        policy.aeon_memory = AeonMemoryClient::from_enabled_config(&aeon)?;
         policy.aeon = Some(aeon);
-        policy
+        Ok(policy)
     }
 
     #[cfg(all(test, feature = "aeon-memory"))]
@@ -572,7 +576,8 @@ mod tests {
                 management_key: None,
                 hmac_key: None,
             },
-        );
+        )
+        .unwrap();
         let payload = serde_json::json!({"model": "gpt-test"});
 
         let request = p
@@ -630,7 +635,8 @@ mod tests {
                 management_key: None,
                 hmac_key: None,
             },
-        );
+        )
+        .unwrap();
         let payload = serde_json::json!({"model": "gpt-test"});
 
         let request = p
@@ -707,7 +713,8 @@ mod tests {
             },
             LlmBudget::default(),
             aeon,
-        );
+        )
+        .unwrap();
         p.set_aeon_memory_client_for_test(client);
 
         let prompt = build_recovery_prompt(
@@ -773,7 +780,8 @@ mod tests {
             },
             LlmBudget::default(),
             aeon,
-        );
+        )
+        .unwrap();
         missing_key.set_aeon_memory_client_for_test(client);
 
         assert_eq!(
