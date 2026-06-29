@@ -33,10 +33,8 @@ done
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 mkdir -p "$ROOT/artifacts"
 
-if [ ! -x "$ROOT/target/debug/nexus-mcp" ] || [ "$ROOT/src/bin/nexus_mcp.rs" -nt "$ROOT/target/debug/nexus-mcp" ] || [ "$ROOT/Cargo.toml" -nt "$ROOT/target/debug/nexus-mcp" ]; then
-  echo "[proof-capsule-smoke] building nexus-mcp (features: aeon-memory)"
-  cargo build --locked --features aeon-memory --bin nexus-mcp
-fi
+echo "[proof-capsule-smoke] building nexus-mcp (features: aeon-memory)"
+cargo build --locked --features aeon-memory --bin nexus-mcp
 
 if [ ! -f "$WASM_PATH" ]; then
   echo "missing wasm module: $WASM_PATH" >&2
