@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "mcp-http")]
+use std::time::Instant;
 
 use anyhow::Result;
 #[cfg(feature = "mcp-http")]
@@ -1035,12 +1037,12 @@ impl NexusMcpServer {
             }
         }
 
-        let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+        let aeon_config = nexus::aeon::init_optional_aeon_config_from_env();
         let memory_client = if params.memory_query.is_some() {
             aeon_config
                 .as_ref()
                 .filter(|c| c.hmac_key.is_some())
-                .and_then(nexus::aeon::AeonMemoryClient::from_enabled_config)
+                .and_then(nexus::aeon::init_optional_aeon)
         } else {
             None
         };
@@ -1270,10 +1272,10 @@ impl NexusMcpServer {
             .as_ref()
             .map(|agent_id| format!("/agents/{agent_id}/timeline"));
         let timeline_delivery_status = if let Some(agent_id) = params.aeon_agent_id.clone() {
-            match nexus::aeon::AeonConfig::from_env()
-                .ok()
-                .and_then(|config| nexus::aeon::AeonTimelineSink::from_enabled_config(&config))
-            {
+            let sink = nexus::aeon::init_optional_aeon_config_from_env()
+                .as_ref()
+                .and_then(nexus::aeon::init_optional_aeon_timeline_from_config);
+            match sink {
                 Some(sink) => {
                     let events = events.clone();
                     let session_id = params.aeon_session_id.clone();
@@ -1931,7 +1933,7 @@ impl NexusMcpServer {
         &self,
         context: NexusIqDenialContext,
     ) -> Result<NexusIqExecuteResponse> {
-        let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+        let aeon_config = nexus::aeon::init_optional_aeon_config_from_env();
         let events = vec![nexus::daemon::NexusExecutionEvent::CapabilityDenied {
             denied_category: "capability_denied".to_string(),
         }];
@@ -2075,7 +2077,13 @@ const NEXUS_MCP_HTTP_ADDR_ENV: &str = "NEXUS_MCP_HTTP_ADDR";
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_TOKEN_ENV: &str = "NEXUS_MCP_HTTP_TOKEN";
 #[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_TENANTS_ENV: &str = "NEXUS_MCP_HTTP_TENANTS";
+#[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:8765";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM: u64 = 60;
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_TENANT_ID_FALLBACK: &str = "default";
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_READ_ONLY_TOOL_ALLOWLIST: [&str; 6] = [
     "nexus_get_history",
@@ -2097,6 +2105,53 @@ fn read_only_http_tool_allowlist() -> HashSet<String> {
 }
 
 #[cfg(feature = "mcp-http")]
+#[derive(Debug, Clone)]
+struct TenantContext {
+    #[allow(dead_code)]
+    tenant_id: String,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Debug, Clone)]
+struct TenantConfig {
+    tenant_id: String,
+    api_key_sha256: [u8; 32],
+    rate_limit_rpm: u64,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Deserialize, Debug)]
+struct TenantConfigFileEntry {
+    tenant_id: String,
+    api_key_sha256: String,
+    rate_limit_rpm: Option<u64>,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Debug)]
+struct TenantRateWindow {
+    window_start: Instant,
+    request_count: u64,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Clone)]
+struct TenantAuthState {
+    tenants: Vec<TenantConfig>,
+    rate_limits: std::sync::Arc<std::sync::Mutex<HashMap<String, TenantRateWindow>>>,
+}
+
+#[cfg(feature = "mcp-http")]
+impl TenantAuthState {
+    fn new(tenants: Vec<TenantConfig>) -> Self {
+        Self {
+            tenants,
+            rate_limits: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
 fn parse_nexus_mcp_transport() -> String {
     std::env::var(NEXUS_MCP_TRANSPORT_ENV).unwrap_or_else(|_| NEXUS_MCP_TRANSPORT_STDIO.to_string())
 }
@@ -2110,8 +2165,188 @@ fn parse_nexus_mcp_http_addr() -> Result<SocketAddr> {
 }
 
 #[cfg(feature = "mcp-http")]
-fn parse_mcp_http_token() -> Option<String> {
-    std::env::var_os(NEXUS_MCP_HTTP_TOKEN_ENV).and_then(|token| token.to_str().map(str::to_string))
+fn parse_mcp_http_token() -> Result<Option<String>> {
+    match std::env::var(NEXUS_MCP_HTTP_TOKEN_ENV) {
+        Ok(token) => Ok(normalize_http_token(&token)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{NEXUS_MCP_HTTP_TOKEN_ENV} must be valid UTF-8")
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_mcp_http_tenants_path() -> Result<Option<String>> {
+    match std::env::var(NEXUS_MCP_HTTP_TENANTS_ENV) {
+        Ok(path) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{NEXUS_MCP_HTTP_TENANTS_ENV} must be valid UTF-8 path")
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn normalize_http_token(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_bearer_token(raw: &str) -> Option<String> {
+    let (scheme, value) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    normalize_http_token(value)
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_hex_sha256(raw: &str) -> Result<[u8; 32]> {
+    if raw.len() != 64 {
+        anyhow::bail!("invalid SHA-256 hex length");
+    }
+    let mut bytes = [0u8; 32];
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
+            .map_err(|_| anyhow::anyhow!("tenant api key hash must be hex"))?;
+    }
+    Ok(bytes)
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!("failed to read tenants file '{}': {error}", path.display())
+    })?;
+    let tenants: Vec<TenantConfigFileEntry> = serde_json::from_str(&contents)
+        .map_err(|error| anyhow::anyhow!("invalid tenants JSON: {error}"))?;
+    let mut tenant_ids = HashSet::new();
+    let mut tenant_hashes = HashSet::new();
+    let mut tenant_configs = Vec::with_capacity(tenants.len());
+
+    if tenants.is_empty() {
+        anyhow::bail!("tenant configuration must contain at least one tenant");
+    }
+
+    for tenant in tenants {
+        let tenant_id = tenant.tenant_id.trim();
+        if tenant_id.is_empty() {
+            anyhow::bail!("tenant_id must not be empty");
+        }
+        if !tenant_ids.insert(tenant_id.to_string()) {
+            anyhow::bail!("duplicate tenant_id '{tenant_id}'");
+        }
+        let api_key_sha256_str = tenant.api_key_sha256.trim();
+        let api_key_sha256 = parse_hex_sha256(api_key_sha256_str)?;
+        if !tenant_hashes.insert(api_key_sha256) {
+            anyhow::bail!("duplicate tenant api_key_sha256 '{api_key_sha256_str}'");
+        }
+        let rate_limit_rpm = tenant
+            .rate_limit_rpm
+            .unwrap_or(NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM);
+        if rate_limit_rpm == 0 {
+            anyhow::bail!("rate_limit_rpm for tenant '{tenant_id}' must be greater than 0");
+        }
+        tenant_configs.push(TenantConfig {
+            tenant_id: tenant_id.to_string(),
+            api_key_sha256,
+            rate_limit_rpm,
+        });
+    }
+    Ok(tenant_configs)
+}
+
+#[cfg(feature = "mcp-http")]
+fn load_tenant_auth_state() -> Result<Option<Arc<TenantAuthState>>> {
+    if let Some(path) = parse_mcp_http_tenants_path()? {
+        let tenants = parse_tenant_config_file(Path::new(&path)).map_err(|error| {
+            anyhow::anyhow!("failed to load {NEXUS_MCP_HTTP_TENANTS_ENV}='{path}': {error}")
+        })?;
+        return Ok(Some(Arc::new(TenantAuthState::new(tenants))));
+    }
+
+    Ok(parse_mcp_http_token()?.map(|token| {
+        Arc::new(TenantAuthState::new(vec![TenantConfig {
+            tenant_id: NEXUS_MCP_HTTP_TENANT_ID_FALLBACK.to_string(),
+            api_key_sha256: sha256_bytes(&token),
+            rate_limit_rpm: NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+        }]))
+    }))
+}
+
+#[cfg(feature = "mcp-http")]
+fn sha256_bytes(key: &str) -> [u8; 32] {
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    bytes
+}
+
+#[cfg(feature = "mcp-http")]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let left = a.get(i).copied().unwrap_or(0);
+        let right = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
+#[cfg(feature = "mcp-http")]
+fn tenant_for_token<'a>(
+    tenants: &'a [TenantConfig],
+    token_hash: &[u8; 32],
+) -> Option<&'a TenantConfig> {
+    let mut tenant = None;
+    for candidate in tenants {
+        if constant_time_eq(&candidate.api_key_sha256, token_hash) {
+            tenant = Some(candidate);
+        }
+    }
+    tenant
+}
+
+#[cfg(feature = "mcp-http")]
+fn rate_limit_blocked(
+    state: &TenantAuthState,
+    tenant_id: &str,
+    limit_rpm: u64,
+    now: Instant,
+) -> bool {
+    let mut rate_limits = state
+        .rate_limits
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let window = rate_limits
+        .entry(tenant_id.to_string())
+        .or_insert(TenantRateWindow {
+            window_start: now,
+            request_count: 0,
+        });
+
+    if now.duration_since(window.window_start) >= Duration::from_secs(60) {
+        window.window_start = now;
+        window.request_count = 0;
+    }
+
+    if window.request_count >= limit_rpm {
+        return true;
+    }
+    window.request_count += 1;
+    false
 }
 
 #[cfg(feature = "mcp-http")]
@@ -2237,7 +2472,7 @@ async fn deliver_nexus_iq_timeline(
     events: Vec<nexus::daemon::NexusExecutionEvent>,
 ) -> nexus::aeon::TimelineDeliveryStatus {
     let Some(sink) = config
-        .and_then(nexus::aeon::AeonTimelineSink::from_enabled_config)
+        .and_then(nexus::aeon::init_optional_aeon_timeline_from_config)
         .map(|sink| sink.with_mode(mode))
     else {
         return match mode {
@@ -2753,22 +2988,59 @@ async fn run_mcp_stdio_server(server: NexusMcpServer) -> Result<()> {
 
 #[cfg(feature = "mcp-http")]
 async fn require_bearer_token(
-    State(expected_token): State<String>,
-    request: Request<Body>,
+    State(auth): State<Option<Arc<TenantAuthState>>>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let expected = format!("Bearer {expected_token}");
-    let authorized = request
+    let Some(auth) = auth else {
+        return next.run(request).await;
+    };
+
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let presented_key = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == expected);
-
-    if !authorized {
+        .and_then(parse_bearer_token)
+        .filter(|token| !token.is_empty());
+    let Some(presented_key) = presented_key else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let presented_key_hash = sha256_bytes(&presented_key);
+    let Some(tenant) = tenant_for_token(&auth.tenants, &presented_key_hash) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if rate_limit_blocked(
+        auth.as_ref(),
+        &tenant.tenant_id,
+        tenant.rate_limit_rpm,
+        Instant::now(),
+    ) {
+        tracing::info!(
+            tenant_id = %tenant.tenant_id,
+            method = %method,
+            path = %path,
+            status_class = format!("{}xx", StatusCode::TOO_MANY_REQUESTS.as_u16() / 100),
+            "authenticated MCP HTTP request"
+        );
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
 
-    next.run(request).await
+    request.extensions_mut().insert(TenantContext {
+        tenant_id: tenant.tenant_id.clone(),
+    });
+
+    let response = next.run(request).await;
+    tracing::info!(
+        tenant_id = %tenant.tenant_id,
+        method = %method,
+        path = %path,
+        status_class = format!("{}xx", response.status().as_u16() / 100),
+        "authenticated MCP HTTP request"
+    );
+    response
 }
 
 #[cfg(feature = "mcp-http")]
@@ -2788,27 +3060,26 @@ async fn run_mcp_http_server(server: NexusMcpServer) -> Result<()> {
     );
 
     let addr = parse_nexus_mcp_http_addr()?;
-    let token = parse_mcp_http_token();
-
-    if token.is_none() {
-        if is_loopback_addr(&addr) {
-            tracing::warn!(addr = %addr, "NEXUS_MCP_HTTP_TOKEN is not set; unauthenticated HTTP MCP endpoint bound to loopback only (set token for network exposure, auth+tenancy are P2)");
-        } else {
-            tracing::warn!(addr = %addr, "NEXUS_MCP_HTTP_TOKEN is not set; HTTP MCP endpoint is unauthenticated (set token for auth, full auth+tenancy are P2)");
-        }
+    let tenant_auth = load_tenant_auth_state()?;
+    if tenant_auth.is_none() && !is_loopback_addr(&addr) {
+        anyhow::bail!(
+            "NEXUS_MCP_HTTP_TOKEN or NEXUS_MCP_HTTP_TENANTS is required for non-loopback HTTP bind"
+        );
+    }
+    if tenant_auth.is_none() {
+        tracing::warn!(
+            addr = %addr,
+            "NEXUS_MCP_HTTP_TOKEN and NEXUS_MCP_HTTP_TENANTS are not set; unauthenticated HTTP MCP endpoint is loopback-only"
+        );
     }
 
-    let app = if let Some(token) = token {
-        Router::new()
-            .nest_service("/", service)
-            .route_layer(middleware::from_fn_with_state(
-                token.clone(),
-                require_bearer_token,
-            ))
-            .with_state(token)
-    } else {
-        Router::new().nest_service("/", service)
-    };
+    let app = Router::new()
+        .nest_service("/", service)
+        .route_layer(middleware::from_fn_with_state(
+            tenant_auth.clone(),
+            require_bearer_token,
+        ))
+        .with_state(tenant_auth);
 
     tracing::info!(addr = %addr, "Starting Nexus MCP HTTP transport");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -2844,7 +3115,7 @@ async fn main() -> Result<()> {
     tracing::info!("Starting Nexus MCP server");
 
     #[cfg(feature = "aeon-memory")]
-    let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+    let aeon_config = nexus::aeon::init_optional_aeon_config_from_env();
     #[cfg(feature = "aeon-memory")]
     if matches!(aeon_config.as_ref(), Some(config) if config.enabled && config.hmac_key.is_none()) {
         eprintln!("[nexus] SECURITY WARNING: aeon-memory is active but NEXUS_AEON_HMAC_KEY is not set — memory_digest will use unauthenticated SHA-256 (forgeable). Set NEXUS_AEON_HMAC_KEY (>=32 bytes) in production.");
@@ -2905,6 +3176,73 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "aeon-memory")]
+    static NEXUS_IQ_AEON_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(feature = "aeon-memory")]
+    const NEXUS_IQ_AEON_ENV_VARS: [&str; 6] = [
+        "NEXUS_AEON_BASE_URL",
+        "NEXUS_AEON_ENABLED",
+        "NEXUS_AEON_HMAC_KEY",
+        "NEXUS_AEON_MANAGEMENT_KEY",
+        "NEXUS_AEON_REQUIRED",
+        "NEXUS_EGRESS_ALLOW_PRIVATE",
+    ];
+
+    #[cfg(feature = "aeon-memory")]
+    fn with_clean_nexus_iq_aeon_env(test: impl FnOnce() + std::panic::UnwindSafe) {
+        let _guard = NEXUS_IQ_AEON_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let saved: [(&str, Option<std::ffi::OsString>); 6] =
+            NEXUS_IQ_AEON_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in NEXUS_IQ_AEON_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[cfg(feature = "mcp-http")]
+    static MCP_HTTP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(feature = "mcp-http")]
+    const MCP_HTTP_ENV_VARS: [&str; 2] = [NEXUS_MCP_HTTP_TOKEN_ENV, NEXUS_MCP_HTTP_TENANTS_ENV];
+
+    #[cfg(feature = "mcp-http")]
+    fn with_clean_mcp_http_env(test: impl FnOnce() + std::panic::UnwindSafe) {
+        let _guard = MCP_HTTP_ENV_LOCK.lock().unwrap();
+        let saved: [(&str, Option<std::ffi::OsString>); 2] =
+            MCP_HTTP_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in MCP_HTTP_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     #[test]
     fn get_history_returns_empty_for_fresh_hypervisor() {
         let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
@@ -2923,6 +3261,43 @@ mod tests {
         let response = server.do_get_stats(GetStatsParams {}).unwrap();
 
         assert_eq!(response.telemetry.total_executions, 0);
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[tokio::test]
+    async fn nexus_iq_execute_with_invalid_optional_aeon_config_is_not_rejected() {
+        with_clean_nexus_iq_aeon_env(|| {
+            std::env::set_var("NEXUS_AEON_ENABLED", "true");
+            std::env::set_var("NEXUS_AEON_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEXUS_AEON_MANAGEMENT_KEY", "management-key");
+            std::env::set_var(
+                "NEXUS_AEON_HMAC_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+        });
+
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let wasm_bytes = wat::parse_str(r#"(module (func (export "_start")))"#).unwrap();
+        let tool_wasm =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wasm_bytes);
+        let response = server
+            .do_nexus_iq_execute(NexusIqExecuteParams {
+                tool_name: "aeon-query".to_string(),
+                tool_wasm,
+                input: "{}".to_string(),
+                aeon_agent_id: "agent-1".to_string(),
+                aeon_session_id: Some("session-1".to_string()),
+                attestation_mode: Some("advisory".to_string()),
+                required_capabilities: None,
+                memory_query: Some("offsite memory query".to_string()),
+                memory_limit: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!response.denied);
     }
 
     #[test]
@@ -3285,6 +3660,265 @@ mod tests {
         assert!(error.contains("not allowed in HTTP read-only mode"));
 
         assert!(server.ensure_tool_allowed("nexus_get_stats").is_ok());
+    }
+
+    #[cfg(feature = "mcp-http")]
+    fn build_tenant_test_state(
+        tenant_id: &str,
+        api_key: &str,
+        rate_limit_rpm: u64,
+    ) -> Arc<TenantAuthState> {
+        Arc::new(TenantAuthState::new(vec![TenantConfig {
+            tenant_id: tenant_id.to_string(),
+            api_key_sha256: sha256_bytes(api_key),
+            rate_limit_rpm,
+        }]))
+    }
+
+    #[cfg(feature = "mcp-http")]
+    async fn tenant_echo_handler(
+        axum::extract::Extension(ctx): axum::extract::Extension<TenantContext>,
+    ) -> axum::response::Response {
+        let mut response = axum::response::Response::new(Body::empty());
+        response.headers_mut().insert(
+            "x-tenant-id",
+            ctx.tenant_id.parse().expect("tenant id is header-safe"),
+        );
+        response
+    }
+
+    #[cfg(feature = "mcp-http")]
+    async fn call_tenant_route(
+        auth: Option<Arc<TenantAuthState>>,
+        request: Request<Body>,
+    ) -> Response {
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(tenant_echo_handler))
+            .route_layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                require_bearer_token,
+            ))
+            .with_state(auth);
+
+        tower::util::ServiceExt::oneshot(app, request)
+            .await
+            .expect("request should be handled")
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn parse_tenant_store_loads_from_temporary_json_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenants_path = tmp.path().join("tenants.json");
+        let api_key = "acme-secret-key";
+        let body = serde_json::json!([{
+            "tenant_id": "acme",
+            "api_key_sha256": sha256_hex(api_key),
+            "rate_limit_rpm": 120
+        }])
+        .to_string();
+        std::fs::write(&tenants_path, body).unwrap();
+        let tenants = parse_tenant_config_file(&tenants_path).unwrap();
+
+        assert_eq!(tenants.len(), 1);
+        assert_eq!(tenants[0].tenant_id, "acme");
+        assert_eq!(tenants[0].rate_limit_rpm, 120);
+        assert_eq!(tenants[0].api_key_sha256, sha256_bytes(api_key));
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn parse_tenant_store_rejects_duplicate_api_key_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenants_path = tmp.path().join("tenants.json");
+        let body = serde_json::json!([
+            {
+                "tenant_id": "acme",
+                "api_key_sha256": sha256_hex("shared-key"),
+            },
+            {
+                "tenant_id": "second",
+                "api_key_sha256": sha256_hex("shared-key"),
+            }
+        ])
+        .to_string();
+        std::fs::write(&tenants_path, body).unwrap();
+
+        let error = parse_tenant_config_file(&tenants_path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate tenant api_key_sha256"));
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn parse_mcp_http_token_normalizes_empty() {
+        with_clean_mcp_http_env(|| {
+            std::env::set_var(NEXUS_MCP_HTTP_TOKEN_ENV, "   ");
+            assert!(parse_mcp_http_token().unwrap().is_none());
+        });
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn parse_mcp_http_tenants_path_empty_string_is_none() {
+        with_clean_mcp_http_env(|| {
+            std::env::set_var(NEXUS_MCP_HTTP_TENANTS_ENV, "   ");
+            assert!(parse_mcp_http_tenants_path().unwrap().is_none());
+        });
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn load_tenant_auth_state_falls_back_to_token_when_tenants_unset_or_empty() {
+        with_clean_mcp_http_env(|| {
+            std::env::set_var(NEXUS_MCP_HTTP_TENANTS_ENV, "   ");
+            std::env::set_var(NEXUS_MCP_HTTP_TOKEN_ENV, "shared-secret");
+            let state = load_tenant_auth_state()
+                .unwrap()
+                .expect("token auth should be configured");
+
+            assert_eq!(state.tenants.len(), 1);
+            assert_eq!(
+                state.tenants[0].tenant_id,
+                NEXUS_MCP_HTTP_TENANT_ID_FALLBACK
+            );
+        });
+    }
+
+    #[cfg(all(feature = "mcp-http", unix))]
+    #[test]
+    fn parse_mcp_http_token_rejects_non_utf8() {
+        with_clean_mcp_http_env(|| {
+            use std::os::unix::ffi::OsStringExt;
+            std::env::set_var(
+                NEXUS_MCP_HTTP_TOKEN_ENV,
+                std::ffi::OsString::from_vec(vec![0xff]),
+            );
+
+            assert!(parse_mcp_http_token().is_err());
+        });
+    }
+
+    #[cfg(feature = "mcp-http")]
+    fn sha256_hex(value: &str) -> String {
+        let digest = sha2::Sha256::digest(value.as_bytes());
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_rejects_missing_and_unknown() {
+        let state = build_tenant_test_state("acme", "expected-secret", 120);
+
+        let missing = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let missing = call_tenant_route(Some(state.clone()), missing).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let unknown = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer wrong")
+            .body(Body::empty())
+            .unwrap();
+        let unknown = call_tenant_route(Some(state), unknown).await;
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_sets_tenant_context() {
+        let state = build_tenant_test_state("acme", "expected-secret", 120);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer expected-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = call_tenant_route(Some(state), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-tenant-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acme")
+        );
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_matches_normalized_secret_with_whitespace() {
+        let state = build_tenant_test_state("acme", "expected-secret", 120);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                "Bearer   expected-secret   ",
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        let response = call_tenant_route(Some(state), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-tenant-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acme")
+        );
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_rate_limit_429() {
+        let state = build_tenant_test_state("acme", "expected-secret", 1);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer expected-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let first = call_tenant_route(
+            Some(state.clone()),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(axum::http::header::AUTHORIZATION, "Bearer expected-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = call_tenant_route(Some(state), request).await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn constant_time_compare_checks_equal_and_mismatch_values() {
+        let a = b"\x01\x02\x03";
+        let b = b"\x01\x02\x03";
+        let c = b"\x01\x02\x04";
+        let d = b"\x01\x02\x03\x04";
+
+        assert!(constant_time_eq(a, b));
+        assert!(!constant_time_eq(a, c));
+        assert!(!constant_time_eq(a, d));
     }
 
     #[cfg(unix)]

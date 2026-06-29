@@ -154,6 +154,66 @@ Auth/tenancy and network multi-tenant controls are a P2 follow-up. If
 `NEXUS_MCP_HTTP_TOKEN` is unset, the endpoint is intentionally unauthenticated
 (loopback default helps reduce exposure, but is not security-complete).
 
+## P2 — auth + multi-tenancy (`NEXUS_MCP_HTTP_TENANTS`)
+
+P2 replaces the single token with per-tenant opaque bearer keys stored as
+SHA-256 hashes in a JSON file.
+
+`NEXUS_MCP_HTTP_TENANTS` (path):
+
+```json
+[
+  {
+    "tenant_id": "acme",
+    "api_key_sha256": "4b9c9f8f... (64 hex chars)",
+    "rate_limit_rpm": 120
+  }
+]
+```
+
+Generate a key and its hash:
+
+```bash
+export NEXUS_MCP_HTTP_TENANT_KEY='replace-me'
+printf '%s' "$NEXUS_MCP_HTTP_TENANT_KEY" | sha256sum | cut -d' ' -f1
+```
+
+Example run:
+
+```bash
+export NEXUS_MCP_HTTP_TENANTS=/path/to/nexus_mcp_tenants.json
+export NEXUS_MCP_HTTP_ADDR=127.0.0.1:8765
+NEXUS_MCP_TRANSPORT=http \
+nexus-mcp
+```
+
+Behavior:
+
+- Each request must send `Authorization: Bearer <api key>`.
+- The key is SHA-256 hashed and compared to stored tenant hashes.
+- On success, the request receives a tenant context for downstream enforcement.
+- Requests are rate-limited per tenant using `rate_limit_rpm` (default `60` when not
+  set, enforced in fixed windows).
+- On match/authenticated failure: `401 Unauthorized`.
+- On rate-limit limit hit: `429 Too Many Requests`.
+- Audit logs include `tenant_id`, HTTP method, path, and status class (for example
+  `2xx`, `4xx`).
+
+Backward compatibility:
+
+- If `NEXUS_MCP_HTTP_TENANTS` is unset and `NEXUS_MCP_HTTP_TOKEN` is set, runtime
+  behavior is unchanged from P1 using an implicit tenant:
+  - `tenant_id = "default"`
+  - SHA-256 of `NEXUS_MCP_HTTP_TOKEN`
+- If neither token nor tenant file is configured, non-loopback binds are rejected at
+  startup.
+
+Planned follow-up:
+
+- Per-tenant tool scope policy (tool allowlist subsets).
+- Stronger execution isolation between tenants.
+- Execution/mutation actions and workflow isolation controls.
+
 ## Capability Allowlist
 
 WASI capability requests need either a parent token or an operator allowlist.

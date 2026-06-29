@@ -232,7 +232,7 @@ mod tests {
     }
 
     fn unconfigured_memory_client() -> AeonMemoryClient {
-        AeonMemoryClient::from_config(&test_config(None))
+        AeonMemoryClient::from_config(&test_config(None)).unwrap()
     }
 
     fn read_capability(path: &str) -> Capability {

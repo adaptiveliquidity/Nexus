@@ -17,8 +17,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::io::{BufReader, BufWriter};
-#[cfg(feature = "aeon-memory")]
-use tracing::debug;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -87,17 +85,8 @@ async fn main() -> anyhow::Result<()> {
     cfg.sandbox_config.max_fuel = cli.fuel;
     cfg.sandbox_config.time_limit = std::time::Duration::from_millis(cli.timeout_ms);
     #[cfg(feature = "aeon-memory")]
-    match nexus::aeon::AeonConfig::from_env() {
-        Ok(config) => {
-            cfg.aeon_config = Some(config);
-        }
-        Err(error) => {
-            debug!(
-                target: "nexus.agentd",
-                error = %error,
-                "AEON-IQ config failed to load; daemon proof memory/timeline integration disabled"
-            );
-        }
+    {
+        cfg.aeon_config = nexus::aeon::init_optional_aeon_config_from_env();
     }
     let pool = HypervisorPool::new(pool_size, cfg)?;
     let module_cache = Arc::new(ModuleCache::new());
@@ -723,18 +712,15 @@ fn daemon_proof_events(
 fn queue_timeline_delivery(
     agent_id: Option<&str>,
     session_id: Option<&str>,
-    mode: Option<&str>,
+    _mode: Option<&str>,
     events: &[nexus::daemon::NexusExecutionEvent],
 ) -> Option<nexus::aeon::TimelineDeliveryStatus> {
     let agent_id = agent_id?.to_string();
     let session_id = session_id.map(str::to_string);
-    let mode = nexus::aeon::TimelineDeliveryMode::parse(mode);
-    let config = nexus::aeon::AeonConfig::from_env().unwrap_or_default();
-    let sink = if matches!(mode, nexus::aeon::TimelineDeliveryMode::Offline) {
-        Some(nexus::aeon::AeonTimelineSink::from_config(&config).with_mode(mode))
-    } else {
-        nexus::aeon::AeonTimelineSink::from_enabled_config(&config).map(|sink| sink.with_mode(mode))
-    };
+    let config = nexus::aeon::init_optional_aeon_config_from_env();
+    let sink = config
+        .as_ref()
+        .and_then(nexus::aeon::init_optional_aeon_timeline_from_config);
 
     let Some(sink) = sink else {
         return Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen);

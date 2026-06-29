@@ -331,7 +331,7 @@ impl NexusHypervisor {
         let aeon_memory = config
             .aeon_config
             .as_ref()
-            .and_then(crate::aeon::AeonMemoryClient::from_enabled_config);
+            .and_then(crate::aeon::init_optional_aeon);
 
         let fuel_policy = FuelBudgetPolicy::new(sandbox_config.max_fuel);
 
@@ -2122,7 +2122,8 @@ fn is_hex_digest(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    #[cfg(feature = "aeon-memory")]
+    // shared env isolation helper now lives in crate::aeon::tests
     #[tokio::test]
     async fn test_successful_execution() {
         let config = HypervisorConfig::default();
@@ -2341,6 +2342,23 @@ mod tests {
     }
 
     #[cfg(feature = "aeon-memory")]
+    #[test]
+    fn hypervisor_new_succeeds_when_optional_aeon_egress_config_is_invalid() {
+        crate::aeon::tests::with_clean_egress_env(|| {
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            let config = HypervisorConfig {
+                aeon_config: Some(aeon_test_config(Some("mgmt-key"))),
+                ..HypervisorConfig::default()
+            };
+
+            let hypervisor = NexusHypervisor::new(config).unwrap();
+
+            assert!(hypervisor.aeon_memory.is_none());
+        });
+    }
+
+    #[cfg(feature = "aeon-memory")]
     fn aeon_capture_client(
         status: u16,
         management_key: Option<&str>,
@@ -2421,35 +2439,41 @@ mod tests {
     }
 
     #[cfg(feature = "aeon-memory")]
-    #[tokio::test]
-    async fn execute_tool_proof_with_tokens_records_negotiation_rounds() {
-        let allowed = Capability::ReadFile(std::path::PathBuf::from("/allowed"));
-        let blocked = Capability::WriteFile(std::path::PathBuf::from("/blocked"));
-        let (client, captured) = aeon_search_client("use read:/allowed only");
-        let hv = NexusHypervisor::new(HypervisorConfig::default())
-            .unwrap()
-            .with_aeon_memory_client_for_test(client);
-        let token = hv
-            .issue_token(allowed.clone(), "test", Duration::from_secs(60))
-            .unwrap();
-        let wasm =
-            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+    #[test]
+    fn execute_tool_proof_with_tokens_records_negotiation_rounds() {
+        crate::aeon::tests::with_clean_egress_env(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let allowed = Capability::ReadFile(std::path::PathBuf::from("/allowed"));
+                let blocked = Capability::WriteFile(std::path::PathBuf::from("/blocked"));
+                let (client, captured) = aeon_search_client("use read:/allowed only");
+                let hv = NexusHypervisor::new(HypervisorConfig::default())
+                    .unwrap()
+                    .with_aeon_memory_client_for_test(client);
+                let token = hv
+                    .issue_token(allowed.clone(), "test", Duration::from_secs(60))
+                    .unwrap();
+                let wasm = wat::parse_str(
+                    r#"(module (memory (export "memory") 1) (func (export "_start")))"#,
+                )
                 .unwrap();
-        let tool = ToolDefinition::new("aeon_negotiated_proof".to_string(), wasm)
-            .with_capabilities(vec![allowed.clone(), blocked])
-            .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string()));
+                let tool = ToolDefinition::new("aeon_negotiated_proof".to_string(), wasm)
+                    .with_capabilities(vec![allowed.clone(), blocked])
+                    .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string()));
 
-        let (_output, capsule) = hv
-            .execute_tool_proof_with_tokens(tool, serde_json::json!({}), &[token])
-            .await
-            .unwrap();
+                let (_output, capsule) = hv
+                    .execute_tool_proof_with_tokens(tool, serde_json::json!({}), &[token])
+                    .await
+                    .unwrap();
 
-        assert_eq!(capsule.capabilities.required, vec![allowed.description()]);
-        assert_eq!(capsule.capabilities.granted, vec![allowed.description()]);
-        assert_eq!(capsule.capabilities.negotiation_rounds, Some(1));
-        let requests = captured.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].path, "/api/v1/memories/search");
+                assert_eq!(capsule.capabilities.required, vec![allowed.description()]);
+                assert_eq!(capsule.capabilities.granted, vec![allowed.description()]);
+                assert_eq!(capsule.capabilities.negotiation_rounds, Some(1));
+                let requests = captured.lock().unwrap();
+                assert_eq!(requests.len(), 1);
+                assert_eq!(requests[0].path, "/api/v1/memories/search");
+            });
+        });
     }
 
     #[cfg(feature = "aeon-memory")]
@@ -2503,73 +2527,85 @@ mod tests {
     }
 
     #[cfg(feature = "aeon-memory")]
-    #[tokio::test]
-    async fn aeon_capture_posts_recovery_outcome_after_retry_feedback() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(crate::instinct::InstinctStore::open(tmp.path().to_path_buf()).unwrap());
-        store
-            .register(
-                &FailureMode::TrapDivByZero,
-                "*",
-                "instinct: validate divisor before division",
-            )
-            .unwrap();
-        let policy: Arc<dyn RecoveryPolicy> = Arc::new(LayeredPolicy::new(vec![
-            Box::new(StaticPolicy::new()),
-            Box::new(crate::instinct::InstinctPolicy::new(store.clone())),
-        ]));
-        let (client, captured) = aeon_capture_client(200, Some("mgmt-key"));
-        let cfg = HypervisorConfig {
-            max_retries: 1,
-            ..HypervisorConfig::default()
-        };
-        let hv = NexusHypervisor::new_with_policy(cfg, policy)
-            .unwrap()
-            .with_instinct_store(store)
-            .with_aeon_memory_client_for_test(client);
-        let token = hv
-            .issue_token(
-                Capability::WriteMemory(crate::security::capability::MemoryScope::Session {
-                    agent_id: "agent-1".to_string(),
-                    session_id: "session-1".to_string(),
-                }),
-                "test",
-                Duration::from_secs(60),
-            )
-            .unwrap();
+    #[test]
+    fn aeon_capture_posts_recovery_outcome_after_retry_feedback() {
+        crate::aeon::tests::with_clean_egress_env(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let store = Arc::new(
+                    crate::instinct::InstinctStore::open(tmp.path().to_path_buf()).unwrap(),
+                );
+                store
+                    .register(
+                        &FailureMode::TrapDivByZero,
+                        "*",
+                        "instinct: validate divisor before division",
+                    )
+                    .unwrap();
+                let policy: Arc<dyn RecoveryPolicy> = Arc::new(LayeredPolicy::new(vec![
+                    Box::new(StaticPolicy::new()),
+                    Box::new(crate::instinct::InstinctPolicy::new(store.clone())),
+                ]));
+                let (client, captured) = aeon_capture_client(200, Some("mgmt-key"));
+                let cfg = HypervisorConfig {
+                    max_retries: 1,
+                    ..HypervisorConfig::default()
+                };
+                let hv = NexusHypervisor::new_with_policy(cfg, policy)
+                    .unwrap()
+                    .with_instinct_store(store)
+                    .with_aeon_memory_client_for_test(client);
+                let token = hv
+                    .issue_token(
+                        Capability::WriteMemory(
+                            crate::security::capability::MemoryScope::Session {
+                                agent_id: "agent-1".to_string(),
+                                session_id: "session-1".to_string(),
+                            },
+                        ),
+                        "test",
+                        Duration::from_secs(60),
+                    )
+                    .unwrap();
 
-        let output = hv
-            .execute_with_retry_with_tokens(
-                divzero_tool("aeon_retry_outcome")
-                    .with_aeon_context(Some("agent-1".to_string()), Some("session-1".to_string())),
-                serde_json::json!({}),
-                &[token],
-            )
-            .await
-            .unwrap();
+                let output = hv
+                    .execute_with_retry_with_tokens(
+                        divzero_tool("aeon_retry_outcome").with_aeon_context(
+                            Some("agent-1".to_string()),
+                            Some("session-1".to_string()),
+                        ),
+                        serde_json::json!({}),
+                        &[token],
+                    )
+                    .await
+                    .unwrap();
 
-        assert!(!output.success);
-        wait_for_aeon_requests(&captured, 3).await;
-        let requests = captured.lock().unwrap();
-        let recovery = requests
-            .iter()
-            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
-            .find(|body| body["memory_type"] == "recovery")
-            .expect("recovery outcome capture request");
+                assert!(!output.success);
+                wait_for_aeon_requests(&captured, 3).await;
+                let requests = captured.lock().unwrap();
+                let recovery = requests
+                    .iter()
+                    .map(|request| {
+                        serde_json::from_str::<serde_json::Value>(&request.body).unwrap()
+                    })
+                    .find(|body| body["memory_type"] == "recovery")
+                    .expect("recovery outcome capture request");
 
-        assert!(recovery["content"]
-            .as_str()
-            .unwrap()
-            .contains("operation=aeon_retry_outcome"));
-        assert!(recovery["content"]
-            .as_str()
-            .unwrap()
-            .contains("outcome=failure"));
-        assert!(recovery["content"]
-            .as_str()
-            .unwrap()
-            .contains("validate divisor"));
+                assert!(recovery["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("operation=aeon_retry_outcome"));
+                assert!(recovery["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("outcome=failure"));
+                assert!(recovery["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("validate divisor"));
+            });
+        });
     }
 
     #[cfg(feature = "aeon-memory")]

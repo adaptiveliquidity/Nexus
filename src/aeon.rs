@@ -5,6 +5,7 @@
 //! the AEON-IQ management API key is read only from explicit `NEXUS_AEON_*`
 //! environment configuration.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::security::EgressPolicy;
@@ -26,6 +27,7 @@ const SESSION_ID_ENV: &str = "NEXUS_AEON_SESSION_ID";
 const TIMEOUT_MS_ENV: &str = "NEXUS_AEON_TIMEOUT_MS";
 const MANAGEMENT_KEY_ENV: &str = "NEXUS_AEON_MANAGEMENT_KEY";
 const HMAC_KEY_ENV: &str = "NEXUS_AEON_HMAC_KEY";
+const AEON_REQUIRED_ENV: &str = "NEXUS_AEON_REQUIRED";
 const TIMELINE_SPOOL_ENV: &str = "NEXUS_AEON_TIMELINE_SPOOL";
 const TIMELINE_MAX_ATTEMPTS: usize = 3;
 static MISSING_MANAGEMENT_KEY_WARN: Once = Once::new();
@@ -126,6 +128,109 @@ impl AeonConfig {
             self.base_url.trim_end_matches('/')
         )
     }
+}
+
+fn aeon_required() -> bool {
+    match std::env::var(AEON_REQUIRED_ENV) {
+        Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            debug!(
+                target: "nexus.aeon",
+                "NEXUS_AEON_REQUIRED is not valid UTF-8; treating AEON as optional"
+            );
+            false
+        }
+        Err(std::env::VarError::NotPresent) => false,
+    }
+}
+
+pub fn init_optional_aeon(config: &AeonConfig) -> Option<AeonMemoryClient> {
+    try_init_required_aeon(config).unwrap_or_default()
+}
+
+pub fn try_init_required_aeon(config: &AeonConfig) -> Result<Option<AeonMemoryClient>> {
+    match AeonMemoryClient::from_enabled_config(config) {
+        Ok(memory) => Ok(memory),
+        Err(error) if aeon_required() => Err(error),
+        Err(error) => {
+            error!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON optional initialization failed; continuing with AEON disabled"
+            );
+            Ok(None)
+        }
+    }
+}
+
+pub fn init_optional_aeon_config_from_env() -> Option<AeonConfig> {
+    try_init_required_aeon_config_from_env().unwrap_or_default()
+}
+
+pub fn try_init_required_aeon_config_from_env() -> Result<Option<AeonConfig>> {
+    match AeonConfig::from_env() {
+        Ok(config) => Ok(Some(config)),
+        Err(error) if aeon_required() => Err(error),
+        Err(error) => {
+            error!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON optional configuration from_env failed; continuing with AEON disabled"
+            );
+            Ok(None)
+        }
+    }
+}
+
+pub fn init_optional_aeon_timeline_from_config(config: &AeonConfig) -> Option<AeonTimelineSink> {
+    try_init_required_aeon_timeline_from_config(config).unwrap_or_default()
+}
+
+pub fn try_init_required_aeon_timeline_from_config(
+    config: &AeonConfig,
+) -> Result<Option<AeonTimelineSink>> {
+    match try_init_required_aeon(config)? {
+        Some(client) => Ok(Some(client.timeline_sink()?)),
+        None => Ok(None),
+    }
+}
+
+pub fn init_optional_aeon_timeline_from_env() -> Option<AeonTimelineSink> {
+    try_init_required_aeon_timeline_from_env().unwrap_or_default()
+}
+
+pub fn try_init_required_aeon_timeline_from_env() -> Result<Option<AeonTimelineSink>> {
+    match try_init_required_aeon_config_from_env()? {
+        Some(config) => try_init_required_aeon_timeline_from_config(&config),
+        None => Ok(None),
+    }
+}
+
+#[derive(Serialize)]
+struct TimelineEventIdSeed<'a> {
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    event_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nexus_snapshot_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capsule_digest: Option<&'a str>,
+}
+
+fn timeline_event_id(
+    agent_id: &str,
+    session_id: Option<&str>,
+    event: &TimelineEventBody,
+) -> String {
+    let seed = TimelineEventIdSeed {
+        agent_id,
+        session_id,
+        event_type: &event.event_type,
+        nexus_snapshot_id: event.nexus_snapshot_id.as_deref(),
+        capsule_digest: event.capsule_digest.as_deref(),
+    };
+    sha256_hex(&serde_json::to_vec(&seed).expect("timeline event id seed must serialize"))
 }
 
 /// A single advisory AEON-IQ memory search result.
@@ -265,45 +370,27 @@ pub struct AeonMemoryClient {
 }
 
 impl AeonMemoryClient {
-    pub fn from_config(config: &AeonConfig) -> Self {
-        let mut policy = EgressPolicy::from_env().unwrap_or_else(|error| {
-            warn!(
-                target: "nexus.aeon",
-                error = %error,
-                "AEON-IQ egress policy configuration invalid; defaulting to deny-by-default policy"
-            );
-            EgressPolicy::default()
-        });
-        if let Ok(base_url) = reqwest::Url::parse(&config.base_url) {
-            if let Some(host) = base_url.host_str() {
-                policy.allow_host(host);
-            }
-        }
-
+    pub fn from_config(config: &AeonConfig) -> Result<Self> {
         let http = reqwest::ClientBuilder::new()
             .timeout(Duration::from_millis(config.timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_else(|e| {
-                warn!(
-                    target: "nexus.aeon",
-                    error = %e,
-                    "failed to build AEON-IQ memory client; falling back to default client"
-                );
-                reqwest::Client::new()
-            });
+            .map_err(|error| {
+                NexusError::ConfigError(format!("failed to build AEON-IQ memory client: {error}"))
+            })?;
 
-        Self {
+        Ok(Self {
             http,
             base_url: config.base_url.trim_end_matches('/').to_string(),
-            policy,
+            policy: Self::egress_policy(config)?,
             agent_id: config.agent_id.clone(),
             management_key: config.management_key.clone(),
             #[cfg(test)]
             test_responder: None,
-        }
+        })
     }
 
-    pub fn from_enabled_config(config: &AeonConfig) -> Option<Self> {
+    pub fn from_enabled_config(config: &AeonConfig) -> Result<Option<Self>> {
         let has_required_config = config.enabled
             && !config.base_url.trim().is_empty()
             && !config.agent_id.trim().is_empty()
@@ -312,18 +399,33 @@ impl AeonMemoryClient {
                 .as_deref()
                 .is_some_and(|key| !key.trim().is_empty());
 
-        has_required_config.then(|| Self::from_config(config))
+        if !has_required_config {
+            return Ok(None);
+        }
+
+        Ok(Some(Self::from_config(config)?))
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_responder(config: &AeonConfig, responder: TestResponder) -> Self {
-        let mut client = Self::from_config(config);
+        let mut client = Self::from_config(config).expect("valid AEON test client configuration");
         client.test_responder = Some(responder);
         client
     }
 
-    pub fn timeline_sink(&self) -> AeonTimelineSink {
-        AeonTimelineSink::from_memory_client(self)
+    pub fn timeline_sink(&self) -> Result<AeonTimelineSink> {
+        Ok(AeonTimelineSink::from_memory_client(self))
+    }
+
+    fn egress_policy(config: &AeonConfig) -> Result<EgressPolicy> {
+        let mut policy = EgressPolicy::from_env()?;
+        if let Ok(base_url) = reqwest::Url::parse(&config.base_url) {
+            if let Some(host) = base_url.host_str() {
+                policy.allow_host(host);
+            }
+        }
+
+        Ok(policy)
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryHit> {
@@ -686,6 +788,7 @@ pub struct TimelineReplayReport {
 pub struct AeonTimelineSink {
     http: reqwest::Client,
     base_url: String,
+    policy: Result<EgressPolicy>,
     management_key: Option<String>,
     mode: TimelineDeliveryMode,
     spool_path: PathBuf,
@@ -695,18 +798,40 @@ pub struct AeonTimelineSink {
 }
 
 impl AeonTimelineSink {
-    pub fn from_config(config: &AeonConfig) -> Self {
-        AeonMemoryClient::from_config(config).timeline_sink()
+    pub fn from_config(config: &AeonConfig) -> Result<Self> {
+        let http = reqwest::ClientBuilder::new()
+            .timeout(Duration::from_millis(config.timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                NexusError::ConfigError(format!("failed to build AEON-IQ timeline client: {error}"))
+            })?;
+
+        Ok(Self {
+            http,
+            base_url: config.base_url.trim_end_matches('/').to_string(),
+            policy: AeonMemoryClient::egress_policy(config),
+            management_key: config.management_key.clone(),
+            mode: TimelineDeliveryMode::Advisory,
+            spool_path: default_timeline_spool_path(),
+            last_event_digest: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_responder: None,
+        })
     }
 
-    pub fn from_enabled_config(config: &AeonConfig) -> Option<Self> {
-        AeonMemoryClient::from_enabled_config(config).map(|client| client.timeline_sink())
+    pub fn from_enabled_config(config: &AeonConfig) -> Result<Option<Self>> {
+        match AeonMemoryClient::from_enabled_config(config)? {
+            Some(client) => Ok(Some(client.timeline_sink()?)),
+            None => Ok(None),
+        }
     }
 
     pub fn from_memory_client(client: &AeonMemoryClient) -> Self {
         Self {
             http: client.http.clone(),
             base_url: client.base_url.clone(),
+            policy: Ok(client.policy.clone()),
             management_key: client.management_key.clone(),
             mode: TimelineDeliveryMode::Advisory,
             spool_path: default_timeline_spool_path(),
@@ -728,7 +853,7 @@ impl AeonTimelineSink {
 
     #[cfg(test)]
     pub(crate) fn with_test_responder(config: &AeonConfig, responder: TestResponder) -> Self {
-        let mut sink = Self::from_config(config);
+        let mut sink = Self::from_config(config).expect("valid AEON test sink configuration");
         sink.test_responder = Some(responder);
         sink
     }
@@ -799,6 +924,7 @@ impl AeonTimelineSink {
 
         let mut report = TimelineReplayReport::default();
         let mut retained = Vec::new();
+        let mut seen_event_ids = HashSet::new();
 
         for line in content.lines().filter(|line| !line.trim().is_empty()) {
             let record = match serde_json::from_str::<TimelineSpoolRecord>(line) {
@@ -814,6 +940,12 @@ impl AeonTimelineSink {
                     continue;
                 }
             };
+
+            let event_id = timeline_record_event_id(&record);
+            if !seen_event_ids.insert(event_id) {
+                report.skipped += 1;
+                continue;
+            }
 
             if record.agent_id != agent_id || since.is_some_and(|since| record.created_at < since) {
                 report.skipped += 1;
@@ -850,11 +982,60 @@ impl AeonTimelineSink {
         session_id: Option<&str>,
         events: &[crate::daemon::NexusExecutionEvent],
     ) -> bool {
-        let records = events.iter().map(|event| TimelineSpoolRecord {
-            created_at: Utc::now(),
-            agent_id: agent_id.to_string(),
-            event: TimelineEventBody::from_event(session_id, event),
-        });
+        let records = events
+            .iter()
+            .map(|event| {
+                let event = TimelineEventBody::from_event(session_id, event);
+                TimelineSpoolRecord {
+                    created_at: Utc::now(),
+                    event_id: Some(timeline_event_id(agent_id, session_id, &event)),
+                    agent_id: agent_id.to_string(),
+                    event,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let existing_event_ids = match tokio::fs::read_to_string(&self.spool_path).await {
+            Ok(content) => {
+                let mut ids = HashSet::new();
+                for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                    let record = match serde_json::from_str::<TimelineSpoolRecord>(line) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            debug!(
+                                target: "nexus.aeon",
+                                error = %error,
+                                "AEON-IQ timeline spool record parse failed while deduplicating; retaining line"
+                            );
+                            continue;
+                        }
+                    };
+                    ids.insert(timeline_record_event_id(&record));
+                }
+                ids
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool read failed; failing open"
+                );
+                return false;
+            }
+        };
+
+        let mut event_ids = existing_event_ids;
+        let mut records_to_append = Vec::with_capacity(records.len());
+        for record in records {
+            if event_ids.insert(timeline_record_event_id(&record)) {
+                records_to_append.push(record);
+            }
+        }
+
+        if records_to_append.is_empty() {
+            return true;
+        }
 
         if let Some(parent) = self.spool_path.parent() {
             if let Err(error) = tokio::fs::create_dir_all(parent).await {
@@ -884,7 +1065,7 @@ impl AeonTimelineSink {
             }
         };
 
-        for record in records {
+        for record in records_to_append {
             let mut bytes = match serde_json::to_vec(&record) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -905,6 +1086,14 @@ impl AeonTimelineSink {
                 );
                 return false;
             }
+        }
+
+        if let Err(error) = tokio::io::AsyncWriteExt::flush(&mut file).await {
+            debug!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON-IQ timeline spool flush failed; failing open"
+            );
         }
 
         true
@@ -1014,6 +1203,27 @@ impl AeonTimelineSink {
                 body: response.body,
             });
         }
+        let policy = match &self.policy {
+            Ok(policy) => policy,
+            Err(error) => {
+                warn!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    url = %url,
+                    "AEON-IQ timeline egress policy is misconfigured; failing open"
+                );
+                return None;
+            }
+        };
+        if let Err(error) = policy.check_url(&url) {
+            warn!(
+                target: "nexus.aeon",
+                error = %error,
+                url = %url,
+                "AEON-IQ timeline egress denied by policy"
+            );
+            return None;
+        }
 
         match self
             .http
@@ -1087,7 +1297,19 @@ impl AeonTimelineSink {
 struct TimelineSpoolRecord {
     created_at: DateTime<Utc>,
     agent_id: String,
+    #[serde(default)]
+    event_id: Option<String>,
     event: TimelineEventBody,
+}
+
+fn timeline_record_event_id(record: &TimelineSpoolRecord) -> String {
+    record.event_id.clone().unwrap_or_else(|| {
+        timeline_event_id(
+            &record.agent_id,
+            record.event.session_id.as_deref(),
+            &record.event,
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1449,17 +1671,18 @@ fn hex_nibble(b: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::daemon::NexusExecutionEvent;
     use serde_json::Value;
     use std::ffi::OsString;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
     static AEON_ENV_LOCK: Mutex<()> = Mutex::new(());
-    const AEON_ENV_VARS: [&str; 8] = [
+    static EGRESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+    const AEON_ENV_VARS: [&str; 11] = [
         ENABLED_ENV,
         BASE_URL_ENV,
         AGENT_ID_ENV,
@@ -1468,7 +1691,11 @@ mod tests {
         MANAGEMENT_KEY_ENV,
         HMAC_KEY_ENV,
         TIMELINE_SPOOL_ENV,
+        AEON_REQUIRED_ENV,
+        "NEXUS_EGRESS_ALLOWLIST",
+        "NEXUS_EGRESS_ALLOW_PRIVATE",
     ];
+    const EGRESS_ENV_VARS: [&str; 2] = ["NEXUS_EGRESS_ALLOWLIST", "NEXUS_EGRESS_ALLOW_PRIVATE"];
 
     #[test]
     fn default_config_is_disabled_local_proxy() {
@@ -1624,12 +1851,73 @@ mod tests {
 
     #[tokio::test]
     async fn aeon_memory_search_returns_empty_on_connection_refusal() {
-        let client =
-            AeonMemoryClient::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")));
+        let client = with_clean_egress_env(|| {
+            AeonMemoryClient::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")))
+                .unwrap()
+        });
 
         let hits = client.search("trap recovery", 2).await;
 
         assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aeon_memory_client_does_not_follow_http_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let final_server_hit = Arc::new(AtomicBool::new(false));
+        let final_server_flag = Arc::clone(&final_server_hit);
+
+        let final_server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let final_addr = final_server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = final_server.accept().await else {
+                return;
+            };
+            final_server_flag.store(true, Ordering::SeqCst);
+            let mut buffer = [0u8; 2048];
+            let _ = socket.read(&mut buffer).await;
+
+            let response = [
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Content-Length: 22\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                r#"{"results":[{"id":"x"}]}"#,
+            ]
+            .concat();
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let redirect_server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_server.local_addr().unwrap();
+        let redirect_target = format!("http://127.0.0.1:{}/final", final_addr.port());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = redirect_server.accept().await else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = socket.read(&mut buffer).await;
+
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect_target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let client = with_clean_egress_env(|| {
+            AeonMemoryClient::from_config(&test_config(
+                &format!("http://127.0.0.1:{}", redirect_addr.port()),
+                Some("mgmt-key"),
+            ))
+            .unwrap()
+        });
+
+        let hits = client.search("query", 1).await;
+
+        assert!(hits.is_empty());
+        assert!(!final_server_hit.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1709,9 +1997,78 @@ mod tests {
         };
         let configured = test_config("http://aeon.test", Some("mgmt-key"));
 
-        assert!(AeonMemoryClient::from_enabled_config(&disabled).is_none());
-        assert!(AeonMemoryClient::from_enabled_config(&missing_key).is_none());
-        assert!(AeonMemoryClient::from_enabled_config(&configured).is_some());
+        assert!(AeonMemoryClient::from_enabled_config(&disabled)
+            .unwrap()
+            .is_none());
+        assert!(AeonMemoryClient::from_enabled_config(&missing_key)
+            .unwrap()
+            .is_none());
+        with_clean_aeon_env(|| {
+            assert!(AeonMemoryClient::from_enabled_config(&configured)
+                .unwrap()
+                .is_some());
+        });
+    }
+
+    #[test]
+    fn aeon_memory_client_invalid_egress_private_setting_fails_openly() {
+        with_clean_egress_env(|| {
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            assert!(AeonMemoryClient::from_config(&test_config(
+                "http://127.0.0.1:1",
+                Some("mgmt-key")
+            ))
+            .is_err());
+        });
+    }
+
+    #[test]
+    fn aeon_memory_client_from_enabled_config_reports_invalid_egress() {
+        with_clean_egress_env(|| {
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            assert!(AeonMemoryClient::from_enabled_config(&test_config(
+                "http://127.0.0.1:1",
+                Some("mgmt-key")
+            ))
+            .is_err());
+        });
+    }
+
+    #[test]
+    fn init_optional_aeon_degrades_invalid_config() {
+        with_clean_aeon_env(|| {
+            std::env::set_var("NEXUS_AEON_ENABLED", "true");
+            std::env::set_var("NEXUS_AEON_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEXUS_AEON_MANAGEMENT_KEY", "management-key");
+            std::env::set_var(
+                "NEXUS_AEON_HMAC_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            let config = AeonConfig::from_env().unwrap();
+            assert!(init_optional_aeon(&config).is_none());
+        });
+    }
+
+    #[test]
+    fn try_init_required_aeon_fails_on_invalid_config() {
+        with_clean_aeon_env(|| {
+            std::env::set_var("NEXUS_AEON_ENABLED", "true");
+            std::env::set_var("NEXUS_AEON_REQUIRED", "true");
+            std::env::set_var("NEXUS_AEON_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEXUS_AEON_MANAGEMENT_KEY", "management-key");
+            std::env::set_var(
+                "NEXUS_AEON_HMAC_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            let config = AeonConfig::from_env().unwrap();
+            assert!(try_init_required_aeon(&config).is_err());
+        });
     }
 
     fn test_config(base_url: &str, management_key: Option<&str>) -> AeonConfig {
@@ -1749,16 +2106,18 @@ mod tests {
         let response_body = response_body.to_string();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_for_responder = Arc::clone(&captured);
-        let client = AeonMemoryClient::with_test_responder(
-            &test_config("http://aeon.test", management_key),
-            Arc::new(move |request| {
-                captured_for_responder.lock().unwrap().push(request);
-                TestHttpResponse {
-                    status,
-                    body: response_body.clone(),
-                }
-            }),
-        );
+        let client = with_clean_aeon_env(|| {
+            AeonMemoryClient::with_test_responder(
+                &test_config("http://aeon.test", management_key),
+                Arc::new(move |request| {
+                    captured_for_responder.lock().unwrap().push(request);
+                    TestHttpResponse {
+                        status,
+                        body: response_body.clone(),
+                    }
+                }),
+            )
+        });
         (client, captured)
     }
 
@@ -1768,9 +2127,12 @@ mod tests {
         requests.remove(0)
     }
 
-    fn with_clean_aeon_env(test: impl FnOnce() + std::panic::UnwindSafe) {
-        let _guard = AEON_ENV_LOCK.lock().unwrap();
-        let saved: [(&str, Option<OsString>); 8] =
+    fn with_clean_aeon_env<R>(test: impl FnOnce() -> R + std::panic::UnwindSafe) -> R {
+        let _guard = AEON_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _egress_guard = EGRESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let saved: [(&str, Option<OsString>); 11] =
             AEON_ENV_VARS.map(|name| (name, std::env::var_os(name)));
 
         for name in AEON_ENV_VARS {
@@ -1786,8 +2148,40 @@ mod tests {
             }
         }
 
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
+        match result {
+            Ok(value) => value,
+            Err(payload) => {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
+    pub(crate) fn with_clean_egress_env<R>(test: impl FnOnce() -> R + std::panic::UnwindSafe) -> R {
+        let _guard = AEON_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _egress_guard = EGRESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let saved: [(&str, Option<OsString>); 2] =
+            EGRESS_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in EGRESS_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => {
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 
@@ -1939,9 +2333,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aeon_timeline_post_json_denies_blocklisted_urls() {
+        let sink = with_clean_egress_env(|| {
+            AeonTimelineSink::from_config(&test_config("http://aeon.test", Some("mgmt-key")))
+                .unwrap()
+        });
+        let blocked_url =
+            reqwest::Url::parse("http://169.254.169.254/api/v1/agents/agent-1/timeline").unwrap();
+
+        let response = sink
+            .post_json(blocked_url, "mgmt-key", &serde_json::json!({}))
+            .await;
+
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_offline_mode_ignores_invalid_egress_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("timeline.jsonl");
+        let sink = with_clean_egress_env(|| {
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")))
+                .unwrap()
+                .with_mode(TimelineDeliveryMode::Offline)
+                .with_spool_path(&spool)
+        });
+        let event = [NexusExecutionEvent::ProofCapsuleEmitted {
+            capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
+        }];
+
+        let status = sink.deliver("agent-1", Some("session-1"), &event).await;
+
+        assert_eq!(status, TimelineDeliveryStatus::FireAndForget);
+        let contents = std::fs::read_to_string(&spool).unwrap();
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn aeon_timeline_sink_transport_error_fails_open() {
-        let sink =
-            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")));
+        let sink = with_clean_egress_env(|| {
+            AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")))
+                .unwrap()
+        });
         let event = [NexusExecutionEvent::CapabilityDenied {
             denied_category: "read:/secret".to_string(),
         }];
@@ -1953,9 +2393,11 @@ mod tests {
 
     #[tokio::test]
     async fn aeon_timeline_sink_attested_mode_reports_required_failure() {
-        let sink =
+        let sink = with_clean_egress_env(|| {
             AeonTimelineSink::from_config(&test_config("http://127.0.0.1:1", Some("mgmt-key")))
-                .with_mode(TimelineDeliveryMode::Attested);
+                .unwrap()
+                .with_mode(TimelineDeliveryMode::Attested)
+        });
         let event = [NexusExecutionEvent::CapabilityDenied {
             denied_category: "read:/secret".to_string(),
         }];
@@ -1969,10 +2411,12 @@ mod tests {
     async fn aeon_timeline_replay_removes_delivered_events() {
         let tmp = tempfile::tempdir().unwrap();
         let spool = tmp.path().join("timeline.jsonl");
-        let offline =
+        let offline = with_clean_egress_env(|| {
             AeonTimelineSink::from_config(&test_config("http://aeon.test", Some("mgmt-key")))
+                .unwrap()
                 .with_mode(TimelineDeliveryMode::Offline)
-                .with_spool_path(&spool);
+                .with_spool_path(&spool)
+        });
         let event = [NexusExecutionEvent::ProofCapsuleEmitted {
             capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
         }];
@@ -2006,6 +2450,63 @@ mod tests {
             }
         );
         assert_eq!(second, TimelineReplayReport::default());
+        assert_eq!(captured.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_spool_is_idempotent_for_duplicate_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("timeline.jsonl");
+        let offline = with_clean_egress_env(|| {
+            AeonTimelineSink::from_config(&test_config("http://aeon.test", Some("mgmt-key")))
+                .unwrap()
+                .with_mode(TimelineDeliveryMode::Offline)
+                .with_spool_path(&spool)
+        });
+        let event = [NexusExecutionEvent::ProofCapsuleEmitted {
+            capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap(),
+        }];
+
+        let first = offline.deliver("agent-1", Some("session-1"), &event).await;
+        let second = offline.deliver("agent-1", Some("session-1"), &event).await;
+
+        assert_eq!(first, TimelineDeliveryStatus::FireAndForget);
+        assert_eq!(second, TimelineDeliveryStatus::FireAndForget);
+        let contents = std::fs::read_to_string(&spool).unwrap();
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count(),
+            1
+        );
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let online = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        )
+        .with_spool_path(&spool);
+
+        let first_replay = online.replay_spooled_events("agent-1", None).await;
+        let second_replay = online.replay_spooled_events("agent-1", None).await;
+
+        assert_eq!(
+            first_replay,
+            TimelineReplayReport {
+                delivered: 1,
+                failed: 0,
+                skipped: 0,
+            }
+        );
+        assert_eq!(second_replay, TimelineReplayReport::default());
         assert_eq!(captured.lock().unwrap().len(), 1);
     }
 

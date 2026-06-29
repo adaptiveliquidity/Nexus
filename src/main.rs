@@ -423,12 +423,12 @@ fn run_aeon_replay_events(agent_id: &str, since: Option<&str>) -> anyhow::Result
         Some(value) => Some(parse_rfc3339_utc(value)?),
         None => None,
     };
-    let Some(sink) = nexus::aeon::AeonConfig::from_env()
-        .ok()
-        .and_then(|config| nexus::aeon::AeonTimelineSink::from_enabled_config(&config))
-    else {
-        println!("timeline replay skipped: AEON-IQ sink is not configured");
-        return Ok(());
+    let sink = match nexus::aeon::init_optional_aeon_timeline_from_env() {
+        Some(sink) => sink,
+        None => {
+            println!("timeline replay skipped: AEON-IQ sink is not configured");
+            return Ok(());
+        }
     };
     let rt = tokio::runtime::Runtime::new()?;
     let report = rt.block_on(sink.replay_spooled_events(agent_id, since));

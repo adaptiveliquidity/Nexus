@@ -66,7 +66,7 @@ rmcp = { version = "1.7", features = ["server", "transport-io"] }
 # Optional HTTP transport stack for rmcp streamable-http server mode.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
 hyper = { version = "1", default-features = false, features = ["http1", "server"], optional = true }
-tower = { version = "0.4", default-features = false, optional = true }
+tower = { version = "0.4", default-features = false, features = ["util"], optional = true }
 
 # Optional, only with `ai-recovery` feature.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
