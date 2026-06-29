@@ -52,7 +52,8 @@ impl EgressPolicy {
                     "1" | "true" => true,
                     _ => {
                         return Err(NexusError::ConfigError(
-                            "NEXUS_EGRESS_ALLOW_PRIVATE must be one of: 0, 1, true, false".to_string(),
+                            "NEXUS_EGRESS_ALLOW_PRIVATE must be one of: 0, 1, true, false"
+                                .to_string(),
                         ));
                     }
                 }
@@ -91,7 +92,9 @@ impl EgressPolicy {
         let host = match url.host_str() {
             Some(host) => host,
             None => {
-                return Err(NexusError::EgressDenied("URL does not include a host".to_string()));
+                return Err(NexusError::EgressDenied(
+                    "URL does not include a host".to_string(),
+                ));
             }
         };
         let host = host.trim().to_ascii_lowercase();
@@ -124,7 +127,10 @@ impl EgressPolicy {
             )));
         }
 
-        if addresses.into_iter().any(|address| self.is_blocked_address(address.ip())) {
+        if addresses
+            .into_iter()
+            .any(|address| self.is_blocked_address(address.ip()))
+        {
             return Err(NexusError::EgressDenied(format!(
                 "Egress denied to '{}' because destination is restricted",
                 url
@@ -155,7 +161,9 @@ mod tests {
     fn deny_metadata_and_private_destinations() {
         let policy = EgressPolicy::default();
 
-        assert!(policy.check_url(&parse_url("http://169.254.169.254/")).is_err());
+        assert!(policy
+            .check_url(&parse_url("http://169.254.169.254/"))
+            .is_err());
         assert!(policy.check_url(&parse_url("http://127.0.0.1/")).is_err());
         assert!(policy.check_url(&parse_url("http://10.0.0.1/")).is_err());
         assert!(policy.check_url(&parse_url("http://192.168.1.1/")).is_err());
@@ -166,7 +174,9 @@ mod tests {
     fn allow_public_ip_destination() {
         let policy = EgressPolicy::default();
 
-        assert!(policy.check_url(&parse_url("http://93.184.216.34/")).is_ok());
+        assert!(policy
+            .check_url(&parse_url("http://93.184.216.34/"))
+            .is_ok());
     }
 
     #[test]

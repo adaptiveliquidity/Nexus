@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::{NexusError, Result};
 use crate::security::EgressPolicy;
+use crate::{NexusError, Result};
 
 const ENABLED_ENV: &str = "NEXUS_AEON_ENABLED";
 const BASE_URL_ENV: &str = "NEXUS_AEON_BASE_URL";
