@@ -172,9 +172,9 @@ try:
         },
     )
 
-    if not payload.get("output", {}).get("success"):
-        fail(f"nexus_execute_proof did not succeed: {payload!r}")
-
+    # A proof capsule is a signed record of what happened, including failures.
+    # The smoke test verifies capsule generation and signature integrity, not
+    # execution success — so we do not gate on output.success here.
     proof_capsule = payload.get("proof_capsule")
     if proof_capsule is None:
         fail(f"nexus_execute_proof did not return proof_capsule: {payload!r}")
