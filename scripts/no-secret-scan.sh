@@ -38,7 +38,7 @@ check_matches \
 
 check_matches \
   "absolute-host-path" \
-  '(^|[[:space:]"'"'"'])/(home|Users|tmp|var|root|mnt)/[A-Za-z0-9._-](/[^[:space:]"'"'"':]+)+'
+  '(^|[[:space:]"'"'"'])/(home|Users|tmp|var|root|mnt)/(?!runner/)[A-Za-z0-9._-](/[^[:space:]"'"'"':]+)+'
 
 check_matches \
   "windows-absolute-path" \

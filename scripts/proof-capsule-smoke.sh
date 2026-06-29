@@ -43,7 +43,7 @@ if [ ! -f "$WASM_PATH" ]; then
   exit 1
 fi
 
-echo "[proof-capsule-smoke] generating proof capsule from $WASM_PATH"
+echo "[proof-capsule-smoke] generating proof capsule from $(basename "$WASM_PATH")"
 
 python3 - "$ROOT/target/debug/nexus-mcp" "$WASM_PATH" "$OUTPUT_FILE" <<'PY'
 import json
@@ -117,7 +117,7 @@ proc = subprocess.Popen(
     cwd=os.path.dirname(wasm_path),
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,  # avoid pipe deadlock if child logs heavily to stderr
     text=True,
     env=env,
 )
