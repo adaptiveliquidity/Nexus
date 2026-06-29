@@ -329,7 +329,19 @@ impl NexusHypervisor {
         let proof_signing_key = config.proof_signing.signing_key()?;
         #[cfg(feature = "aeon-memory")]
         let aeon_memory = match config.aeon_config.as_ref() {
-            Some(aeon_config) => crate::aeon::AeonMemoryClient::from_enabled_config(aeon_config)?,
+            Some(aeon_config) => {
+                match crate::aeon::AeonMemoryClient::from_enabled_config(aeon_config) {
+                    Ok(aeon_memory) => aeon_memory,
+                    Err(error) => {
+                        tracing::error!(
+                            target: "nexus.aeon",
+                            error = %error,
+                            "AEON optional construction failed; continuing with AEON disabled"
+                        );
+                        None
+                    }
+                }
+            }
             None => None,
         };
 
@@ -2122,6 +2134,43 @@ fn is_hex_digest(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "aeon-memory")]
+    use std::{ffi::OsString, sync::Mutex};
+
+    #[cfg(feature = "aeon-memory")]
+    static EGRESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "aeon-memory")]
+    const EGRESS_ENV_VARS: [&str; 2] = ["NEXUS_EGRESS_ALLOWLIST", "NEXUS_EGRESS_ALLOW_PRIVATE"];
+
+    #[cfg(feature = "aeon-memory")]
+    fn with_clean_egress_env<R>(test: impl FnOnce() -> R + std::panic::UnwindSafe) -> R {
+        let _guard = EGRESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let saved: [(&str, Option<OsString>); 2] =
+            EGRESS_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in EGRESS_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_successful_execution() {
@@ -2338,6 +2387,23 @@ mod tests {
             management_key: management_key.map(str::to_string),
             hmac_key: None,
         }
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[test]
+    fn hypervisor_new_succeeds_when_optional_aeon_egress_config_is_invalid() {
+        with_clean_egress_env(|| {
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            let config = HypervisorConfig {
+                aeon_config: Some(aeon_test_config(Some("mgmt-key"))),
+                ..HypervisorConfig::default()
+            };
+
+            let hypervisor = NexusHypervisor::new(config).unwrap();
+
+            assert!(hypervisor.aeon_memory.is_none());
+        });
     }
 
     #[cfg(feature = "aeon-memory")]
