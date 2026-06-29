@@ -44,6 +44,10 @@ pub enum NexusError {
     #[error("Capability denied: {0}")]
     CapabilityDenied(String),
 
+    /// Outbound egress destination was blocked by policy.
+    #[error("Egress denied: {0}")]
+    EgressDenied(String),
+
     /// Filesystem operation failed
     #[error("Filesystem error: {0}")]
     FilesystemError(String),
@@ -89,6 +93,7 @@ impl NexusError {
             NexusError::StateCorruption(_) => "STATE_CORRUPTION",
             NexusError::InvalidCapability(_) => "SECURITY_VIOLATION",
             NexusError::CapabilityDenied(_) => "CAPABILITY_DENIED",
+            NexusError::EgressDenied(_) => "EGRESS_DENIED",
             NexusError::FilesystemError(_) => "FILESYSTEM_ERROR",
             NexusError::HealthValidationFailed(_) => "HEALTH_FAILURE",
             NexusError::ResourceExhausted(_) => "RESOURCE_EXHAUSTED",

@@ -124,6 +124,15 @@ For local debugging, you can enable full proof capsule payloads:
 export NEXUS_MCP_RETURN_FULL_PROOF=1
 ```
 
+## AEON Egress Guard
+
+Configure outbound AEON egress policy with the following environment variables:
+
+- `NEXUS_EGRESS_ALLOWLIST`: comma-separated hostnames that are always allowed for
+  AEON requests, even if they resolve to otherwise blocked ranges.
+- `NEXUS_EGRESS_ALLOW_PRIVATE`: when set to `1` or `true` (case-insensitive),
+  allows private and link-local address ranges for AEON egress.
+
 ```bash
 export NEXUS_MCP_CAPABILITY_ALLOWLIST='[{"type":"read_file","path":"/tmp/nexus-demo"}]'
 ```

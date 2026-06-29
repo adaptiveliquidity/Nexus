@@ -17,6 +17,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{NexusError, Result};
+use crate::security::EgressPolicy;
 
 const ENABLED_ENV: &str = "NEXUS_AEON_ENABLED";
 const BASE_URL_ENV: &str = "NEXUS_AEON_BASE_URL";
@@ -256,6 +257,7 @@ pub struct MemorySearchOutcome {
 pub struct AeonMemoryClient {
     http: reqwest::Client,
     base_url: String,
+    policy: EgressPolicy,
     agent_id: String,
     management_key: Option<String>,
     #[cfg(test)]
@@ -264,6 +266,20 @@ pub struct AeonMemoryClient {
 
 impl AeonMemoryClient {
     pub fn from_config(config: &AeonConfig) -> Self {
+        let mut policy = EgressPolicy::from_env().unwrap_or_else(|error| {
+            warn!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON-IQ egress policy configuration invalid; defaulting to deny-by-default policy"
+            );
+            EgressPolicy::default()
+        });
+        if let Ok(base_url) = reqwest::Url::parse(&config.base_url) {
+            if let Some(host) = base_url.host_str() {
+                policy.allow_host(host);
+            }
+        }
+
         let http = reqwest::ClientBuilder::new()
             .timeout(Duration::from_millis(config.timeout_ms))
             .build()
@@ -279,6 +295,7 @@ impl AeonMemoryClient {
         Self {
             http,
             base_url: config.base_url.trim_end_matches('/').to_string(),
+            policy,
             agent_id: config.agent_id.clone(),
             management_key: config.management_key.clone(),
             #[cfg(test)]
@@ -475,6 +492,15 @@ impl AeonMemoryClient {
                 body: response.body,
             });
         }
+        if let Err(error) = self.policy.check_url(&url) {
+            warn!(
+                target: "nexus.aeon",
+                error = %error,
+                url = %url,
+                "AEON-IQ egress denied by policy"
+            );
+            return None;
+        }
 
         match self
             .http
@@ -522,6 +548,15 @@ impl AeonMemoryClient {
                 status: response.status,
                 body: response.body,
             });
+        }
+        if let Err(error) = self.policy.check_url(&url) {
+            warn!(
+                target: "nexus.aeon",
+                error = %error,
+                url = %url,
+                "AEON-IQ egress denied by policy"
+            );
+            return None;
         }
 
         match self

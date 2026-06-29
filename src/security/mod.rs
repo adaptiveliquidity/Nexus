@@ -4,11 +4,13 @@
 
 pub mod capability;
 pub mod denial;
+pub mod egress;
 #[cfg(feature = "aeon-memory")]
 pub mod negotiator;
 pub mod url_guard;
 
 pub use capability::{Capability, CapabilityManager, CapabilityToken};
+pub use egress::EgressPolicy;
 pub use denial::DenialReason;
 #[cfg(feature = "aeon-memory")]
 pub use negotiator::{negotiate_capability_denial, NegotiationOutcome, MAX_NEGOTIATION_ROUNDS};
