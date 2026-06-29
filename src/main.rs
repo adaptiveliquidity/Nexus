@@ -423,8 +423,14 @@ fn run_aeon_replay_events(agent_id: &str, since: Option<&str>) -> anyhow::Result
         Some(value) => Some(parse_rfc3339_utc(value)?),
         None => None,
     };
-    let sink = match nexus::aeon::init_optional_aeon_timeline_from_env() {
-        Some(sink) => sink,
+    let sink = match nexus::aeon::AeonConfig::from_env().ok() {
+        Some(config) => match nexus::aeon::AeonTimelineSink::from_enabled_config(&config) {
+            Ok(Some(sink)) => sink,
+            Ok(None) | Err(_) => {
+                println!("timeline replay skipped: AEON-IQ sink is not configured");
+                return Ok(());
+            }
+        },
         None => {
             println!("timeline replay skipped: AEON-IQ sink is not configured");
             return Ok(());
