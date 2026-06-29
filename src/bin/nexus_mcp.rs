@@ -1037,12 +1037,12 @@ impl NexusMcpServer {
             }
         }
 
-        let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+        let aeon_config = nexus::aeon::init_optional_aeon_config_from_env();
         let memory_client = if params.memory_query.is_some() {
-            match aeon_config.as_ref().filter(|c| c.hmac_key.is_some()) {
-                Some(config) => nexus::aeon::AeonMemoryClient::from_enabled_config(config)?,
-                None => None,
-            }
+            aeon_config
+                .as_ref()
+                .filter(|c| c.hmac_key.is_some())
+                .and_then(nexus::aeon::init_optional_aeon)
         } else {
             None
         };
@@ -1272,13 +1272,9 @@ impl NexusMcpServer {
             .as_ref()
             .map(|agent_id| format!("/agents/{agent_id}/timeline"));
         let timeline_delivery_status = if let Some(agent_id) = params.aeon_agent_id.clone() {
-            let sink = match nexus::aeon::AeonConfig::from_env() {
-                Ok(config) => match nexus::aeon::AeonTimelineSink::from_enabled_config(&config) {
-                    Ok(Some(sink)) => Some(sink),
-                    Ok(None) | Err(_) => None,
-                },
-                Err(_) => None,
-            };
+            let sink = nexus::aeon::init_optional_aeon_config_from_env()
+                .as_ref()
+                .and_then(nexus::aeon::init_optional_aeon_timeline_from_config);
             match sink {
                 Some(sink) => {
                     let events = events.clone();
@@ -1937,7 +1933,7 @@ impl NexusMcpServer {
         &self,
         context: NexusIqDenialContext,
     ) -> Result<NexusIqExecuteResponse> {
-        let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+        let aeon_config = nexus::aeon::init_optional_aeon_config_from_env();
         let events = vec![nexus::daemon::NexusExecutionEvent::CapabilityDenied {
             denied_category: "capability_denied".to_string(),
         }];
@@ -2475,12 +2471,10 @@ async fn deliver_nexus_iq_timeline(
     mode: nexus::aeon::TimelineDeliveryMode,
     events: Vec<nexus::daemon::NexusExecutionEvent>,
 ) -> nexus::aeon::TimelineDeliveryStatus {
-    let Some(sink) = config.and_then(|config| {
-        match nexus::aeon::AeonTimelineSink::from_enabled_config(config) {
-            Ok(Some(sink)) => Some(sink.with_mode(mode)),
-            Ok(None) | Err(_) => None,
-        }
-    }) else {
+    let Some(sink) = config
+        .and_then(nexus::aeon::init_optional_aeon_timeline_from_config)
+        .map(|sink| sink.with_mode(mode))
+    else {
         return match mode {
             nexus::aeon::TimelineDeliveryMode::Attested => {
                 nexus::aeon::TimelineDeliveryStatus::RequiredButFailed
@@ -3121,7 +3115,7 @@ async fn main() -> Result<()> {
     tracing::info!("Starting Nexus MCP server");
 
     #[cfg(feature = "aeon-memory")]
-    let aeon_config = nexus::aeon::AeonConfig::from_env().ok();
+    let aeon_config = nexus::aeon::init_optional_aeon_config_from_env();
     #[cfg(feature = "aeon-memory")]
     if matches!(aeon_config.as_ref(), Some(config) if config.enabled && config.hmac_key.is_none()) {
         eprintln!("[nexus] SECURITY WARNING: aeon-memory is active but NEXUS_AEON_HMAC_KEY is not set — memory_digest will use unauthenticated SHA-256 (forgeable). Set NEXUS_AEON_HMAC_KEY (>=32 bytes) in production.");
@@ -3182,6 +3176,44 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "aeon-memory")]
+    static NEXUS_IQ_AEON_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(feature = "aeon-memory")]
+    const NEXUS_IQ_AEON_ENV_VARS: [&str; 6] = [
+        "NEXUS_AEON_BASE_URL",
+        "NEXUS_AEON_ENABLED",
+        "NEXUS_AEON_HMAC_KEY",
+        "NEXUS_AEON_MANAGEMENT_KEY",
+        "NEXUS_AEON_REQUIRED",
+        "NEXUS_EGRESS_ALLOW_PRIVATE",
+    ];
+
+    #[cfg(feature = "aeon-memory")]
+    fn with_clean_nexus_iq_aeon_env(test: impl FnOnce() + std::panic::UnwindSafe) {
+        let _guard = NEXUS_IQ_AEON_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let saved: [(&str, Option<std::ffi::OsString>); 6] =
+            NEXUS_IQ_AEON_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in NEXUS_IQ_AEON_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     #[cfg(feature = "mcp-http")]
     static MCP_HTTP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "mcp-http")]
@@ -3229,6 +3261,43 @@ mod tests {
         let response = server.do_get_stats(GetStatsParams {}).unwrap();
 
         assert_eq!(response.telemetry.total_executions, 0);
+    }
+
+    #[cfg(feature = "aeon-memory")]
+    #[tokio::test]
+    async fn nexus_iq_execute_with_invalid_optional_aeon_config_is_not_rejected() {
+        with_clean_nexus_iq_aeon_env(|| {
+            std::env::set_var("NEXUS_AEON_ENABLED", "true");
+            std::env::set_var("NEXUS_AEON_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEXUS_AEON_MANAGEMENT_KEY", "management-key");
+            std::env::set_var(
+                "NEXUS_AEON_HMAC_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+        });
+
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new(hypervisor).unwrap();
+        let wasm_bytes = wat::parse_str(r#"(module (func (export "_start")))"#).unwrap();
+        let tool_wasm =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wasm_bytes);
+        let response = server
+            .do_nexus_iq_execute(NexusIqExecuteParams {
+                tool_name: "aeon-query".to_string(),
+                tool_wasm,
+                input: "{}".to_string(),
+                aeon_agent_id: "agent-1".to_string(),
+                aeon_session_id: Some("session-1".to_string()),
+                attestation_mode: Some("advisory".to_string()),
+                required_capabilities: None,
+                memory_query: Some("offsite memory query".to_string()),
+                memory_limit: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!response.denied);
     }
 
     #[test]

@@ -142,7 +142,7 @@ impl LLMPolicy {
         aeon: AeonConfig,
     ) -> std::result::Result<Self, crate::NexusError> {
         let mut policy = Self::new(provider, budget);
-        policy.aeon_memory = AeonMemoryClient::from_enabled_config(&aeon)?;
+        policy.aeon_memory = crate::aeon::try_init_required_aeon(&aeon)?;
         policy.aeon = Some(aeon);
         Ok(policy)
     }

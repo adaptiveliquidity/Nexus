@@ -5,6 +5,7 @@
 //! the AEON-IQ management API key is read only from explicit `NEXUS_AEON_*`
 //! environment configuration.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::security::EgressPolicy;
@@ -26,6 +27,7 @@ const SESSION_ID_ENV: &str = "NEXUS_AEON_SESSION_ID";
 const TIMEOUT_MS_ENV: &str = "NEXUS_AEON_TIMEOUT_MS";
 const MANAGEMENT_KEY_ENV: &str = "NEXUS_AEON_MANAGEMENT_KEY";
 const HMAC_KEY_ENV: &str = "NEXUS_AEON_HMAC_KEY";
+const AEON_REQUIRED_ENV: &str = "NEXUS_AEON_REQUIRED";
 const TIMELINE_SPOOL_ENV: &str = "NEXUS_AEON_TIMELINE_SPOOL";
 const TIMELINE_MAX_ATTEMPTS: usize = 3;
 static MISSING_MANAGEMENT_KEY_WARN: Once = Once::new();
@@ -126,6 +128,109 @@ impl AeonConfig {
             self.base_url.trim_end_matches('/')
         )
     }
+}
+
+fn aeon_required() -> bool {
+    match std::env::var(AEON_REQUIRED_ENV) {
+        Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            debug!(
+                target: "nexus.aeon",
+                "NEXUS_AEON_REQUIRED is not valid UTF-8; treating AEON as optional"
+            );
+            false
+        }
+        Err(std::env::VarError::NotPresent) => false,
+    }
+}
+
+pub fn init_optional_aeon(config: &AeonConfig) -> Option<AeonMemoryClient> {
+    try_init_required_aeon(config).unwrap_or_default()
+}
+
+pub fn try_init_required_aeon(config: &AeonConfig) -> Result<Option<AeonMemoryClient>> {
+    match AeonMemoryClient::from_enabled_config(config) {
+        Ok(memory) => Ok(memory),
+        Err(error) if aeon_required() => Err(error),
+        Err(error) => {
+            error!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON optional initialization failed; continuing with AEON disabled"
+            );
+            Ok(None)
+        }
+    }
+}
+
+pub fn init_optional_aeon_config_from_env() -> Option<AeonConfig> {
+    try_init_required_aeon_config_from_env().unwrap_or_default()
+}
+
+pub fn try_init_required_aeon_config_from_env() -> Result<Option<AeonConfig>> {
+    match AeonConfig::from_env() {
+        Ok(config) => Ok(Some(config)),
+        Err(error) if aeon_required() => Err(error),
+        Err(error) => {
+            error!(
+                target: "nexus.aeon",
+                error = %error,
+                "AEON optional configuration from_env failed; continuing with AEON disabled"
+            );
+            Ok(None)
+        }
+    }
+}
+
+pub fn init_optional_aeon_timeline_from_config(config: &AeonConfig) -> Option<AeonTimelineSink> {
+    try_init_required_aeon_timeline_from_config(config).unwrap_or_default()
+}
+
+pub fn try_init_required_aeon_timeline_from_config(
+    config: &AeonConfig,
+) -> Result<Option<AeonTimelineSink>> {
+    match try_init_required_aeon(config)? {
+        Some(client) => Ok(Some(client.timeline_sink()?)),
+        None => Ok(None),
+    }
+}
+
+pub fn init_optional_aeon_timeline_from_env() -> Option<AeonTimelineSink> {
+    try_init_required_aeon_timeline_from_env().unwrap_or_default()
+}
+
+pub fn try_init_required_aeon_timeline_from_env() -> Result<Option<AeonTimelineSink>> {
+    match try_init_required_aeon_config_from_env()? {
+        Some(config) => try_init_required_aeon_timeline_from_config(&config),
+        None => Ok(None),
+    }
+}
+
+#[derive(Serialize)]
+struct TimelineEventIdSeed<'a> {
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    event_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nexus_snapshot_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capsule_digest: Option<&'a str>,
+}
+
+fn timeline_event_id(
+    agent_id: &str,
+    session_id: Option<&str>,
+    event: &TimelineEventBody,
+) -> String {
+    let seed = TimelineEventIdSeed {
+        agent_id,
+        session_id,
+        event_type: &event.event_type,
+        nexus_snapshot_id: event.nexus_snapshot_id.as_deref(),
+        capsule_digest: event.capsule_digest.as_deref(),
+    };
+    sha256_hex(&serde_json::to_vec(&seed).expect("timeline event id seed must serialize"))
 }
 
 /// A single advisory AEON-IQ memory search result.
@@ -819,6 +924,7 @@ impl AeonTimelineSink {
 
         let mut report = TimelineReplayReport::default();
         let mut retained = Vec::new();
+        let mut seen_event_ids = HashSet::new();
 
         for line in content.lines().filter(|line| !line.trim().is_empty()) {
             let record = match serde_json::from_str::<TimelineSpoolRecord>(line) {
@@ -834,6 +940,12 @@ impl AeonTimelineSink {
                     continue;
                 }
             };
+
+            let event_id = timeline_record_event_id(&record);
+            if !seen_event_ids.insert(event_id) {
+                report.skipped += 1;
+                continue;
+            }
 
             if record.agent_id != agent_id || since.is_some_and(|since| record.created_at < since) {
                 report.skipped += 1;
@@ -870,11 +982,60 @@ impl AeonTimelineSink {
         session_id: Option<&str>,
         events: &[crate::daemon::NexusExecutionEvent],
     ) -> bool {
-        let records = events.iter().map(|event| TimelineSpoolRecord {
-            created_at: Utc::now(),
-            agent_id: agent_id.to_string(),
-            event: TimelineEventBody::from_event(session_id, event),
-        });
+        let records = events
+            .iter()
+            .map(|event| {
+                let event = TimelineEventBody::from_event(session_id, event);
+                TimelineSpoolRecord {
+                    created_at: Utc::now(),
+                    event_id: Some(timeline_event_id(agent_id, session_id, &event)),
+                    agent_id: agent_id.to_string(),
+                    event,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let existing_event_ids = match tokio::fs::read_to_string(&self.spool_path).await {
+            Ok(content) => {
+                let mut ids = HashSet::new();
+                for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                    let record = match serde_json::from_str::<TimelineSpoolRecord>(line) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            debug!(
+                                target: "nexus.aeon",
+                                error = %error,
+                                "AEON-IQ timeline spool record parse failed while deduplicating; retaining line"
+                            );
+                            continue;
+                        }
+                    };
+                    ids.insert(timeline_record_event_id(&record));
+                }
+                ids
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+            Err(error) => {
+                debug!(
+                    target: "nexus.aeon",
+                    error = %error,
+                    "AEON-IQ timeline spool read failed; failing open"
+                );
+                return false;
+            }
+        };
+
+        let mut event_ids = existing_event_ids;
+        let mut records_to_append = Vec::with_capacity(records.len());
+        for record in records {
+            if event_ids.insert(timeline_record_event_id(&record)) {
+                records_to_append.push(record);
+            }
+        }
+
+        if records_to_append.is_empty() {
+            return true;
+        }
 
         if let Some(parent) = self.spool_path.parent() {
             if let Err(error) = tokio::fs::create_dir_all(parent).await {
@@ -904,7 +1065,7 @@ impl AeonTimelineSink {
             }
         };
 
-        for record in records {
+        for record in records_to_append {
             let mut bytes = match serde_json::to_vec(&record) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -933,7 +1094,6 @@ impl AeonTimelineSink {
                 error = %error,
                 "AEON-IQ timeline spool flush failed; failing open"
             );
-            return false;
         }
 
         true
@@ -1137,7 +1297,19 @@ impl AeonTimelineSink {
 struct TimelineSpoolRecord {
     created_at: DateTime<Utc>,
     agent_id: String,
+    #[serde(default)]
+    event_id: Option<String>,
     event: TimelineEventBody,
+}
+
+fn timeline_record_event_id(record: &TimelineSpoolRecord) -> String {
+    record.event_id.clone().unwrap_or_else(|| {
+        timeline_event_id(
+            &record.agent_id,
+            record.event.session_id.as_deref(),
+            &record.event,
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1499,7 +1671,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::daemon::NexusExecutionEvent;
     use serde_json::Value;
@@ -1510,7 +1682,7 @@ mod tests {
 
     static AEON_ENV_LOCK: Mutex<()> = Mutex::new(());
     static EGRESS_ENV_LOCK: Mutex<()> = Mutex::new(());
-    const AEON_ENV_VARS: [&str; 10] = [
+    const AEON_ENV_VARS: [&str; 11] = [
         ENABLED_ENV,
         BASE_URL_ENV,
         AGENT_ID_ENV,
@@ -1519,6 +1691,7 @@ mod tests {
         MANAGEMENT_KEY_ENV,
         HMAC_KEY_ENV,
         TIMELINE_SPOOL_ENV,
+        AEON_REQUIRED_ENV,
         "NEXUS_EGRESS_ALLOWLIST",
         "NEXUS_EGRESS_ALLOW_PRIVATE",
     ];
@@ -1863,6 +2036,41 @@ mod tests {
         });
     }
 
+    #[test]
+    fn init_optional_aeon_degrades_invalid_config() {
+        with_clean_aeon_env(|| {
+            std::env::set_var("NEXUS_AEON_ENABLED", "true");
+            std::env::set_var("NEXUS_AEON_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEXUS_AEON_MANAGEMENT_KEY", "management-key");
+            std::env::set_var(
+                "NEXUS_AEON_HMAC_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            let config = AeonConfig::from_env().unwrap();
+            assert!(init_optional_aeon(&config).is_none());
+        });
+    }
+
+    #[test]
+    fn try_init_required_aeon_fails_on_invalid_config() {
+        with_clean_aeon_env(|| {
+            std::env::set_var("NEXUS_AEON_ENABLED", "true");
+            std::env::set_var("NEXUS_AEON_REQUIRED", "true");
+            std::env::set_var("NEXUS_AEON_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("NEXUS_AEON_MANAGEMENT_KEY", "management-key");
+            std::env::set_var(
+                "NEXUS_AEON_HMAC_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+            std::env::set_var("NEXUS_EGRESS_ALLOW_PRIVATE", "not-a-bool");
+
+            let config = AeonConfig::from_env().unwrap();
+            assert!(try_init_required_aeon(&config).is_err());
+        });
+    }
+
     fn test_config(base_url: &str, management_key: Option<&str>) -> AeonConfig {
         AeonConfig {
             enabled: true,
@@ -1921,7 +2129,10 @@ mod tests {
 
     fn with_clean_aeon_env<R>(test: impl FnOnce() -> R + std::panic::UnwindSafe) -> R {
         let _guard = AEON_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        let saved: [(&str, Option<OsString>); 10] =
+        let _egress_guard = EGRESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let saved: [(&str, Option<OsString>); 11] =
             AEON_ENV_VARS.map(|name| (name, std::env::var_os(name)));
 
         for name in AEON_ENV_VARS {
@@ -1945,7 +2156,7 @@ mod tests {
         }
     }
 
-    fn with_clean_egress_env<R>(test: impl FnOnce() -> R + std::panic::UnwindSafe) -> R {
+    pub(crate) fn with_clean_egress_env<R>(test: impl FnOnce() -> R + std::panic::UnwindSafe) -> R {
         let _guard = AEON_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let _egress_guard = EGRESS_ENV_LOCK
             .lock()
@@ -2239,6 +2450,63 @@ mod tests {
             }
         );
         assert_eq!(second, TimelineReplayReport::default());
+        assert_eq!(captured.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_spool_is_idempotent_for_duplicate_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = tmp.path().join("timeline.jsonl");
+        let offline = with_clean_egress_env(|| {
+            AeonTimelineSink::from_config(&test_config("http://aeon.test", Some("mgmt-key")))
+                .unwrap()
+                .with_mode(TimelineDeliveryMode::Offline)
+                .with_spool_path(&spool)
+        });
+        let event = [NexusExecutionEvent::ProofCapsuleEmitted {
+            capsule_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").unwrap(),
+        }];
+
+        let first = offline.deliver("agent-1", Some("session-1"), &event).await;
+        let second = offline.deliver("agent-1", Some("session-1"), &event).await;
+
+        assert_eq!(first, TimelineDeliveryStatus::FireAndForget);
+        assert_eq!(second, TimelineDeliveryStatus::FireAndForget);
+        let contents = std::fs::read_to_string(&spool).unwrap();
+        assert_eq!(
+            contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count(),
+            1
+        );
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_responder = Arc::clone(&captured);
+        let online = AeonTimelineSink::with_test_responder(
+            &test_config("http://aeon.test", Some("mgmt-key")),
+            Arc::new(move |request| {
+                captured_for_responder.lock().unwrap().push(request);
+                TestHttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                }
+            }),
+        )
+        .with_spool_path(&spool);
+
+        let first_replay = online.replay_spooled_events("agent-1", None).await;
+        let second_replay = online.replay_spooled_events("agent-1", None).await;
+
+        assert_eq!(
+            first_replay,
+            TimelineReplayReport {
+                delivered: 1,
+                failed: 0,
+                skipped: 0,
+            }
+        );
+        assert_eq!(second_replay, TimelineReplayReport::default());
         assert_eq!(captured.lock().unwrap().len(), 1);
     }
 
