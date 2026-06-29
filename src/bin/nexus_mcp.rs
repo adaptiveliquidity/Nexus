@@ -2107,6 +2107,10 @@ const NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV: &str = "NEXUS_MCP_TENANT_MAX_STALE_SE
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_TENANT_MAX_STALE_SECS_DEFAULT: u64 = 60;
 #[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV: &str = "NEXUS_MCP_TENANT_DB_TIMEOUT_SECS";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_DEFAULT: u64 = 10;
+#[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM: u64 = 60;
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_TENANT_ID_FALLBACK: &str = "default";
@@ -2220,6 +2224,7 @@ struct PostgresTenantRegistry {
     default_rate_limit_rpm: u64,
     refresh_interval: Duration,
     max_stale: Duration,
+    refresh_timeout: Duration,
     pool: sqlx::PgPool,
     snapshot: Arc<arc_swap::ArcSwap<TenantSnapshotState>>,
 }
@@ -2473,6 +2478,7 @@ impl PostgresTenantRegistry {
         default_rate_limit_rpm: u64,
         refresh_interval: Duration,
         max_stale: Duration,
+        refresh_timeout: Duration,
     ) -> Result<Arc<Self>> {
         let connect_options = db_url
             .parse::<sqlx::postgres::PgConnectOptions>()
@@ -2487,6 +2493,7 @@ impl PostgresTenantRegistry {
             default_rate_limit_rpm,
             refresh_interval,
             max_stale,
+            refresh_timeout,
             pool,
             snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(TenantSnapshotState::empty())),
         }))
@@ -2536,6 +2543,14 @@ async fn build_postgres_tenant_registry() -> Result<Arc<TenantAuthState>> {
     }
     let refresh_interval = Duration::from_secs(refresh_interval_secs);
     let max_stale = Duration::from_secs(max_stale_secs);
+    let refresh_timeout_secs = parse_tenant_env_u64(
+        NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV,
+        NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_DEFAULT,
+    )?;
+    if refresh_timeout_secs == 0 {
+        anyhow::bail!("{NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV} must be greater than 0");
+    }
+    let refresh_timeout = Duration::from_secs(refresh_timeout_secs);
     let db_url = parse_tenant_db_url()?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -2548,10 +2563,12 @@ async fn build_postgres_tenant_registry() -> Result<Arc<TenantAuthState>> {
         NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
         refresh_interval,
         max_stale,
+        refresh_timeout,
     )?;
 
-    if refresh_postgres_tenants(&registry).await.is_err() {
-        tracing::error!("failed initial tenant registry refresh from PostgreSQL");
+    if let Err(error) = refresh_postgres_tenants(&registry).await {
+        tracing::error!("failed initial tenant registry refresh from PostgreSQL: {error}");
+        registry.clear_if_stale(Instant::now());
     }
 
     tokio::spawn(refresh_postgres_tenants_loop(registry.clone()));
@@ -2660,15 +2677,32 @@ async fn load_postgres_tenant_snapshot(
 }
 
 #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
-async fn refresh_postgres_tenants(registry: &PostgresTenantRegistry) -> Result<()> {
-    let snapshot = load_postgres_tenant_snapshot(
-        &registry.pool,
-        &registry.relation,
-        registry.default_rate_limit_rpm,
-    )
-    .await?;
+async fn refresh_postgres_tenants_with_loader<F>(
+    registry: &PostgresTenantRegistry,
+    timeout: Duration,
+    source: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<TenantSnapshot>>,
+{
+    let source_snapshot = tokio::time::timeout(timeout, source)
+        .await
+        .map_err(|_| anyhow::anyhow!("tenant registry refresh from PostgreSQL timed out"))?;
+    let snapshot = source_snapshot?;
     registry.refresh_from_snapshot(snapshot);
     Ok(())
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn refresh_postgres_tenants(registry: &PostgresTenantRegistry) -> Result<()> {
+    let pool = registry.pool.clone();
+    let relation = registry.relation.clone();
+    let default_rate_limit_rpm = registry.default_rate_limit_rpm;
+    let timeout = registry.refresh_timeout;
+    refresh_postgres_tenants_with_loader(registry, timeout, async move {
+        load_postgres_tenant_snapshot(&pool, &relation, default_rate_limit_rpm).await
+    })
+    .await
 }
 
 #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
@@ -3608,7 +3642,7 @@ mod tests {
     #[cfg(feature = "mcp-http")]
     static MCP_HTTP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "mcp-http")]
-    const MCP_HTTP_ENV_VARS: [&str; 7] = [
+    const MCP_HTTP_ENV_VARS: [&str; 8] = [
         NEXUS_MCP_HTTP_TOKEN_ENV,
         NEXUS_MCP_HTTP_TENANTS_ENV,
         NEXUS_MCP_TENANT_SOURCE_ENV,
@@ -3616,6 +3650,7 @@ mod tests {
         NEXUS_MCP_TENANT_DB_RELATION_ENV,
         NEXUS_MCP_TENANT_REFRESH_SECS_ENV,
         NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV,
+        NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV,
     ];
 
     #[cfg(feature = "mcp-http")]
@@ -4177,6 +4212,7 @@ mod tests {
             NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
             Duration::from_secs(20),
             Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .unwrap();
         let mut snapshot = TenantSnapshot::new();
@@ -4199,6 +4235,106 @@ mod tests {
         registry.clear_if_stale(refreshed_at + Duration::from_secs(3));
         assert!(registry.current_snapshot().is_empty());
         assert!(registry.snapshot.load_full().refreshed_at.is_none());
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn postgres_tenant_refresh_timeout_clears_stale_snapshot() {
+        let _guard = acquire_mcp_http_env();
+        let registry = PostgresTenantRegistry::new(
+            "postgres://localhost/postgres".to_string(),
+            NEXUS_MCP_TENANT_DB_RELATION_DEFAULT.to_string(),
+            NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+            Duration::from_secs(20),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let tenant_key = "known-key";
+        let mut snapshot = TenantSnapshot::new();
+        snapshot.insert(
+            sha256_hex(tenant_key),
+            TenantInfo {
+                tenant_id: "acme".to_string(),
+                rate_limit_rpm: 120,
+            },
+        );
+        let refreshed_at = Instant::now() - Duration::from_secs(3);
+        registry.snapshot.store(Arc::new(TenantSnapshotState {
+            snapshot: Arc::new(snapshot),
+            refreshed_at: Some(refreshed_at),
+        }));
+
+        let tenant_registry: Arc<dyn TenantRegistry> = registry.clone();
+        let state = Arc::new(TenantAuthState::new(tenant_registry));
+        let authorized = call_tenant_route(
+            Some(state.clone()),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {tenant_key}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(authorized.status(), StatusCode::OK);
+
+        let started = tokio::time::Instant::now();
+        let timed_out = tokio::time::timeout(Duration::from_secs(3), async {
+            let refresh_result =
+                refresh_postgres_tenants_with_loader(&registry, Duration::from_secs(1), async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Ok(TenantSnapshot::new())
+                })
+                .await;
+            if refresh_result.is_err() {
+                registry.clear_if_stale(Instant::now());
+            }
+            refresh_result
+        })
+        .await;
+        assert!(
+            timed_out.is_ok(),
+            "refresh must finish within bounded timeout"
+        );
+        assert!(
+            timed_out.unwrap().is_err(),
+            "expected timeout-based refresh error"
+        );
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "refresh should wait for timeout duration"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "refresh should not hang on timeout"
+        );
+        assert!(registry.current_snapshot().is_empty());
+        assert!(
+            registry.snapshot.load_full().refreshed_at.is_none(),
+            "refresh failure should allow stale eviction"
+        );
+
+        let denied = call_tenant_route(
+            Some(state),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {tenant_key}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
