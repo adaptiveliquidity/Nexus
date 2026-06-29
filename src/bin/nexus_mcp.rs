@@ -2516,9 +2516,10 @@ impl PostgresTenantRegistry {
             return;
         }
 
-        if !current.snapshot.is_empty() {
-            self.snapshot.store(Arc::new(TenantSnapshotState::empty()));
-        }
+        // Stale: evict to a clean empty state. Resetting refreshed_at to None even when the
+        // snapshot is already empty prevents a stale timestamp from persisting and forcing a
+        // zero refresh-timeout budget, which would otherwise deadlock all future refreshes.
+        self.snapshot.store(Arc::new(TenantSnapshotState::empty()));
     }
 }
 
@@ -2740,15 +2741,25 @@ fn refresh_timeout_budget(
     now: Instant,
 ) -> Duration {
     let current = registry.snapshot.load_full();
+    // An empty snapshot has nothing stale to protect, so a full-timeout refresh attempt is
+    // the recovery path and must never be starved by a zero budget.
+    if current.snapshot.is_empty() {
+        return configured_timeout;
+    }
     let Some(refreshed_at) = current.refreshed_at else {
         return configured_timeout;
     };
 
-    let age = now.duration_since(refreshed_at);
-    if age >= registry.max_stale {
-        Duration::ZERO
-    } else {
-        configured_timeout.min(registry.max_stale - age)
+    // A non-empty snapshot is only reachable here while still fresh (clear_if_stale runs
+    // first and evicts stale ones), so cap the await to the remaining non-stale window. If it
+    // is somehow already stale, fall back to the full timeout rather than zero so the refresh
+    // can still attempt to recover.
+    match registry
+        .max_stale
+        .checked_sub(now.duration_since(refreshed_at))
+    {
+        Some(budget) if !budget.is_zero() => configured_timeout.min(budget),
+        _ => configured_timeout,
     }
 }
 
@@ -4382,6 +4393,54 @@ mod tests {
         )
         .await;
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn postgres_tenant_refresh_recovers_from_stale_empty_snapshot() {
+        let _guard = acquire_mcp_http_env();
+        let registry = PostgresTenantRegistry::new(
+            "postgres://localhost/postgres".to_string(),
+            NEXUS_MCP_TENANT_DB_RELATION_DEFAULT.to_string(),
+            NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+            Duration::from_secs(20),
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        // A stale, EMPTY snapshot that still carries an old refreshed_at timestamp is the
+        // state that previously deadlocked refreshes: refresh_timeout_budget returned a zero
+        // timeout, so every subsequent refresh timed out instantly and never repopulated.
+        registry.snapshot.store(Arc::new(TenantSnapshotState {
+            snapshot: Arc::new(TenantSnapshot::new()),
+            refreshed_at: Some(Instant::now() - Duration::from_secs(10)),
+        }));
+
+        let tenant_key = "recovered-key";
+        let recovered = sha256_hex(tenant_key);
+        let recovered_for_loader = recovered.clone();
+        refresh_postgres_tenants_with_loader(&registry, registry.refresh_timeout, async move {
+            // Yield so the loader is not ready on the first poll; a zero budget (the old bug)
+            // would time out here, while the recovery path uses the full configured timeout.
+            tokio::task::yield_now().await;
+            let mut snapshot = TenantSnapshot::new();
+            snapshot.insert(
+                recovered_for_loader,
+                TenantInfo {
+                    tenant_id: "tenant-recovered".to_string(),
+                    rate_limit_rpm: 90,
+                },
+            );
+            Ok(snapshot)
+        })
+        .await
+        .expect("refresh should recover from a stale-empty snapshot, not deadlock");
+
+        assert!(
+            registry.current_snapshot().get(&recovered).is_some(),
+            "registry must reload newly active keys after a stale-empty state"
+        );
     }
 
     #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
