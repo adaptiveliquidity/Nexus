@@ -1,0 +1,64 @@
+name: Release readiness
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "dashboard/**"
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "dashboard/**"
+      - "**/*.md"
+
+permissions:
+  contents: read
+
+jobs:
+  fmt-check:
+    name: cargo fmt --all --check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+  no-secret-scan:
+    name: no-secret scanner
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: capture build + proof fixture
+        run: |
+          mkdir -p artifacts
+          cargo build --locked --features aeon-memory --bin nexus-mcp --quiet 2>&1 | tee artifacts/release-build.log
+          cargo test --features aeon-memory --locked --test mcp_server -- --list 2>&1 | tee artifacts/release-tests.log
+          bash scripts/proof-capsule-smoke.sh --output artifacts/proof-capsule.json | tee artifacts/proof-capsule-smoke.log
+      - name: no-secret scan
+        run: bash scripts/no-secret-scan.sh artifacts/release-build.log artifacts/release-tests.log artifacts/proof-capsule.json artifacts/proof-capsule-smoke.log
+
+  proof-capsule-smoke:
+    name: proof-capsule smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch as of 2026-06-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: generate proof capsule
+        run: |
+          mkdir -p artifacts
+          bash scripts/proof-capsule-smoke.sh --output artifacts/proof-capsule.json | tee artifacts/proof-capsule-smoke.log
+      - name: verify proof capsule
+        run: cargo run --features aeon-memory --locked --bin nexus -- iq verify artifacts/proof-capsule.json
