@@ -3,12 +3,23 @@
 //! Transport: stdio (for Claude Code / mcp.json integration).
 //! Start with: `nexus-mcp` (no arguments needed).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+#[cfg(feature = "mcp-http")]
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+#[cfg(feature = "mcp-http")]
+use axum::{
+    body::Body,
+    extract::State,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    Router,
+};
 use rmcp::{
     handler::server::wrapper::Parameters, schemars, tool, tool_handler, tool_router,
     transport::stdio, ServiceExt,
@@ -388,6 +399,7 @@ pub struct NexusMcpServer {
     #[cfg_attr(not(feature = "aeon-memory"), allow(dead_code))]
     nexus_iq_allowlist: Arc<Option<Vec<String>>>,
     capability_profile: Option<Arc<CapabilityProfileManifest>>,
+    forced_tool_allowlist: Option<HashSet<String>>,
 }
 
 #[tool_router(router = base_tool_router, vis = "pub")]
@@ -889,6 +901,13 @@ struct ForkAndRaceResponse {
 
 impl NexusMcpServer {
     fn new(hypervisor: Arc<NexusHypervisor>) -> Result<Self> {
+        Self::new_with_forced_tool_allowlist(hypervisor, None)
+    }
+
+    fn new_with_forced_tool_allowlist(
+        hypervisor: Arc<NexusHypervisor>,
+        forced_tool_allowlist: Option<HashSet<String>>,
+    ) -> Result<Self> {
         let capability_profile = profile_manifest_from_env()?.map(Arc::new);
 
         // Slice 2: when a profile defines execution.module_dirs, those replace
@@ -911,6 +930,7 @@ impl NexusMcpServer {
             capability_allowlist: Arc::new(capability_allowlist_from_env()?),
             nexus_iq_allowlist: Arc::new(nexus_iq_allowlist_from_env()?),
             capability_profile,
+            forced_tool_allowlist,
         })
     }
 
@@ -1944,6 +1964,14 @@ impl NexusMcpServer {
 
     /// Deny a tool call when the active profile's `[mcp].tool_allowlist` excludes it.
     fn ensure_tool_allowed(&self, tool: &str) -> Result<()> {
+        if let Some(allowlist) = &self.forced_tool_allowlist {
+            if !allowlist.contains(tool) {
+                return Err(profile_denial(format!(
+                    "tool {tool} is not allowed in HTTP read-only mode"
+                )));
+            }
+        }
+
         let Some(profile) = self.capability_profile.as_deref() else {
             return Ok(());
         };
@@ -2038,8 +2066,58 @@ const NEXUS_MCP_CAPABILITY_ALLOWLIST_ENV: &str = "NEXUS_MCP_CAPABILITY_ALLOWLIST
 const NEXUS_IQ_ALLOWLIST_ENV: &str = "NEXUS_IQ_ALLOWLIST";
 const NEXUS_MCP_PROFILE_ENV: &str = "NEXUS_MCP_PROFILE";
 const NEXUS_MCP_RETURN_FULL_PROOF_ENV: &str = "NEXUS_MCP_RETURN_FULL_PROOF";
+const NEXUS_MCP_TRANSPORT_ENV: &str = "NEXUS_MCP_TRANSPORT";
+const NEXUS_MCP_TRANSPORT_STDIO: &str = "stdio";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TRANSPORT_HTTP: &str = "http";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_ADDR_ENV: &str = "NEXUS_MCP_HTTP_ADDR";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_TOKEN_ENV: &str = "NEXUS_MCP_HTTP_TOKEN";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:8765";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_READ_ONLY_TOOL_ALLOWLIST: [&str; 6] = [
+    "nexus_get_history",
+    "nexus_get_stats",
+    "nexus_instinct_stats",
+    "nexus_instinct_query",
+    "nexus_instinct_export",
+    "nexus_aeon_execute_timeline",
+];
 pub const NEXUS_MEMORY_PREVIEW_CAPABILITY: &str = "nexus:memory_preview";
 const RESTORED_MEMORY_PREVIEW_BYTES: usize = 64;
+
+#[cfg(feature = "mcp-http")]
+fn read_only_http_tool_allowlist() -> HashSet<String> {
+    NEXUS_MCP_HTTP_READ_ONLY_TOOL_ALLOWLIST
+        .into_iter()
+        .map(|tool| tool.to_string())
+        .collect()
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_nexus_mcp_transport() -> String {
+    std::env::var(NEXUS_MCP_TRANSPORT_ENV).unwrap_or_else(|_| NEXUS_MCP_TRANSPORT_STDIO.to_string())
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_nexus_mcp_http_addr() -> Result<SocketAddr> {
+    std::env::var(NEXUS_MCP_HTTP_ADDR_ENV)
+        .unwrap_or_else(|_| NEXUS_MCP_HTTP_DEFAULT_ADDR.to_string())
+        .parse::<SocketAddr>()
+        .map_err(|error| anyhow::anyhow!("invalid {NEXUS_MCP_HTTP_ADDR_ENV}: {error}"))
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_mcp_http_token() -> Option<String> {
+    std::env::var_os(NEXUS_MCP_HTTP_TOKEN_ENV).and_then(|token| token.to_str().map(str::to_string))
+}
+
+#[cfg(feature = "mcp-http")]
+fn is_loopback_addr(addr: &SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
 
 /// Maximum token validity an MCP client may request, in seconds (1 hour).
 /// Larger caller-supplied values are clamped to this. See SECURITY.md.
@@ -2664,6 +2742,82 @@ fn apply_mcp_sandbox_env(config: &mut HypervisorConfig) -> Result<()> {
     Ok(())
 }
 
+async fn run_mcp_stdio_server(server: NexusMcpServer) -> Result<()> {
+    let service = server.serve(stdio()).await.inspect_err(|e| {
+        tracing::error!("MCP server error: {:?}", e);
+    })?;
+
+    service.waiting().await?;
+    Ok(())
+}
+
+#[cfg(feature = "mcp-http")]
+async fn require_bearer_token(
+    State(expected_token): State<String>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let expected = format!("Bearer {expected_token}");
+    let authorized = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected);
+
+    if !authorized {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    next.run(request).await
+}
+
+#[cfg(feature = "mcp-http")]
+async fn run_mcp_http_server(server: NexusMcpServer) -> Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let server = NexusMcpServer::new_with_forced_tool_allowlist(
+        server.hypervisor.clone(),
+        Some(read_only_http_tool_allowlist()),
+    )?;
+    let service = StreamableHttpService::new(
+        move || Ok(server.clone()),
+        std::sync::Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+
+    let addr = parse_nexus_mcp_http_addr()?;
+    let token = parse_mcp_http_token();
+
+    if token.is_none() {
+        if is_loopback_addr(&addr) {
+            tracing::warn!(addr = %addr, "NEXUS_MCP_HTTP_TOKEN is not set; unauthenticated HTTP MCP endpoint bound to loopback only (set token for network exposure, auth+tenancy are P2)");
+        } else {
+            tracing::warn!(addr = %addr, "NEXUS_MCP_HTTP_TOKEN is not set; HTTP MCP endpoint is unauthenticated (set token for auth, full auth+tenancy are P2)");
+        }
+    }
+
+    let app = if let Some(token) = token {
+        Router::new()
+            .nest_service("/", service)
+            .route_layer(middleware::from_fn_with_state(
+                token.clone(),
+                require_bearer_token,
+            ))
+            .with_state(token)
+    } else {
+        Router::new().nest_service("/", service)
+    };
+
+    tracing::info!(addr = %addr, "Starting Nexus MCP HTTP transport");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to serve Nexus MCP HTTP transport: {e}"))?;
+    Ok(())
+}
+
 fn env_u64(name: &str) -> Result<Option<u64>> {
     match std::env::var(name) {
         Ok(value) => value
@@ -2704,13 +2858,46 @@ async fn main() -> Result<()> {
     apply_mcp_sandbox_env(&mut config)?;
     let hypervisor = Arc::new(NexusHypervisor::new(config)?);
 
-    let server = NexusMcpServer::new(hypervisor)?;
+    #[cfg(feature = "mcp-http")]
+    {
+        let transport = parse_nexus_mcp_transport();
+        let server = NexusMcpServer::new(hypervisor)?;
+        match transport.as_str() {
+            NEXUS_MCP_TRANSPORT_STDIO => {
+                run_mcp_stdio_server(server).await?;
+            }
+            NEXUS_MCP_TRANSPORT_HTTP => {
+                run_mcp_http_server(server).await?;
+            }
+            other => {
+                anyhow::bail!(
+                    "unsupported {NEXUS_MCP_TRANSPORT_ENV} value '{other}', expected '{NEXUS_MCP_TRANSPORT_STDIO}' or '{NEXUS_MCP_TRANSPORT_HTTP}'"
+                );
+            }
+        }
+    }
 
-    let service = server.serve(stdio()).await.inspect_err(|e| {
-        tracing::error!("MCP server error: {:?}", e);
-    })?;
+    #[cfg(not(feature = "mcp-http"))]
+    {
+        if matches!(
+            std::env::var(NEXUS_MCP_TRANSPORT_ENV).ok().as_deref(),
+            Some("http")
+        ) {
+            anyhow::bail!(
+                "NEXUS_MCP_TRANSPORT=http requires compiling with feature mcp-http (use cargo build --features mcp-http)"
+            );
+        }
+        if let Ok(raw) = std::env::var(NEXUS_MCP_TRANSPORT_ENV) {
+            if raw != NEXUS_MCP_TRANSPORT_STDIO {
+                anyhow::bail!(
+                    "unsupported {NEXUS_MCP_TRANSPORT_ENV} value '{raw}', expected '{NEXUS_MCP_TRANSPORT_STDIO}'"
+                );
+            }
+        }
 
-    service.waiting().await?;
+        run_mcp_stdio_server(NexusMcpServer::new(hypervisor)?).await?;
+    }
+
     Ok(())
 }
 
@@ -3079,6 +3266,25 @@ mod tests {
         let resolved = resolve_wasm_path(&wasm_path, &allowed_dirs).unwrap();
 
         assert_eq!(resolved, std::fs::canonicalize(wasm_path).unwrap());
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn ensure_tool_allowed_enforces_read_only_forced_allowlist() {
+        let hypervisor = Arc::new(NexusHypervisor::new(HypervisorConfig::default()).unwrap());
+        let server = NexusMcpServer::new_with_forced_tool_allowlist(
+            hypervisor,
+            Some(read_only_http_tool_allowlist()),
+        )
+        .unwrap();
+
+        let error = server
+            .ensure_tool_allowed("nexus_execute_wasi")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not allowed in HTTP read-only mode"));
+
+        assert!(server.ensure_tool_allowed("nexus_get_stats").is_ok());
     }
 
     #[cfg(unix)]

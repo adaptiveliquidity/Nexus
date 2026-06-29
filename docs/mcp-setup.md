@@ -112,6 +112,48 @@ For `write_memory`, scope is required for AEON memory capture writes.
 `base_snapshot_id` or `source:"latest_runtime"`, `branches`, and optional
 `strategy` (`first_success` or `wait_all`).
 
+## Remote HTTP transport (P1, read-only)
+
+P1 exposes the MCP server over streamable HTTP with a **forced read-only tool set**.
+
+Build:
+
+```bash
+cargo build --release --features mcp-http
+```
+
+Run (default: loopback only):
+
+```bash
+NEXUS_MCP_TRANSPORT=http \
+NEXUS_MCP_HTTP_ADDR=127.0.0.1:8765 \
+nexus-mcp
+```
+
+Optional env vars:
+
+- `NEXUS_MCP_TRANSPORT` — `"stdio"` (default) or `"http"`.
+- `NEXUS_MCP_HTTP_ADDR` — bind address, default `127.0.0.1:8765`.
+- `NEXUS_MCP_HTTP_TOKEN` — if set, requires `Authorization: Bearer <token>`.
+
+Read-only tool set exposed over HTTP:
+
+- `nexus_get_stats`
+- `nexus_get_history`
+- `nexus_instinct_stats`
+- `nexus_instinct_query`
+- `nexus_instinct_export`
+- `nexus_aeon_execute_timeline`
+
+Execution/mutation tools are intentionally **not** exposed in HTTP mode in P1:
+`nexus_execute*`, `nexus_execute_wasi`, `nexus_execute_proof`, `nexus_snapshot_create`,
+`nexus_snapshot_rollback`, `nexus_issue_token`, `nexus_attenuate_token`,
+`nexus_fork_and_race`, `nexus_instinct_import`.
+
+Auth/tenancy and network multi-tenant controls are a P2 follow-up. If
+`NEXUS_MCP_HTTP_TOKEN` is unset, the endpoint is intentionally unauthenticated
+(loopback default helps reduce exposure, but is not security-complete).
+
 ## Capability Allowlist
 
 WASI capability requests need either a parent token or an operator allowlist.
