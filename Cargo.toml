@@ -63,6 +63,10 @@ futures = "0.3"
 
 # MCP server (Model Context Protocol) for Claude Code integration.
 rmcp = { version = "1.7", features = ["server", "transport-io"] }
+# Optional HTTP transport stack for rmcp streamable-http server mode.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
+hyper = { version = "1", default-features = false, features = ["http1", "server"], optional = true }
+tower = { version = "0.4", default-features = false, optional = true }
 
 # Optional, only with `ai-recovery` feature.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
@@ -73,6 +77,10 @@ aeon_nexus_bridge = { path = "crates/aeon_nexus_bridge", optional = true }
 
 [features]
 default = []
+
+# Remote HTTP transport for Nexus MCP. This enables rmcp's streamable HTTP
+# server surface while keeping default stdio behavior unchanged.
+mcp-http = ["rmcp/transport-streamable-http-server", "dep:axum", "dep:hyper", "dep:tower"]
 component-model = []
 # Benchmark shards used by the CodSpeed workflow. Native Criterion/Bencher
 # runs do not enable these features and still execute the complete bench suite.
