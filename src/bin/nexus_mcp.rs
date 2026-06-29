@@ -3011,6 +3011,13 @@ async fn require_bearer_token(
         tenant.rate_limit_rpm,
         Instant::now(),
     ) {
+        tracing::info!(
+            tenant_id = %tenant.tenant_id,
+            method = %method,
+            path = %path,
+            status_class = StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            "authenticated MCP HTTP request"
+        );
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
 

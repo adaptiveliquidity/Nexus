@@ -731,7 +731,10 @@ fn queue_timeline_delivery(
     let mode = nexus::aeon::TimelineDeliveryMode::parse(mode);
     let config = nexus::aeon::AeonConfig::from_env().unwrap_or_default();
     let sink = if matches!(mode, nexus::aeon::TimelineDeliveryMode::Offline) {
-        Some(nexus::aeon::AeonTimelineSink::from_config(&config).with_mode(mode))
+        match nexus::aeon::AeonTimelineSink::from_config(&config) {
+            Ok(sink) => Some(sink.with_mode(mode)),
+            Err(_) => return Some(nexus::aeon::TimelineDeliveryStatus::FailedOpen),
+        }
     } else {
         nexus::aeon::AeonTimelineSink::from_enabled_config(&config).map(|sink| sink.with_mode(mode))
     };
