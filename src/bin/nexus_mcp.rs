@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "mcp-http")]
+use std::time::Instant;
 
 use anyhow::Result;
 #[cfg(feature = "mcp-http")]
@@ -2075,7 +2077,13 @@ const NEXUS_MCP_HTTP_ADDR_ENV: &str = "NEXUS_MCP_HTTP_ADDR";
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_TOKEN_ENV: &str = "NEXUS_MCP_HTTP_TOKEN";
 #[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_TENANTS_ENV: &str = "NEXUS_MCP_HTTP_TENANTS";
+#[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:8765";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM: u64 = 60;
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_HTTP_TENANT_ID_FALLBACK: &str = "default";
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_READ_ONLY_TOOL_ALLOWLIST: [&str; 6] = [
     "nexus_get_history",
@@ -2097,6 +2105,53 @@ fn read_only_http_tool_allowlist() -> HashSet<String> {
 }
 
 #[cfg(feature = "mcp-http")]
+#[derive(Debug, Clone)]
+struct TenantContext {
+    #[allow(dead_code)]
+    tenant_id: String,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Debug, Clone)]
+struct TenantConfig {
+    tenant_id: String,
+    api_key_sha256: [u8; 32],
+    rate_limit_rpm: u64,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Deserialize, Debug)]
+struct TenantConfigFileEntry {
+    tenant_id: String,
+    api_key_sha256: String,
+    rate_limit_rpm: Option<u64>,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Debug)]
+struct TenantRateWindow {
+    window_start: Instant,
+    request_count: u64,
+}
+
+#[cfg(feature = "mcp-http")]
+#[derive(Clone)]
+struct TenantAuthState {
+    tenants: Vec<TenantConfig>,
+    rate_limits: std::sync::Arc<std::sync::Mutex<HashMap<String, TenantRateWindow>>>,
+}
+
+#[cfg(feature = "mcp-http")]
+impl TenantAuthState {
+    fn new(tenants: Vec<TenantConfig>) -> Self {
+        Self {
+            tenants,
+            rate_limits: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
 fn parse_nexus_mcp_transport() -> String {
     std::env::var(NEXUS_MCP_TRANSPORT_ENV).unwrap_or_else(|_| NEXUS_MCP_TRANSPORT_STDIO.to_string())
 }
@@ -2110,8 +2165,157 @@ fn parse_nexus_mcp_http_addr() -> Result<SocketAddr> {
 }
 
 #[cfg(feature = "mcp-http")]
-fn parse_mcp_http_token() -> Option<String> {
-    std::env::var_os(NEXUS_MCP_HTTP_TOKEN_ENV).and_then(|token| token.to_str().map(str::to_string))
+fn parse_mcp_http_token() -> Result<Option<String>> {
+    match std::env::var(NEXUS_MCP_HTTP_TOKEN_ENV) {
+        Ok(token) => Ok(Some(token)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{NEXUS_MCP_HTTP_TOKEN_ENV} must be valid UTF-8")
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_mcp_http_tenants_path() -> Result<Option<String>> {
+    match std::env::var(NEXUS_MCP_HTTP_TENANTS_ENV) {
+        Ok(path) => Ok(Some(path)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{NEXUS_MCP_HTTP_TENANTS_ENV} must be valid UTF-8 path")
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_hex_sha256(raw: &str) -> Result<[u8; 32]> {
+    if raw.len() != 64 {
+        anyhow::bail!("invalid SHA-256 hex length");
+    }
+    let mut bytes = [0u8; 32];
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
+            .map_err(|_| anyhow::anyhow!("tenant api key hash must be hex"))?;
+    }
+    Ok(bytes)
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!("failed to read tenants file '{}': {error}", path.display())
+    })?;
+    let tenants: Vec<TenantConfigFileEntry> = serde_json::from_str(&contents)
+        .map_err(|error| anyhow::anyhow!("invalid tenants JSON: {error}"))?;
+    let mut tenant_ids = HashSet::new();
+    let mut tenant_configs = Vec::with_capacity(tenants.len());
+
+    if tenants.is_empty() {
+        anyhow::bail!("tenant configuration must contain at least one tenant");
+    }
+
+    for tenant in tenants {
+        let tenant_id = tenant.tenant_id.trim();
+        if tenant_id.is_empty() {
+            anyhow::bail!("tenant_id must not be empty");
+        }
+        if !tenant_ids.insert(tenant_id.to_string()) {
+            anyhow::bail!("duplicate tenant_id '{tenant_id}'");
+        }
+        let api_key_sha256 = parse_hex_sha256(&tenant.api_key_sha256)?;
+        let rate_limit_rpm = tenant
+            .rate_limit_rpm
+            .unwrap_or(NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM);
+        if rate_limit_rpm == 0 {
+            anyhow::bail!("rate_limit_rpm for tenant '{tenant_id}' must be greater than 0");
+        }
+        tenant_configs.push(TenantConfig {
+            tenant_id: tenant_id.to_string(),
+            api_key_sha256,
+            rate_limit_rpm,
+        });
+    }
+    Ok(tenant_configs)
+}
+
+#[cfg(feature = "mcp-http")]
+fn load_tenant_auth_state() -> Result<Option<Arc<TenantAuthState>>> {
+    if let Some(path) = parse_mcp_http_tenants_path()? {
+        let tenants = parse_tenant_config_file(Path::new(&path)).map_err(|error| {
+            anyhow::anyhow!("failed to load {NEXUS_MCP_HTTP_TENANTS_ENV}='{path}': {error}")
+        })?;
+        return Ok(Some(Arc::new(TenantAuthState::new(tenants))));
+    }
+
+    Ok(parse_mcp_http_token()?.map(|token| {
+        Arc::new(TenantAuthState::new(vec![TenantConfig {
+            tenant_id: NEXUS_MCP_HTTP_TENANT_ID_FALLBACK.to_string(),
+            api_key_sha256: sha256_bytes(&token),
+            rate_limit_rpm: NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+        }]))
+    }))
+}
+
+#[cfg(feature = "mcp-http")]
+fn sha256_bytes(key: &str) -> [u8; 32] {
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    bytes
+}
+
+#[cfg(feature = "mcp-http")]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let left = a.get(i).copied().unwrap_or(0);
+        let right = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
+#[cfg(feature = "mcp-http")]
+fn tenant_for_token<'a>(
+    tenants: &'a [TenantConfig],
+    token_hash: &[u8; 32],
+) -> Option<&'a TenantConfig> {
+    let mut tenant = None;
+    for candidate in tenants {
+        if constant_time_eq(&candidate.api_key_sha256, token_hash) {
+            tenant = Some(candidate);
+        }
+    }
+    tenant
+}
+
+#[cfg(feature = "mcp-http")]
+fn rate_limit_blocked(
+    state: &TenantAuthState,
+    tenant_id: &str,
+    limit_rpm: u64,
+    now: Instant,
+) -> bool {
+    let mut rate_limits = state
+        .rate_limits
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let window = rate_limits
+        .entry(tenant_id.to_string())
+        .or_insert(TenantRateWindow {
+            window_start: now,
+            request_count: 0,
+        });
+
+    if now.duration_since(window.window_start) >= Duration::from_secs(60) {
+        window.window_start = now;
+        window.request_count = 0;
+    }
+
+    if window.request_count >= limit_rpm {
+        return true;
+    }
+    window.request_count += 1;
+    false
 }
 
 #[cfg(feature = "mcp-http")]
@@ -2753,22 +2957,53 @@ async fn run_mcp_stdio_server(server: NexusMcpServer) -> Result<()> {
 
 #[cfg(feature = "mcp-http")]
 async fn require_bearer_token(
-    State(expected_token): State<String>,
-    request: Request<Body>,
+    State(auth): State<Option<Arc<TenantAuthState>>>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let expected = format!("Bearer {expected_token}");
-    let authorized = request
+    let Some(auth) = auth else {
+        return next.run(request).await;
+    };
+
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let presented_key = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == expected);
-
-    if !authorized {
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty());
+    let Some(presented_key) = presented_key else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let presented_key_hash = sha256_bytes(presented_key);
+    let Some(tenant) = tenant_for_token(&auth.tenants, &presented_key_hash) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if rate_limit_blocked(
+        auth.as_ref(),
+        &tenant.tenant_id,
+        tenant.rate_limit_rpm,
+        Instant::now(),
+    ) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
 
-    next.run(request).await
+    request.extensions_mut().insert(TenantContext {
+        tenant_id: tenant.tenant_id.clone(),
+    });
+
+    let response = next.run(request).await;
+    tracing::info!(
+        tenant_id = %tenant.tenant_id,
+        method = %method,
+        path = %path,
+        status_class = format!("{}xx", response.status().as_u16() / 100),
+        "authenticated MCP HTTP request"
+    );
+    response
 }
 
 #[cfg(feature = "mcp-http")]
@@ -2788,27 +3023,26 @@ async fn run_mcp_http_server(server: NexusMcpServer) -> Result<()> {
     );
 
     let addr = parse_nexus_mcp_http_addr()?;
-    let token = parse_mcp_http_token();
-
-    if token.is_none() {
-        if is_loopback_addr(&addr) {
-            tracing::warn!(addr = %addr, "NEXUS_MCP_HTTP_TOKEN is not set; unauthenticated HTTP MCP endpoint bound to loopback only (set token for network exposure, auth+tenancy are P2)");
-        } else {
-            tracing::warn!(addr = %addr, "NEXUS_MCP_HTTP_TOKEN is not set; HTTP MCP endpoint is unauthenticated (set token for auth, full auth+tenancy are P2)");
-        }
+    let tenant_auth = load_tenant_auth_state()?;
+    if tenant_auth.is_none() && !is_loopback_addr(&addr) {
+        anyhow::bail!(
+            "NEXUS_MCP_HTTP_TOKEN or NEXUS_MCP_HTTP_TENANTS is required for non-loopback HTTP bind"
+        );
+    }
+    if tenant_auth.is_none() {
+        tracing::warn!(
+            addr = %addr,
+            "NEXUS_MCP_HTTP_TOKEN and NEXUS_MCP_HTTP_TENANTS are not set; unauthenticated HTTP MCP endpoint is loopback-only"
+        );
     }
 
-    let app = if let Some(token) = token {
-        Router::new()
-            .nest_service("/", service)
-            .route_layer(middleware::from_fn_with_state(
-                token.clone(),
-                require_bearer_token,
-            ))
-            .with_state(token)
-    } else {
-        Router::new().nest_service("/", service)
-    };
+    let app = Router::new()
+        .nest_service("/", service)
+        .route_layer(middleware::from_fn_with_state(
+            tenant_auth.clone(),
+            require_bearer_token,
+        ))
+        .with_state(tenant_auth);
 
     tracing::info!(addr = %addr, "Starting Nexus MCP HTTP transport");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -3285,6 +3519,165 @@ mod tests {
         assert!(error.contains("not allowed in HTTP read-only mode"));
 
         assert!(server.ensure_tool_allowed("nexus_get_stats").is_ok());
+    }
+
+    #[cfg(feature = "mcp-http")]
+    fn build_tenant_test_state(
+        tenant_id: &str,
+        api_key: &str,
+        rate_limit_rpm: u64,
+    ) -> Arc<TenantAuthState> {
+        Arc::new(TenantAuthState::new(vec![TenantConfig {
+            tenant_id: tenant_id.to_string(),
+            api_key_sha256: sha256_bytes(api_key),
+            rate_limit_rpm,
+        }]))
+    }
+
+    #[cfg(feature = "mcp-http")]
+    async fn tenant_echo_handler(
+        axum::extract::Extension(ctx): axum::extract::Extension<TenantContext>,
+    ) -> axum::response::Response {
+        let mut response = axum::response::Response::new(Body::empty());
+        response.headers_mut().insert(
+            "x-tenant-id",
+            ctx.tenant_id.parse().expect("tenant id is header-safe"),
+        );
+        response
+    }
+
+    #[cfg(feature = "mcp-http")]
+    async fn call_tenant_route(
+        auth: Option<Arc<TenantAuthState>>,
+        request: Request<Body>,
+    ) -> Response {
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(tenant_echo_handler))
+            .route_layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                require_bearer_token,
+            ))
+            .with_state(auth);
+
+        tower::util::ServiceExt::oneshot(app, request)
+            .await
+            .expect("request should be handled")
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn parse_tenant_store_loads_from_temporary_json_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenants_path = tmp.path().join("tenants.json");
+        let api_key = "acme-secret-key";
+        let body = serde_json::json!([{
+            "tenant_id": "acme",
+            "api_key_sha256": sha256_hex(api_key),
+            "rate_limit_rpm": 120
+        }])
+        .to_string();
+        std::fs::write(&tenants_path, body).unwrap();
+        let tenants = parse_tenant_config_file(&tenants_path).unwrap();
+
+        assert_eq!(tenants.len(), 1);
+        assert_eq!(tenants[0].tenant_id, "acme");
+        assert_eq!(tenants[0].rate_limit_rpm, 120);
+        assert_eq!(tenants[0].api_key_sha256, sha256_bytes(api_key));
+    }
+
+    #[cfg(feature = "mcp-http")]
+    fn sha256_hex(value: &str) -> String {
+        let digest = sha2::Sha256::digest(value.as_bytes());
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_rejects_missing_and_unknown() {
+        let state = build_tenant_test_state("acme", "expected-secret", 120);
+
+        let missing = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let missing = call_tenant_route(Some(state.clone()), missing).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let unknown = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer wrong")
+            .body(Body::empty())
+            .unwrap();
+        let unknown = call_tenant_route(Some(state), unknown).await;
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_sets_tenant_context() {
+        let state = build_tenant_test_state("acme", "expected-secret", 120);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer expected-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = call_tenant_route(Some(state), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-tenant-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acme")
+        );
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_rate_limit_429() {
+        let state = build_tenant_test_state("acme", "expected-secret", 1);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer expected-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let first = call_tenant_route(
+            Some(state.clone()),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(axum::http::header::AUTHORIZATION, "Bearer expected-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = call_tenant_route(Some(state), request).await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn constant_time_compare_checks_equal_and_mismatch_values() {
+        let a = b"\x01\x02\x03";
+        let b = b"\x01\x02\x03";
+        let c = b"\x01\x02\x04";
+        let d = b"\x01\x02\x03\x04";
+
+        assert!(constant_time_eq(a, b));
+        assert!(!constant_time_eq(a, c));
+        assert!(!constant_time_eq(a, d));
     }
 
     #[cfg(unix)]
