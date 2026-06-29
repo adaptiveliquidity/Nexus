@@ -2085,6 +2085,32 @@ const NEXUS_MCP_HTTP_TENANTS_ENV: &str = "NEXUS_MCP_HTTP_TENANTS";
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:8765";
 #[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_SOURCE_ENV: &str = "NEXUS_MCP_TENANT_SOURCE";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_SOURCE_FILE: &str = "file";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_SOURCE_POSTGRES: &str = "postgres";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_DB_URL_ENV: &str = "NEXUS_MCP_TENANT_DB_URL";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_DB_RELATION_ENV: &str = "NEXUS_MCP_TENANT_DB_RELATION";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_DB_RELATION_DEFAULT: &str = "api_keys";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_ACTIVE_API_KEYS_VIEW: &str = "active_api_keys";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_REFRESH_SECS_ENV: &str = "NEXUS_MCP_TENANT_REFRESH_SECS";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_REFRESH_SECS_DEFAULT: u64 = 20;
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV: &str = "NEXUS_MCP_TENANT_MAX_STALE_SECS";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_MAX_STALE_SECS_DEFAULT: u64 = 60;
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV: &str = "NEXUS_MCP_TENANT_DB_TIMEOUT_SECS";
+#[cfg(feature = "mcp-http")]
+const NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_DEFAULT: u64 = 10;
+#[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM: u64 = 60;
 #[cfg(feature = "mcp-http")]
 const NEXUS_MCP_HTTP_TENANT_ID_FALLBACK: &str = "default";
@@ -2110,16 +2136,15 @@ fn read_only_http_tool_allowlist() -> HashSet<String> {
 
 #[cfg(feature = "mcp-http")]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TenantContext {
-    #[allow(dead_code)]
     tenant_id: String,
 }
 
 #[cfg(feature = "mcp-http")]
 #[derive(Debug, Clone)]
-struct TenantConfig {
+struct TenantInfo {
     tenant_id: String,
-    api_key_sha256: [u8; 32],
     rate_limit_rpm: u64,
 }
 
@@ -2132,6 +2157,33 @@ struct TenantConfigFileEntry {
 }
 
 #[cfg(feature = "mcp-http")]
+#[derive(Clone)]
+struct TenantAuthState {
+    registry: Arc<dyn TenantRegistry>,
+    rate_limits: Arc<std::sync::Mutex<HashMap<String, TenantRateWindow>>>,
+}
+
+#[cfg(feature = "mcp-http")]
+impl TenantAuthState {
+    fn new(registry: Arc<dyn TenantRegistry>) -> Self {
+        Self {
+            registry,
+            rate_limits: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+type TenantSnapshot = HashMap<String, TenantInfo>;
+
+#[cfg(feature = "mcp-http")]
+#[derive(Debug)]
+enum TenantSource {
+    File,
+    Postgres,
+}
+
+#[cfg(feature = "mcp-http")]
 #[derive(Debug)]
 struct TenantRateWindow {
     window_start: Instant,
@@ -2139,19 +2191,72 @@ struct TenantRateWindow {
 }
 
 #[cfg(feature = "mcp-http")]
-#[derive(Clone)]
-struct TenantAuthState {
-    tenants: Vec<TenantConfig>,
-    rate_limits: std::sync::Arc<std::sync::Mutex<HashMap<String, TenantRateWindow>>>,
+trait TenantRegistry: Send + Sync {
+    fn current_snapshot(&self) -> Arc<TenantSnapshot>;
 }
 
 #[cfg(feature = "mcp-http")]
-impl TenantAuthState {
-    fn new(tenants: Vec<TenantConfig>) -> Self {
+#[derive(Clone)]
+struct FileTenantRegistry {
+    snapshot: Arc<TenantSnapshot>,
+}
+
+#[cfg(feature = "mcp-http")]
+impl FileTenantRegistry {
+    fn new(snapshot: TenantSnapshot) -> Self {
         Self {
-            tenants,
-            rate_limits: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            snapshot: Arc::new(snapshot),
         }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+impl TenantRegistry for FileTenantRegistry {
+    fn current_snapshot(&self) -> Arc<TenantSnapshot> {
+        self.snapshot.clone()
+    }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+#[derive(Clone)]
+struct PostgresTenantRegistry {
+    relation: String,
+    default_rate_limit_rpm: u64,
+    refresh_interval: Duration,
+    max_stale: Duration,
+    refresh_timeout: Duration,
+    pool: sqlx::PgPool,
+    snapshot: Arc<arc_swap::ArcSwap<TenantSnapshotState>>,
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+#[derive(Clone)]
+struct TenantSnapshotState {
+    snapshot: Arc<TenantSnapshot>,
+    refreshed_at: Option<Instant>,
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+impl TenantSnapshotState {
+    fn fresh(snapshot: TenantSnapshot, refreshed_at: Instant) -> Self {
+        Self {
+            snapshot: Arc::new(snapshot),
+            refreshed_at: Some(refreshed_at),
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            snapshot: Arc::new(HashMap::new()),
+            refreshed_at: None,
+        }
+    }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+impl TenantRegistry for PostgresTenantRegistry {
+    fn current_snapshot(&self) -> Arc<TenantSnapshot> {
+        self.snapshot.load_full().snapshot.clone()
     }
 }
 
@@ -2230,7 +2335,7 @@ fn parse_hex_sha256(raw: &str) -> Result<[u8; 32]> {
 }
 
 #[cfg(feature = "mcp-http")]
-fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
+fn parse_tenant_config_file(path: &Path) -> Result<TenantSnapshot> {
     let contents = std::fs::read_to_string(path).map_err(|error| {
         anyhow::anyhow!("failed to read tenants file '{}': {error}", path.display())
     })?;
@@ -2238,7 +2343,7 @@ fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
         .map_err(|error| anyhow::anyhow!("invalid tenants JSON: {error}"))?;
     let mut tenant_ids = HashSet::new();
     let mut tenant_hashes = HashSet::new();
-    let mut tenant_configs = Vec::with_capacity(tenants.len());
+    let mut tenant_configs = HashMap::with_capacity(tenants.len());
 
     if tenants.is_empty() {
         anyhow::bail!("tenant configuration must contain at least one tenant");
@@ -2254,7 +2359,8 @@ fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
         }
         let api_key_sha256_str = tenant.api_key_sha256.trim();
         let api_key_sha256 = parse_hex_sha256(api_key_sha256_str)?;
-        if !tenant_hashes.insert(api_key_sha256) {
+        let api_key_sha256 = sha256_hex(&api_key_sha256);
+        if !tenant_hashes.insert(api_key_sha256.clone()) {
             anyhow::bail!("duplicate tenant api_key_sha256 '{api_key_sha256_str}'");
         }
         let rate_limit_rpm = tenant
@@ -2263,31 +2369,460 @@ fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
         if rate_limit_rpm == 0 {
             anyhow::bail!("rate_limit_rpm for tenant '{tenant_id}' must be greater than 0");
         }
-        tenant_configs.push(TenantConfig {
-            tenant_id: tenant_id.to_string(),
+        tenant_configs.insert(
             api_key_sha256,
-            rate_limit_rpm,
-        });
+            TenantInfo {
+                tenant_id: tenant_id.to_string(),
+                rate_limit_rpm,
+            },
+        );
     }
     Ok(tenant_configs)
 }
 
 #[cfg(feature = "mcp-http")]
-fn load_tenant_auth_state() -> Result<Option<Arc<TenantAuthState>>> {
+fn parse_tenant_source() -> Result<TenantSource> {
+    let source = std::env::var(NEXUS_MCP_TENANT_SOURCE_ENV)
+        .unwrap_or_else(|_| NEXUS_MCP_TENANT_SOURCE_FILE.to_string());
+    match source.trim().to_ascii_lowercase().as_str() {
+        NEXUS_MCP_TENANT_SOURCE_FILE => Ok(TenantSource::File),
+        NEXUS_MCP_TENANT_SOURCE_POSTGRES => Ok(TenantSource::Postgres),
+        _ => anyhow::bail!(
+            "invalid {NEXUS_MCP_TENANT_SOURCE_ENV}; expected '{NEXUS_MCP_TENANT_SOURCE_FILE}' or '{NEXUS_MCP_TENANT_SOURCE_POSTGRES}'"
+        ),
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_tenant_db_url() -> Result<Option<String>> {
+    match std::env::var(NEXUS_MCP_TENANT_DB_URL_ENV) {
+        Ok(url) => Ok(normalize_http_token(&url)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{NEXUS_MCP_TENANT_DB_URL_ENV} must be valid UTF-8")
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_tenant_db_relation() -> Result<String> {
+    let relation = std::env::var(NEXUS_MCP_TENANT_DB_RELATION_ENV)
+        .unwrap_or_else(|_| NEXUS_MCP_TENANT_DB_RELATION_DEFAULT.to_string())
+        .trim()
+        .to_string();
+
+    let valid_relation = relation
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    if !valid_relation || relation.is_empty() {
+        anyhow::bail!("{NEXUS_MCP_TENANT_DB_RELATION_ENV} must be a non-empty relation name");
+    }
+
+    Ok(relation)
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_tenant_env_u64(name: &str, default: u64) -> Result<u64> {
+    Ok(match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|error| anyhow::anyhow!("{name} must be an unsigned integer: {error}"))?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must be valid UTF-8")
+        }
+    })
+}
+
+#[cfg(feature = "mcp-http")]
+fn sha256_hex(raw: &[u8; 32]) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in raw {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_tenant_auth_state_from_file() -> Result<Option<Arc<TenantAuthState>>> {
     if let Some(path) = parse_mcp_http_tenants_path()? {
         let tenants = parse_tenant_config_file(Path::new(&path)).map_err(|error| {
             anyhow::anyhow!("failed to load {NEXUS_MCP_HTTP_TENANTS_ENV}='{path}': {error}")
         })?;
-        return Ok(Some(Arc::new(TenantAuthState::new(tenants))));
+        return Ok(Some(Arc::new(TenantAuthState::new(Arc::new(
+            FileTenantRegistry::new(tenants),
+        )))));
     }
 
     Ok(parse_mcp_http_token()?.map(|token| {
-        Arc::new(TenantAuthState::new(vec![TenantConfig {
-            tenant_id: NEXUS_MCP_HTTP_TENANT_ID_FALLBACK.to_string(),
-            api_key_sha256: sha256_bytes(&token),
-            rate_limit_rpm: NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
-        }]))
+        let mut snapshot = TenantSnapshot::new();
+        snapshot.insert(
+            sha256_hex_bytes(&token),
+            TenantInfo {
+                tenant_id: NEXUS_MCP_HTTP_TENANT_ID_FALLBACK.to_string(),
+                rate_limit_rpm: NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+            },
+        );
+        Arc::new(TenantAuthState::new(Arc::new(FileTenantRegistry::new(
+            snapshot,
+        ))))
     }))
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+impl PostgresTenantRegistry {
+    fn new(
+        db_url: String,
+        relation: String,
+        default_rate_limit_rpm: u64,
+        refresh_interval: Duration,
+        max_stale: Duration,
+        refresh_timeout: Duration,
+    ) -> Result<Arc<Self>> {
+        let connect_options = db_url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .map_err(|error| anyhow::anyhow!("invalid {NEXUS_MCP_TENANT_DB_URL_ENV}: {error}"))?
+            .ssl_mode(tenant_db_ssl_mode(&db_url));
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy_with(connect_options);
+
+        Ok(Arc::new(Self {
+            relation: relation.clone(),
+            default_rate_limit_rpm,
+            refresh_interval,
+            max_stale,
+            refresh_timeout,
+            pool,
+            snapshot: Arc::new(arc_swap::ArcSwap::from_pointee(TenantSnapshotState::empty())),
+        }))
+    }
+
+    fn refresh_from_snapshot(&self, snapshot: TenantSnapshot) {
+        self.snapshot.store(Arc::new(TenantSnapshotState::fresh(
+            snapshot,
+            Instant::now(),
+        )));
+    }
+
+    fn clear_if_stale(&self, now: Instant) {
+        let current = self.snapshot.load();
+        let Some(refreshed_at) = current.refreshed_at else {
+            return;
+        };
+
+        if now.duration_since(refreshed_at) < self.max_stale {
+            return;
+        }
+
+        // Stale: evict to a clean empty state. Resetting refreshed_at to None even when the
+        // snapshot is already empty prevents a stale timestamp from persisting and forcing a
+        // zero refresh-timeout budget, which would otherwise deadlock all future refreshes.
+        self.snapshot.store(Arc::new(TenantSnapshotState::empty()));
+    }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn tenant_db_ssl_mode(db_url: &str) -> sqlx::postgres::PgSslMode {
+    match parse_tenant_db_ssl_mode(db_url) {
+        Some(mode @ sqlx::postgres::PgSslMode::VerifyCa)
+        | Some(mode @ sqlx::postgres::PgSslMode::VerifyFull) => mode,
+        Some(_) => sqlx::postgres::PgSslMode::Require,
+        None => sqlx::postgres::PgSslMode::Require,
+    }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn parse_tenant_db_ssl_mode(db_url: &str) -> Option<sqlx::postgres::PgSslMode> {
+    let query = db_url.split_once('?')?.1;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(key, value)| {
+            if !key.eq_ignore_ascii_case("sslmode") {
+                return None;
+            }
+            value.parse().ok()
+        })
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn build_postgres_tenant_registry() -> Result<Arc<TenantAuthState>> {
+    let relation = parse_tenant_db_relation()?;
+    let refresh_interval_secs = parse_tenant_env_u64(
+        NEXUS_MCP_TENANT_REFRESH_SECS_ENV,
+        NEXUS_MCP_TENANT_REFRESH_SECS_DEFAULT,
+    )?;
+    if refresh_interval_secs == 0 {
+        anyhow::bail!("{NEXUS_MCP_TENANT_REFRESH_SECS_ENV} must be greater than 0");
+    }
+    let max_stale_secs = parse_tenant_env_u64(
+        NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV,
+        NEXUS_MCP_TENANT_MAX_STALE_SECS_DEFAULT,
+    )?;
+    if max_stale_secs == 0 || max_stale_secs < refresh_interval_secs {
+        anyhow::bail!(
+            "{NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV} must be >= {NEXUS_MCP_TENANT_REFRESH_SECS_ENV} and greater than 0"
+        );
+    }
+    let refresh_interval = Duration::from_secs(refresh_interval_secs);
+    let max_stale = Duration::from_secs(max_stale_secs);
+    let refresh_timeout_secs = parse_tenant_env_u64(
+        NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV,
+        NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_DEFAULT,
+    )?;
+    if refresh_timeout_secs == 0 {
+        anyhow::bail!("{NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV} must be greater than 0");
+    }
+    let refresh_timeout = Duration::from_secs(refresh_timeout_secs);
+    let db_url = parse_tenant_db_url()?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{NEXUS_MCP_TENANT_DB_URL_ENV} is required when {NEXUS_MCP_TENANT_SOURCE_ENV} is set to '{NEXUS_MCP_TENANT_SOURCE_POSTGRES}'"
+            )
+        })?;
+    let registry = PostgresTenantRegistry::new(
+        db_url,
+        relation,
+        NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+        refresh_interval,
+        max_stale,
+        refresh_timeout,
+    )?;
+
+    if let Err(error) = refresh_postgres_tenants(&registry).await {
+        tracing::error!("failed initial tenant registry refresh from PostgreSQL: {error}");
+        registry.clear_if_stale(Instant::now());
+    }
+
+    tokio::spawn(refresh_postgres_tenants_loop(registry.clone()));
+    Ok(Arc::new(TenantAuthState::new(registry)))
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn quote_postgres_relation_identifier(relation: &str) -> String {
+    let mut output = String::new();
+    for (index, segment) in relation.split('.').enumerate() {
+        if index > 0 {
+            output.push('.');
+        }
+        output.push('"');
+        output.push_str(&segment.replace('"', "\"\""));
+        output.push('"');
+    }
+    output
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn format_tenant_query(relation: &str, use_status_filter: bool) -> String {
+    if use_status_filter {
+        format!(
+            "SELECT key_sha256, workspace_id::text AS workspace_id, rate_limit_rpm::bigint AS rate_limit_rpm FROM {relation} WHERE status = 'active'"
+        )
+    } else {
+        format!(
+            "SELECT key_sha256, workspace_id::text AS workspace_id, rate_limit_rpm::bigint AS rate_limit_rpm FROM {relation}"
+        )
+    }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn postgres_relation_exists(pool: &sqlx::PgPool, relation: &str) -> Result<bool> {
+    let exists = sqlx::query_scalar::<_, bool>("SELECT to_regclass($1::text) IS NOT NULL")
+        .bind(relation)
+        .fetch_one(pool)
+        .await?;
+    Ok(exists)
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn resolve_postgres_relation(pool: &sqlx::PgPool, relation: &str) -> Result<String> {
+    if relation == NEXUS_MCP_TENANT_DB_RELATION_DEFAULT
+        && postgres_relation_exists(pool, NEXUS_MCP_TENANT_ACTIVE_API_KEYS_VIEW).await?
+    {
+        return Ok(NEXUS_MCP_TENANT_ACTIVE_API_KEYS_VIEW.to_string());
+    }
+
+    Ok(relation.to_string())
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn relation_uses_status_filter(relation: &str) -> bool {
+    relation != NEXUS_MCP_TENANT_ACTIVE_API_KEYS_VIEW
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn load_postgres_tenant_snapshot(
+    pool: &sqlx::PgPool,
+    relation: &str,
+    default_rate_limit_rpm: u64,
+) -> Result<TenantSnapshot> {
+    use sqlx::Row;
+
+    let resolved_relation = resolve_postgres_relation(pool, relation).await?;
+    let resolved_relation_quoted = quote_postgres_relation_identifier(&resolved_relation);
+    let query = format_tenant_query(
+        &resolved_relation_quoted,
+        relation_uses_status_filter(&resolved_relation),
+    );
+    let rows = sqlx::query(&query).fetch_all(pool).await?;
+    let mut snapshot = TenantSnapshot::with_capacity(rows.len());
+    for row in rows {
+        let raw_hash = row.try_get::<String, _>("key_sha256")?;
+        let key_sha256 = raw_hash.trim().to_ascii_lowercase();
+        parse_hex_sha256(&key_sha256)?;
+        let tenant_id = row.try_get::<String, _>("workspace_id")?;
+        let rate_limit_rpm = row.try_get::<Option<i64>, _>("rate_limit_rpm")?;
+        let rate_limit_rpm =
+            rate_limit_rpm.unwrap_or_else(|| i64::try_from(default_rate_limit_rpm).unwrap_or(0));
+        let rate_limit_rpm = u64::try_from(rate_limit_rpm).map_err(|_| {
+            anyhow::anyhow!(
+                "rate_limit_rpm for tenant '{tenant_id}' must be a non-negative integer"
+            )
+        })?;
+        if rate_limit_rpm == 0 {
+            anyhow::bail!("rate_limit_rpm for tenant '{tenant_id}' must be greater than 0");
+        }
+
+        if snapshot
+            .insert(
+                key_sha256,
+                TenantInfo {
+                    tenant_id,
+                    rate_limit_rpm,
+                },
+            )
+            .is_some()
+        {
+            anyhow::bail!("duplicate tenant api_key_sha256 in tenant registry snapshot");
+        }
+    }
+    Ok(snapshot)
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn refresh_postgres_tenants_with_loader<F>(
+    registry: &PostgresTenantRegistry,
+    timeout: Duration,
+    source: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<TenantSnapshot>>,
+{
+    let now = Instant::now();
+    registry.clear_if_stale(now);
+
+    let timeout = refresh_timeout_budget(registry, timeout, now);
+    let result = tokio::time::timeout(timeout, source).await;
+    let snapshot = match result {
+        Ok(result) => match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                registry.clear_if_stale(Instant::now());
+                return Err(error);
+            }
+        },
+        Err(_) => {
+            registry.clear_if_stale(Instant::now());
+            return Err(anyhow::anyhow!(
+                "tenant registry refresh from PostgreSQL timed out"
+            ));
+        }
+    };
+    registry.refresh_from_snapshot(snapshot);
+    Ok(())
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn refresh_timeout_budget(
+    registry: &PostgresTenantRegistry,
+    configured_timeout: Duration,
+    now: Instant,
+) -> Duration {
+    let current = registry.snapshot.load_full();
+    // An empty snapshot has nothing stale to protect, so a full-timeout refresh attempt is
+    // the recovery path and must never be starved by a zero budget.
+    if current.snapshot.is_empty() {
+        return configured_timeout;
+    }
+    let Some(refreshed_at) = current.refreshed_at else {
+        return configured_timeout;
+    };
+
+    // A non-empty snapshot is only reachable here while still fresh (clear_if_stale runs
+    // first and evicts stale ones), so cap the await to the remaining non-stale window. If it
+    // is somehow already stale, fall back to the full timeout rather than zero so the refresh
+    // can still attempt to recover.
+    match registry
+        .max_stale
+        .checked_sub(now.duration_since(refreshed_at))
+    {
+        Some(budget) if !budget.is_zero() => configured_timeout.min(budget),
+        _ => configured_timeout,
+    }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn refresh_postgres_tenants(registry: &PostgresTenantRegistry) -> Result<()> {
+    let pool = registry.pool.clone();
+    let relation = registry.relation.clone();
+    let default_rate_limit_rpm = registry.default_rate_limit_rpm;
+    let timeout = registry.refresh_timeout;
+    refresh_postgres_tenants_with_loader(registry, timeout, async move {
+        load_postgres_tenant_snapshot(&pool, &relation, default_rate_limit_rpm).await
+    })
+    .await
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+async fn refresh_postgres_tenants_loop(registry: Arc<PostgresTenantRegistry>) {
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + registry.refresh_interval,
+        registry.refresh_interval,
+    );
+    loop {
+        ticker.tick().await;
+        let result = tokio::spawn({
+            let registry = registry.clone();
+            async move { refresh_postgres_tenants(&registry).await }
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!("failed to refresh tenant registry from PostgreSQL: {error}");
+                registry.clear_if_stale(Instant::now());
+            }
+            Err(error) => {
+                tracing::error!("tenant registry refresh task panicked: {error}");
+                registry.clear_if_stale(Instant::now());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn sha256_hex_bytes(raw: &str) -> String {
+    sha256_hex(&sha256_bytes(raw))
+}
+
+#[cfg(feature = "mcp-http")]
+async fn load_tenant_auth_state() -> Result<Option<Arc<TenantAuthState>>> {
+    match parse_tenant_source()? {
+        TenantSource::File => parse_tenant_auth_state_from_file(),
+        TenantSource::Postgres => {
+            #[cfg(feature = "tenant-registry-postgres")]
+            {
+                Ok(Some(build_postgres_tenant_registry().await?))
+            }
+            #[cfg(not(feature = "tenant-registry-postgres"))]
+            {
+                anyhow::bail!("NEXUS_MCP_TENANT_SOURCE=postgres requires the tenant-registry-postgres feature")
+            }
+        }
+    }
 }
 
 #[cfg(feature = "mcp-http")]
@@ -2299,6 +2834,7 @@ fn sha256_bytes(key: &str) -> [u8; 32] {
 }
 
 #[cfg(feature = "mcp-http")]
+#[cfg(test)]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = a.len() ^ b.len();
     for i in 0..a.len().max(b.len()) {
@@ -2310,17 +2846,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[cfg(feature = "mcp-http")]
-fn tenant_for_token<'a>(
-    tenants: &'a [TenantConfig],
-    token_hash: &[u8; 32],
-) -> Option<&'a TenantConfig> {
-    let mut tenant = None;
-    for candidate in tenants {
-        if constant_time_eq(&candidate.api_key_sha256, token_hash) {
-            tenant = Some(candidate);
-        }
-    }
-    tenant
+fn tenant_for_token<'a>(snapshot: &'a TenantSnapshot, token_hash: &str) -> Option<&'a TenantInfo> {
+    snapshot.get(token_hash)
 }
 
 #[cfg(feature = "mcp-http")]
@@ -3014,8 +3541,9 @@ async fn require_bearer_token(
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let presented_key_hash = sha256_bytes(&presented_key);
-    let Some(tenant) = tenant_for_token(&auth.tenants, &presented_key_hash) else {
+    let snapshot = auth.registry.current_snapshot();
+    let presented_key_hash = sha256_hex_bytes(&presented_key);
+    let Some(tenant) = tenant_for_token(&snapshot, &presented_key_hash) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if rate_limit_blocked(
@@ -3066,16 +3594,14 @@ async fn run_mcp_http_server(server: NexusMcpServer) -> Result<()> {
     );
 
     let addr = parse_nexus_mcp_http_addr()?;
-    let tenant_auth = load_tenant_auth_state()?;
+    let tenant_auth = load_tenant_auth_state().await?;
     if tenant_auth.is_none() && !is_loopback_addr(&addr) {
-        anyhow::bail!(
-            "NEXUS_MCP_HTTP_TOKEN or NEXUS_MCP_HTTP_TENANTS is required for non-loopback HTTP bind"
-        );
+        anyhow::bail!("tenant auth source is required for non-loopback HTTP bind");
     }
     if tenant_auth.is_none() {
         tracing::warn!(
             addr = %addr,
-            "NEXUS_MCP_HTTP_TOKEN and NEXUS_MCP_HTTP_TENANTS are not set; unauthenticated HTTP MCP endpoint is loopback-only"
+            "NEXUS_MCP_TENANT_SOURCE is not configured with a usable source; unauthenticated HTTP MCP endpoint is loopback-only"
         );
     }
 
@@ -3181,30 +3707,59 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic;
 
     #[cfg(feature = "mcp-http")]
     static MCP_HTTP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[cfg(feature = "mcp-http")]
-    const MCP_HTTP_ENV_VARS: [&str; 2] = [NEXUS_MCP_HTTP_TOKEN_ENV, NEXUS_MCP_HTTP_TENANTS_ENV];
+    const MCP_HTTP_ENV_VARS: [&str; 8] = [
+        NEXUS_MCP_HTTP_TOKEN_ENV,
+        NEXUS_MCP_HTTP_TENANTS_ENV,
+        NEXUS_MCP_TENANT_SOURCE_ENV,
+        NEXUS_MCP_TENANT_DB_URL_ENV,
+        NEXUS_MCP_TENANT_DB_RELATION_ENV,
+        NEXUS_MCP_TENANT_REFRESH_SECS_ENV,
+        NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV,
+        NEXUS_MCP_TENANT_DB_TIMEOUT_SECS_ENV,
+    ];
 
     #[cfg(feature = "mcp-http")]
-    fn with_clean_mcp_http_env(test: impl FnOnce() + std::panic::UnwindSafe) {
-        let _guard = MCP_HTTP_ENV_LOCK.lock().unwrap();
-        let saved: [(&str, Option<std::ffi::OsString>); 2] =
-            MCP_HTTP_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+    struct McpHttpEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    #[cfg(feature = "mcp-http")]
+    impl Drop for McpHttpEnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "mcp-http")]
+    fn acquire_mcp_http_env() -> McpHttpEnvGuard {
+        let lock = MCP_HTTP_ENV_LOCK.lock().unwrap();
+        let saved = MCP_HTTP_ENV_VARS
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect::<Vec<_>>();
 
         for name in MCP_HTTP_ENV_VARS {
             std::env::remove_var(name);
         }
 
-        let result = std::panic::catch_unwind(test);
+        McpHttpEnvGuard { _lock: lock, saved }
+    }
 
-        for (name, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
+    #[cfg(feature = "mcp-http")]
+    fn with_clean_mcp_http_env(test: impl FnOnce() + std::panic::UnwindSafe) {
+        let _guard = acquire_mcp_http_env();
+        let result = panic::catch_unwind(test);
 
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
@@ -3594,16 +4149,399 @@ mod tests {
     }
 
     #[cfg(feature = "mcp-http")]
+    fn build_tenant_auth_state_from_snapshot(snapshot: TenantSnapshot) -> Arc<TenantAuthState> {
+        Arc::new(TenantAuthState::new(Arc::new(TestTenantRegistry::new(
+            snapshot,
+        ))))
+    }
+
+    #[cfg(feature = "mcp-http")]
     fn build_tenant_test_state(
         tenant_id: &str,
         api_key: &str,
         rate_limit_rpm: u64,
     ) -> Arc<TenantAuthState> {
-        Arc::new(TenantAuthState::new(vec![TenantConfig {
-            tenant_id: tenant_id.to_string(),
-            api_key_sha256: sha256_bytes(api_key),
-            rate_limit_rpm,
-        }]))
+        let mut snapshot = TenantSnapshot::new();
+        snapshot.insert(
+            sha256_hex(api_key),
+            TenantInfo {
+                tenant_id: tenant_id.to_string(),
+                rate_limit_rpm,
+            },
+        );
+        build_tenant_auth_state_from_snapshot(snapshot)
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[derive(Clone)]
+    struct TestTenantRegistry {
+        snapshot: std::sync::Arc<std::sync::Mutex<TenantSnapshot>>,
+    }
+
+    #[cfg(feature = "mcp-http")]
+    impl TestTenantRegistry {
+        fn new(snapshot: TenantSnapshot) -> Self {
+            Self {
+                snapshot: std::sync::Arc::new(std::sync::Mutex::new(snapshot)),
+            }
+        }
+
+        fn replace_snapshot(&self, snapshot: TenantSnapshot) {
+            *self
+                .snapshot
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = snapshot;
+        }
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn tenant_for_token_uses_snapshot_map_match() {
+        let mut snapshot = TenantSnapshot::new();
+        let key = "acme-api-key";
+        snapshot.insert(
+            sha256_hex(key),
+            TenantInfo {
+                tenant_id: "acme".to_string(),
+                rate_limit_rpm: 120,
+            },
+        );
+
+        let tenant = tenant_for_token(&snapshot, &sha256_hex(key)).expect("token should resolve");
+        assert_eq!(tenant.tenant_id, "acme");
+        assert_eq!(tenant.rate_limit_rpm, 120);
+        assert!(tenant_for_token(&snapshot, "deadbeef").is_none());
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn tenant_registry_refresh_revocation_removes_access() {
+        let tenant_key = "expected-secret";
+        let mut snapshot = TenantSnapshot::new();
+        snapshot.insert(
+            sha256_hex(tenant_key),
+            TenantInfo {
+                tenant_id: "acme".to_string(),
+                rate_limit_rpm: 120,
+            },
+        );
+        let registry = std::sync::Arc::new(TestTenantRegistry::new(snapshot));
+        let state = Arc::new(TenantAuthState::new(registry.clone()));
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {tenant_key}"),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let authorized = call_tenant_route(Some(state.clone()), request).await;
+        assert_eq!(authorized.status(), StatusCode::OK);
+
+        registry.replace_snapshot(TenantSnapshot::new());
+        let denied = call_tenant_route(
+            Some(state),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {tenant_key}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn tenant_auth_state_with_empty_snapshot_denies_all_requests() {
+        let state = build_tenant_auth_state_from_snapshot(TenantSnapshot::new());
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer shared-secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(call_tenant_route(Some(state), request));
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn postgres_registry_stale_refresh_behavior() {
+        let registry = PostgresTenantRegistry::new(
+            "postgres://localhost/postgres".to_string(),
+            NEXUS_MCP_TENANT_DB_RELATION_DEFAULT.to_string(),
+            NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+            Duration::from_secs(20),
+            Duration::from_secs(2),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let mut snapshot = TenantSnapshot::new();
+        snapshot.insert(
+            sha256_hex("known-key"),
+            TenantInfo {
+                tenant_id: "acme".to_string(),
+                rate_limit_rpm: 120,
+            },
+        );
+        let refreshed_at = Instant::now();
+        registry.snapshot.store(Arc::new(TenantSnapshotState {
+            snapshot: Arc::new(snapshot),
+            refreshed_at: Some(refreshed_at),
+        }));
+
+        registry.clear_if_stale(refreshed_at + Duration::from_millis(500));
+        assert_eq!(registry.current_snapshot().len(), 1);
+
+        registry.clear_if_stale(refreshed_at + Duration::from_secs(3));
+        assert!(registry.current_snapshot().is_empty());
+        assert!(registry.snapshot.load_full().refreshed_at.is_none());
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn postgres_tenant_refresh_timeout_clears_stale_snapshot() {
+        let _guard = acquire_mcp_http_env();
+        let registry = PostgresTenantRegistry::new(
+            "postgres://localhost/postgres".to_string(),
+            NEXUS_MCP_TENANT_DB_RELATION_DEFAULT.to_string(),
+            NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+            Duration::from_secs(20),
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let tenant_key = "known-key";
+        let mut snapshot = TenantSnapshot::new();
+        snapshot.insert(
+            sha256_hex(tenant_key),
+            TenantInfo {
+                tenant_id: "acme".to_string(),
+                rate_limit_rpm: 120,
+            },
+        );
+        let refreshed_at = Instant::now() - Duration::from_millis(1500);
+        registry.snapshot.store(Arc::new(TenantSnapshotState {
+            snapshot: Arc::new(snapshot),
+            refreshed_at: Some(refreshed_at),
+        }));
+
+        let tenant_registry: Arc<dyn TenantRegistry> = registry.clone();
+        let state = Arc::new(TenantAuthState::new(tenant_registry));
+        let authorized = call_tenant_route(
+            Some(state.clone()),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {tenant_key}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(authorized.status(), StatusCode::OK);
+
+        let started = tokio::time::Instant::now();
+        let timed_out = tokio::time::timeout(Duration::from_secs(3), async {
+            refresh_postgres_tenants_with_loader(&registry, Duration::from_secs(5), async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(TenantSnapshot::new())
+            })
+            .await
+        })
+        .await;
+        assert!(
+            timed_out.is_ok(),
+            "refresh must finish within bounded timeout"
+        );
+        assert!(
+            timed_out.unwrap().is_err(),
+            "expected timeout-based refresh error"
+        );
+
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(2));
+        assert!(registry.current_snapshot().is_empty());
+        assert!(
+            registry.snapshot.load_full().refreshed_at.is_none(),
+            "refresh failure should allow stale eviction"
+        );
+
+        let denied = call_tenant_route(
+            Some(state),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {tenant_key}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn postgres_tenant_refresh_recovers_from_stale_empty_snapshot() {
+        let _guard = acquire_mcp_http_env();
+        let registry = PostgresTenantRegistry::new(
+            "postgres://localhost/postgres".to_string(),
+            NEXUS_MCP_TENANT_DB_RELATION_DEFAULT.to_string(),
+            NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+            Duration::from_secs(20),
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        // A stale, EMPTY snapshot that still carries an old refreshed_at timestamp is the
+        // state that previously deadlocked refreshes: refresh_timeout_budget returned a zero
+        // timeout, so every subsequent refresh timed out instantly and never repopulated.
+        registry.snapshot.store(Arc::new(TenantSnapshotState {
+            snapshot: Arc::new(TenantSnapshot::new()),
+            refreshed_at: Some(Instant::now() - Duration::from_secs(10)),
+        }));
+
+        let tenant_key = "recovered-key";
+        let recovered = sha256_hex(tenant_key);
+        let recovered_for_loader = recovered.clone();
+        refresh_postgres_tenants_with_loader(&registry, registry.refresh_timeout, async move {
+            // Yield so the loader is not ready on the first poll; a zero budget (the old bug)
+            // would time out here, while the recovery path uses the full configured timeout.
+            tokio::task::yield_now().await;
+            let mut snapshot = TenantSnapshot::new();
+            snapshot.insert(
+                recovered_for_loader,
+                TenantInfo {
+                    tenant_id: "tenant-recovered".to_string(),
+                    rate_limit_rpm: 90,
+                },
+            );
+            Ok(snapshot)
+        })
+        .await
+        .expect("refresh should recover from a stale-empty snapshot, not deadlock");
+
+        assert!(
+            registry.current_snapshot().get(&recovered).is_some(),
+            "registry must reload newly active keys after a stale-empty state"
+        );
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[test]
+    fn parse_tenant_db_ssl_mode_requires_verification_or_require() {
+        // PgSslMode does not implement PartialEq, so compare via matches!.
+        assert!(matches!(
+            tenant_db_ssl_mode("postgres://localhost/postgres"),
+            sqlx::postgres::PgSslMode::Require
+        ));
+        assert!(matches!(
+            tenant_db_ssl_mode("postgres://localhost/postgres?sslmode=prefer"),
+            sqlx::postgres::PgSslMode::Require
+        ));
+        assert!(matches!(
+            tenant_db_ssl_mode("postgres://localhost/postgres?sslmode=verify-full"),
+            sqlx::postgres::PgSslMode::VerifyFull
+        ));
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[test]
+    fn quote_postgres_relation_identifier_quotes_segments() {
+        assert_eq!(
+            quote_postgres_relation_identifier("public.api_keys"),
+            "\"public\".\"api_keys\""
+        );
+        assert_eq!(
+            quote_postgres_relation_identifier(r#"schema.with"dot"#),
+            "\"schema\".\"with\"\"dot\""
+        );
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn build_postgres_tenant_registry_requires_db_url() {
+        let _guard = acquire_mcp_http_env();
+        std::env::set_var(
+            NEXUS_MCP_TENANT_SOURCE_ENV,
+            NEXUS_MCP_TENANT_SOURCE_POSTGRES,
+        );
+        let error = match build_postgres_tenant_registry().await {
+            Ok(_) => panic!("expected build_postgres_tenant_registry() to fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{NEXUS_MCP_TENANT_DB_URL_ENV} is required")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn build_postgres_tenant_registry_rejects_invalid_ttls() {
+        let _guard = acquire_mcp_http_env();
+        std::env::set_var(
+            NEXUS_MCP_TENANT_SOURCE_ENV,
+            NEXUS_MCP_TENANT_SOURCE_POSTGRES,
+        );
+        std::env::set_var(NEXUS_MCP_TENANT_DB_URL_ENV, "postgres://localhost/postgres");
+
+        std::env::set_var(NEXUS_MCP_TENANT_REFRESH_SECS_ENV, "0");
+        let zero_refresh = match build_postgres_tenant_registry().await {
+            Ok(_) => panic!("expected build_postgres_tenant_registry() to fail"),
+            Err(error) => error,
+        };
+        assert!(
+            zero_refresh.to_string().contains(&format!(
+                "{NEXUS_MCP_TENANT_REFRESH_SECS_ENV} must be greater than 0"
+            )),
+            "unexpected error: {zero_refresh}"
+        );
+
+        std::env::set_var(NEXUS_MCP_TENANT_REFRESH_SECS_ENV, "10");
+        std::env::set_var(NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV, "2");
+        let bad_stale = match build_postgres_tenant_registry().await {
+            Ok(_) => panic!("expected build_postgres_tenant_registry() to fail"),
+            Err(error) => error,
+        };
+        assert!(
+            bad_stale
+                .to_string()
+                .contains(&format!(
+                    "{NEXUS_MCP_TENANT_MAX_STALE_SECS_ENV} must be >= {NEXUS_MCP_TENANT_REFRESH_SECS_ENV}"
+                )),
+            "unexpected error: {bad_stale}"
+        );
+    }
+
+    #[cfg(feature = "mcp-http")]
+    impl TenantRegistry for TestTenantRegistry {
+        fn current_snapshot(&self) -> Arc<TenantSnapshot> {
+            Arc::new(
+                self.snapshot
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+            )
+        }
     }
 
     #[cfg(feature = "mcp-http")]
@@ -3650,11 +4588,103 @@ mod tests {
         .to_string();
         std::fs::write(&tenants_path, body).unwrap();
         let tenants = parse_tenant_config_file(&tenants_path).unwrap();
+        let tenant = tenants
+            .get(&sha256_hex(api_key))
+            .expect("tenant should be in snapshot");
 
         assert_eq!(tenants.len(), 1);
-        assert_eq!(tenants[0].tenant_id, "acme");
-        assert_eq!(tenants[0].rate_limit_rpm, 120);
-        assert_eq!(tenants[0].api_key_sha256, sha256_bytes(api_key));
+        assert_eq!(tenant.tenant_id, "acme");
+        assert_eq!(tenant.rate_limit_rpm, 120);
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[tokio::test]
+    async fn postgres_tenant_snapshot_loads_active_rows_from_db_table() {
+        let _guard = acquire_mcp_http_env();
+        let db_url = match std::env::var(NEXUS_MCP_TENANT_DB_URL_ENV) {
+            Ok(url) if !url.trim().is_empty() => url,
+            _ => return,
+        };
+
+        let pool = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+
+        let relation = format!(
+            "tenant_registry_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock must be available")
+                .as_nanos()
+        );
+        let create = format!(
+            "CREATE TEMP TABLE {relation} (key_sha256 TEXT NOT NULL, workspace_id TEXT NOT NULL, rate_limit_rpm INTEGER, status TEXT NOT NULL)"
+        );
+        if sqlx::query(&create).execute(&pool).await.is_err() {
+            return;
+        }
+
+        let active_key = sha256_hex("postgres-active-key");
+        let revoked_key = sha256_hex("postgres-revoked-key");
+        let active_rate_limit_rpm: i64 = 180;
+        let insert = format!(
+            "INSERT INTO {relation} (key_sha256, workspace_id, rate_limit_rpm, status) VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)"
+        );
+        if sqlx::query(&insert)
+            .bind(active_key.clone())
+            .bind("tenant-acme")
+            .bind(Option::<i64>::Some(active_rate_limit_rpm))
+            .bind("active")
+            .bind(revoked_key)
+            .bind("tenant-old")
+            .bind(Option::<i64>::Some(10))
+            .bind("revoked")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let snapshot = match load_postgres_tenant_snapshot(
+            &pool,
+            &relation,
+            NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
+        )
+        .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(_) => return,
+        };
+        assert_eq!(snapshot.len(), 1);
+
+        let tenant = snapshot
+            .get(&active_key)
+            .expect("active key must be present in snapshot");
+        assert_eq!(tenant.tenant_id, "tenant-acme");
+        assert_eq!(tenant.rate_limit_rpm, active_rate_limit_rpm as u64,);
+
+        let state = build_tenant_auth_state_from_snapshot(snapshot);
+        let authorized = call_tenant_route(
+            Some(state),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer postgres-active-key",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(authorized.status(), StatusCode::OK);
     }
 
     #[cfg(feature = "mcp-http")]
@@ -3701,21 +4731,33 @@ mod tests {
     }
 
     #[cfg(feature = "mcp-http")]
-    #[test]
-    fn load_tenant_auth_state_falls_back_to_token_when_tenants_unset_or_empty() {
-        with_clean_mcp_http_env(|| {
-            std::env::set_var(NEXUS_MCP_HTTP_TENANTS_ENV, "   ");
-            std::env::set_var(NEXUS_MCP_HTTP_TOKEN_ENV, "shared-secret");
-            let state = load_tenant_auth_state()
-                .unwrap()
-                .expect("token auth should be configured");
+    #[tokio::test]
+    async fn load_tenant_auth_state_falls_back_to_token_when_tenants_unset_or_empty() {
+        let _guard = acquire_mcp_http_env();
+        std::env::set_var(NEXUS_MCP_HTTP_TENANTS_ENV, "   ");
+        std::env::set_var(NEXUS_MCP_HTTP_TOKEN_ENV, "shared-secret");
+        std::env::set_var(NEXUS_MCP_TENANT_SOURCE_ENV, NEXUS_MCP_TENANT_SOURCE_FILE);
 
-            assert_eq!(state.tenants.len(), 1);
-            assert_eq!(
-                state.tenants[0].tenant_id,
-                NEXUS_MCP_HTTP_TENANT_ID_FALLBACK
-            );
-        });
+        let state = load_tenant_auth_state()
+            .await
+            .unwrap()
+            .expect("token auth should be configured");
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::AUTHORIZATION, "Bearer shared-secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = call_tenant_route(Some(state), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-tenant-id")
+                .and_then(|value| value.to_str().ok()),
+            Some(NEXUS_MCP_HTTP_TENANT_ID_FALLBACK)
+        );
     }
 
     #[cfg(all(feature = "mcp-http", unix))]
