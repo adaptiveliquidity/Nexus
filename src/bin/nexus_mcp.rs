@@ -2167,7 +2167,7 @@ fn parse_nexus_mcp_http_addr() -> Result<SocketAddr> {
 #[cfg(feature = "mcp-http")]
 fn parse_mcp_http_token() -> Result<Option<String>> {
     match std::env::var(NEXUS_MCP_HTTP_TOKEN_ENV) {
-        Ok(token) => Ok(Some(token)),
+        Ok(token) => Ok(normalize_http_token(&token)),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("{NEXUS_MCP_HTTP_TOKEN_ENV} must be valid UTF-8")
@@ -2184,6 +2184,25 @@ fn parse_mcp_http_tenants_path() -> Result<Option<String>> {
             anyhow::bail!("{NEXUS_MCP_HTTP_TENANTS_ENV} must be valid UTF-8 path")
         }
     }
+}
+
+#[cfg(feature = "mcp-http")]
+fn normalize_http_token(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+#[cfg(feature = "mcp-http")]
+fn parse_bearer_token(raw: &str) -> Option<String> {
+    let (scheme, value) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    normalize_http_token(value)
 }
 
 #[cfg(feature = "mcp-http")]
@@ -2207,6 +2226,7 @@ fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
     let tenants: Vec<TenantConfigFileEntry> = serde_json::from_str(&contents)
         .map_err(|error| anyhow::anyhow!("invalid tenants JSON: {error}"))?;
     let mut tenant_ids = HashSet::new();
+    let mut tenant_hashes = HashSet::new();
     let mut tenant_configs = Vec::with_capacity(tenants.len());
 
     if tenants.is_empty() {
@@ -2221,7 +2241,11 @@ fn parse_tenant_config_file(path: &Path) -> Result<Vec<TenantConfig>> {
         if !tenant_ids.insert(tenant_id.to_string()) {
             anyhow::bail!("duplicate tenant_id '{tenant_id}'");
         }
-        let api_key_sha256 = parse_hex_sha256(&tenant.api_key_sha256)?;
+        let api_key_sha256_str = tenant.api_key_sha256.trim();
+        let api_key_sha256 = parse_hex_sha256(api_key_sha256_str)?;
+        if !tenant_hashes.insert(api_key_sha256) {
+            anyhow::bail!("duplicate tenant api_key_sha256 '{api_key_sha256_str}'");
+        }
         let rate_limit_rpm = tenant
             .rate_limit_rpm
             .unwrap_or(NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM);
@@ -2971,14 +2995,13 @@ async fn require_bearer_token(
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
+        .and_then(parse_bearer_token)
         .filter(|token| !token.is_empty());
     let Some(presented_key) = presented_key else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let presented_key_hash = sha256_bytes(presented_key);
+    let presented_key_hash = sha256_bytes(&presented_key);
     let Some(tenant) = tenant_for_token(&auth.tenants, &presented_key_hash) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -3138,6 +3161,35 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "mcp-http")]
+    static MCP_HTTP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(feature = "mcp-http")]
+    const MCP_HTTP_ENV_VARS: [&str; 2] = [NEXUS_MCP_HTTP_TOKEN_ENV, NEXUS_MCP_HTTP_TENANTS_ENV];
+
+    #[cfg(feature = "mcp-http")]
+    fn with_clean_mcp_http_env(test: impl FnOnce() + std::panic::UnwindSafe) {
+        let _guard = MCP_HTTP_ENV_LOCK.lock().unwrap();
+        let saved: [(&str, Option<std::ffi::OsString>); 2] =
+            MCP_HTTP_ENV_VARS.map(|name| (name, std::env::var_os(name)));
+
+        for name in MCP_HTTP_ENV_VARS {
+            std::env::remove_var(name);
+        }
+
+        let result = std::panic::catch_unwind(test);
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
 
     #[test]
     fn get_history_returns_empty_for_fresh_hypervisor() {
@@ -3586,6 +3638,54 @@ mod tests {
     }
 
     #[cfg(feature = "mcp-http")]
+    #[test]
+    fn parse_tenant_store_rejects_duplicate_api_key_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenants_path = tmp.path().join("tenants.json");
+        let body = serde_json::json!([
+            {
+                "tenant_id": "acme",
+                "api_key_sha256": sha256_hex("shared-key"),
+            },
+            {
+                "tenant_id": "second",
+                "api_key_sha256": sha256_hex("shared-key"),
+            }
+        ])
+        .to_string();
+        std::fs::write(&tenants_path, body).unwrap();
+
+        let error = parse_tenant_config_file(&tenants_path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate tenant api_key_sha256"));
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[test]
+    fn parse_mcp_http_token_normalizes_empty() {
+        with_clean_mcp_http_env(|| {
+            std::env::set_var(NEXUS_MCP_HTTP_TOKEN_ENV, "   ");
+            assert!(parse_mcp_http_token().unwrap().is_none());
+        });
+    }
+
+    #[cfg(all(feature = "mcp-http", unix))]
+    #[test]
+    fn parse_mcp_http_token_rejects_non_utf8() {
+        with_clean_mcp_http_env(|| {
+            use std::os::unix::ffi::OsStringExt;
+            std::env::set_var(
+                NEXUS_MCP_HTTP_TOKEN_ENV,
+                std::ffi::OsString::from_vec(vec![0xff]),
+            );
+
+            assert!(parse_mcp_http_token().is_err());
+        });
+    }
+
+    #[cfg(feature = "mcp-http")]
     fn sha256_hex(value: &str) -> String {
         let digest = sha2::Sha256::digest(value.as_bytes());
         let mut hex = String::with_capacity(64);
@@ -3626,6 +3726,31 @@ mod tests {
             .method("GET")
             .uri("/")
             .header(axum::http::header::AUTHORIZATION, "Bearer expected-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = call_tenant_route(Some(state), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-tenant-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acme")
+        );
+    }
+
+    #[cfg(feature = "mcp-http")]
+    #[tokio::test]
+    async fn require_bearer_token_matches_normalized_secret_with_whitespace() {
+        let state = build_tenant_test_state("acme", "expected-secret", 120);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                "Bearer   expected-secret   ",
+            )
             .body(Body::empty())
             .unwrap();
 

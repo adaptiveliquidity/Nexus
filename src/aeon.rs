@@ -267,12 +267,7 @@ pub struct AeonMemoryClient {
 impl AeonMemoryClient {
     pub fn from_config(config: &AeonConfig) -> Self {
         let mut policy = EgressPolicy::from_env().unwrap_or_else(|error| {
-            warn!(
-                target: "nexus.aeon",
-                error = %error,
-                "AEON-IQ egress policy configuration invalid; defaulting to deny-by-default policy"
-            );
-            EgressPolicy::default()
+            panic!("AEON-IQ egress policy configuration is invalid: {error}");
         });
         if let Ok(base_url) = reqwest::Url::parse(&config.base_url) {
             if let Some(host) = base_url.host_str() {
@@ -282,6 +277,7 @@ impl AeonMemoryClient {
 
         let http = reqwest::ClientBuilder::new()
             .timeout(Duration::from_millis(config.timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|e| {
                 warn!(
@@ -686,6 +682,7 @@ pub struct TimelineReplayReport {
 pub struct AeonTimelineSink {
     http: reqwest::Client,
     base_url: String,
+    policy: EgressPolicy,
     management_key: Option<String>,
     mode: TimelineDeliveryMode,
     spool_path: PathBuf,
@@ -707,6 +704,7 @@ impl AeonTimelineSink {
         Self {
             http: client.http.clone(),
             base_url: client.base_url.clone(),
+            policy: client.policy.clone(),
             management_key: client.management_key.clone(),
             mode: TimelineDeliveryMode::Advisory,
             spool_path: default_timeline_spool_path(),
@@ -1013,6 +1011,15 @@ impl AeonTimelineSink {
                 status: response.status,
                 body: response.body,
             });
+        }
+        if let Err(error) = self.policy.check_url(&url) {
+            warn!(
+                target: "nexus.aeon",
+                error = %error,
+                url = %url,
+                "AEON-IQ timeline egress denied by policy"
+            );
+            return None;
         }
 
         match self
@@ -1454,7 +1461,7 @@ mod tests {
     use crate::daemon::NexusExecutionEvent;
     use serde_json::Value;
     use std::ffi::OsString;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
@@ -1630,6 +1637,62 @@ mod tests {
         let hits = client.search("trap recovery", 2).await;
 
         assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aeon_memory_client_does_not_follow_http_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let final_server_hit = Arc::new(AtomicBool::new(false));
+        let final_server_flag = Arc::clone(&final_server_hit);
+
+        let final_server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let final_addr = final_server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = final_server.accept().await else {
+                return;
+            };
+            final_server_flag.store(true, Ordering::SeqCst);
+            let mut buffer = [0u8; 2048];
+            let _ = socket.read(&mut buffer).await;
+
+            let response = [
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Content-Length: 22\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                r#"{"results":[{"id":"x"}]}"#,
+            ]
+            .concat();
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let redirect_server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect_server.local_addr().unwrap();
+        let redirect_target = format!("http://127.0.0.1:{}/final", final_addr.port());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = redirect_server.accept().await else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = socket.read(&mut buffer).await;
+
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect_target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+
+        let client = AeonMemoryClient::from_config(&test_config(
+            &format!("http://127.0.0.1:{}", redirect_addr.port()),
+            Some("mgmt-key"),
+        ));
+
+        let hits = client.search("query", 1).await;
+
+        assert!(hits.is_empty());
+        assert!(!final_server_hit.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1936,6 +1999,20 @@ mod tests {
 
         assert_eq!(status, TimelineDeliveryStatus::Delivered);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn aeon_timeline_post_json_denies_blocklisted_urls() {
+        let sink =
+            AeonTimelineSink::from_config(&test_config("http://aeon.test", Some("mgmt-key")));
+        let blocked_url =
+            reqwest::Url::parse("http://169.254.169.254/api/v1/agents/agent-1/timeline").unwrap();
+
+        let response = sink
+            .post_json(blocked_url, "mgmt-key", &serde_json::json!({}))
+            .await;
+
+        assert!(response.is_none());
     }
 
     #[tokio::test]
