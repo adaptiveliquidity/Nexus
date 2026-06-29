@@ -2483,7 +2483,7 @@ impl PostgresTenantRegistry {
         let connect_options = db_url
             .parse::<sqlx::postgres::PgConnectOptions>()
             .map_err(|error| anyhow::anyhow!("invalid {NEXUS_MCP_TENANT_DB_URL_ENV}: {error}"))?
-            .ssl_mode(sqlx::postgres::PgSslMode::Require);
+            .ssl_mode(tenant_db_ssl_mode(&db_url));
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
             .connect_lazy_with(connect_options);
@@ -2520,6 +2520,30 @@ impl PostgresTenantRegistry {
             self.snapshot.store(Arc::new(TenantSnapshotState::empty()));
         }
     }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn tenant_db_ssl_mode(db_url: &str) -> sqlx::postgres::PgSslMode {
+    match parse_tenant_db_ssl_mode(db_url) {
+        Some(mode @ sqlx::postgres::PgSslMode::VerifyCa)
+        | Some(mode @ sqlx::postgres::PgSslMode::VerifyFull) => mode,
+        Some(_) => sqlx::postgres::PgSslMode::Require,
+        None => sqlx::postgres::PgSslMode::Require,
+    }
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn parse_tenant_db_ssl_mode(db_url: &str) -> Option<sqlx::postgres::PgSslMode> {
+    let query = db_url.split_once('?')?.1;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(key, value)| {
+            if !key.eq_ignore_ascii_case("sslmode") {
+                return None;
+            }
+            value.parse().ok()
+        })
 }
 
 #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
@@ -2593,11 +2617,11 @@ fn quote_postgres_relation_identifier(relation: &str) -> String {
 fn format_tenant_query(relation: &str, use_status_filter: bool) -> String {
     if use_status_filter {
         format!(
-            "SELECT key_sha256, workspace_id::text AS workspace_id, rate_limit_rpm FROM {relation} WHERE status = 'active'"
+            "SELECT key_sha256, workspace_id::text AS workspace_id, rate_limit_rpm::bigint AS rate_limit_rpm FROM {relation} WHERE status = 'active'"
         )
     } else {
         format!(
-            "SELECT key_sha256, workspace_id::text AS workspace_id, rate_limit_rpm FROM {relation}"
+            "SELECT key_sha256, workspace_id::text AS workspace_id, rate_limit_rpm::bigint AS rate_limit_rpm FROM {relation}"
         )
     }
 }
@@ -2685,12 +2709,47 @@ async fn refresh_postgres_tenants_with_loader<F>(
 where
     F: std::future::Future<Output = Result<TenantSnapshot>>,
 {
-    let source_snapshot = tokio::time::timeout(timeout, source)
-        .await
-        .map_err(|_| anyhow::anyhow!("tenant registry refresh from PostgreSQL timed out"))?;
-    let snapshot = source_snapshot?;
+    let now = Instant::now();
+    registry.clear_if_stale(now);
+
+    let timeout = refresh_timeout_budget(registry, timeout, now);
+    let result = tokio::time::timeout(timeout, source).await;
+    let snapshot = match result {
+        Ok(result) => match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                registry.clear_if_stale(Instant::now());
+                return Err(error);
+            }
+        },
+        Err(_) => {
+            registry.clear_if_stale(Instant::now());
+            return Err(anyhow::anyhow!(
+                "tenant registry refresh from PostgreSQL timed out"
+            ));
+        }
+    };
     registry.refresh_from_snapshot(snapshot);
     Ok(())
+}
+
+#[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+fn refresh_timeout_budget(
+    registry: &PostgresTenantRegistry,
+    configured_timeout: Duration,
+    now: Instant,
+) -> Duration {
+    let current = registry.snapshot.load_full();
+    let Some(refreshed_at) = current.refreshed_at else {
+        return configured_timeout;
+    };
+
+    let age = now.duration_since(refreshed_at);
+    if age >= registry.max_stale {
+        Duration::ZERO
+    } else {
+        configured_timeout.min(registry.max_stale - age)
+    }
 }
 
 #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
@@ -4247,7 +4306,7 @@ mod tests {
             NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM,
             Duration::from_secs(20),
             Duration::from_secs(2),
-            Duration::from_secs(1),
+            Duration::from_secs(5),
         )
         .unwrap();
 
@@ -4260,7 +4319,7 @@ mod tests {
                 rate_limit_rpm: 120,
             },
         );
-        let refreshed_at = Instant::now() - Duration::from_secs(3);
+        let refreshed_at = Instant::now() - Duration::from_millis(1500);
         registry.snapshot.store(Arc::new(TenantSnapshotState {
             snapshot: Arc::new(snapshot),
             refreshed_at: Some(refreshed_at),
@@ -4285,16 +4344,11 @@ mod tests {
 
         let started = tokio::time::Instant::now();
         let timed_out = tokio::time::timeout(Duration::from_secs(3), async {
-            let refresh_result =
-                refresh_postgres_tenants_with_loader(&registry, Duration::from_secs(1), async {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    Ok(TenantSnapshot::new())
-                })
-                .await;
-            if refresh_result.is_err() {
-                registry.clear_if_stale(Instant::now());
-            }
-            refresh_result
+            refresh_postgres_tenants_with_loader(&registry, Duration::from_secs(5), async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(TenantSnapshot::new())
+            })
+            .await
         })
         .await;
         assert!(
@@ -4307,14 +4361,7 @@ mod tests {
         );
 
         let elapsed = started.elapsed();
-        assert!(
-            elapsed >= Duration::from_secs(1),
-            "refresh should wait for timeout duration"
-        );
-        assert!(
-            elapsed < Duration::from_secs(3),
-            "refresh should not hang on timeout"
-        );
+        assert!(elapsed < Duration::from_secs(2));
         assert!(registry.current_snapshot().is_empty());
         assert!(
             registry.snapshot.load_full().refreshed_at.is_none(),
@@ -4335,6 +4382,24 @@ mod tests {
         )
         .await;
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
+    #[test]
+    fn parse_tenant_db_ssl_mode_requires_verification_or_require() {
+        // PgSslMode does not implement PartialEq, so compare via matches!.
+        assert!(matches!(
+            tenant_db_ssl_mode("postgres://localhost/postgres"),
+            sqlx::postgres::PgSslMode::Require
+        ));
+        assert!(matches!(
+            tenant_db_ssl_mode("postgres://localhost/postgres?sslmode=prefer"),
+            sqlx::postgres::PgSslMode::Require
+        ));
+        assert!(matches!(
+            tenant_db_ssl_mode("postgres://localhost/postgres?sslmode=verify-full"),
+            sqlx::postgres::PgSslMode::VerifyFull
+        ));
     }
 
     #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
@@ -4476,6 +4541,7 @@ mod tests {
     #[cfg(all(feature = "mcp-http", feature = "tenant-registry-postgres"))]
     #[tokio::test]
     async fn postgres_tenant_snapshot_loads_active_rows_from_db_table() {
+        let _guard = acquire_mcp_http_env();
         let db_url = match std::env::var(NEXUS_MCP_TENANT_DB_URL_ENV) {
             Ok(url) if !url.trim().is_empty() => url,
             _ => return,
@@ -4507,13 +4573,14 @@ mod tests {
 
         let active_key = sha256_hex("postgres-active-key");
         let revoked_key = sha256_hex("postgres-revoked-key");
+        let active_rate_limit_rpm: i64 = 180;
         let insert = format!(
             "INSERT INTO {relation} (key_sha256, workspace_id, rate_limit_rpm, status) VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)"
         );
         if sqlx::query(&insert)
             .bind(active_key.clone())
             .bind("tenant-acme")
-            .bind(Option::<i64>::None)
+            .bind(Option::<i64>::Some(active_rate_limit_rpm))
             .bind("active")
             .bind(revoked_key)
             .bind("tenant-old")
@@ -4542,10 +4609,23 @@ mod tests {
             .get(&active_key)
             .expect("active key must be present in snapshot");
         assert_eq!(tenant.tenant_id, "tenant-acme");
-        assert_eq!(
-            tenant.rate_limit_rpm,
-            NEXUS_MCP_HTTP_DEFAULT_TENANT_RATE_LIMIT_RPM
-        );
+        assert_eq!(tenant.rate_limit_rpm, active_rate_limit_rpm as u64,);
+
+        let state = build_tenant_auth_state_from_snapshot(snapshot);
+        let authorized = call_tenant_route(
+            Some(state),
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer postgres-active-key",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(authorized.status(), StatusCode::OK);
     }
 
     #[cfg(feature = "mcp-http")]
