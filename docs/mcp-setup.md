@@ -214,6 +214,71 @@ Planned follow-up:
 - Stronger execution isolation between tenants.
 - Execution/mutation actions and workflow isolation controls.
 
+## P2.5 — dynamic tenant registry (Postgres)
+
+P2.5 keeps the file-based tenant registry as the default source and adds a
+runtime PostgreSQL-backed source with short-TTL snapshot refresh and strict
+fail-closed behavior.
+
+Tenant registry source selection:
+
+- `NEXUS_MCP_TENANT_SOURCE`
+  - `file` (default): load from `NEXUS_MCP_HTTP_TENANTS`.
+  - `postgres`: load from PostgreSQL via `NEXUS_MCP_TENANT_DB_URL`.
+
+Additional PostgreSQL configuration:
+
+- `NEXUS_MCP_TENANT_DB_URL` — PostgreSQL URL (read-only role required).
+- `NEXUS_MCP_TENANT_DB_RELATION` — relation name to read (default `api_keys`).
+- `NEXUS_MCP_TENANT_REFRESH_SECS` — refresh interval in seconds (default `20`).
+- `NEXUS_MCP_TENANT_MAX_STALE_SECS` — max age before an unrefreshed snapshot is
+  replaced with empty (default `60`).
+
+Contract that Nexus reads:
+
+```sql
+SELECT key_sha256, workspace_id, rate_limit_rpm
+FROM api_keys -- or active_api_keys when available
+WHERE status = 'active';
+```
+
+Source expectations:
+
+- `key_sha256` is the lowercase hex SHA-256 digest of the API key.
+- `workspace_id` maps to the tenant id.
+- `rate_limit_rpm` is optional nullable integer; blank/null defaults to `60`.
+
+Nexus prefers a view named `active_api_keys` when `api_keys` is requested and
+`active_api_keys` exists, then falls back to the relation configured by
+`NEXUS_MCP_TENANT_DB_RELATION` with `WHERE status='active'`.
+
+Security requirements:
+
+- Only API key hashes are stored/compared; raw keys are never stored.
+- PostgreSQL role must be read-only (`SELECT` only).
+- Request hot-path never hits the database directly.
+
+Suggested least-privilege GRANT (read-only role):
+
+```sql
+CREATE ROLE nexus_mcp_registry_ro LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE your_db TO nexus_mcp_registry_ro;
+GRANT USAGE ON SCHEMA public TO nexus_mcp_registry_ro;
+GRANT SELECT ON TABLE public.api_keys TO nexus_mcp_registry_ro;
+-- If using the preferred view:
+GRANT SELECT ON TABLE public.active_api_keys TO nexus_mcp_registry_ro;
+```
+
+Fail-closed behavior:
+
+- If lookup misses, request is denied with `401`.
+- If a refresh fails, Nexus keeps the last successful snapshot until it reaches
+  `NEXUS_MCP_TENANT_MAX_STALE_SECS`, then the snapshot becomes empty and all
+  requests are denied.
+- If the very first refresh fails (including startup DB failures), the snapshot is
+  empty and Nexus starts in fail-closed mode (all requests denied until data is
+  loaded successfully).
+
 ## Capability Allowlist
 
 WASI capability requests need either a parent token or an operator allowlist.
